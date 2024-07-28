@@ -129,9 +129,9 @@ object TypeChecker {
         for {
           (funType, insts) <- infer(fun)
           simplifiedFun <- EitherT.liftF(simplifyType(funType))
-          (ty, solutions) <- inferApp(simplifiedFun, arg)
+          (ty, (appInsts, solutions)) <- inferApp(simplifiedFun, arg)
           inst <- Instantiations.build(fun, solutions)
-        } yield (ty, insts ::: inst)
+        } yield (ty, insts ::: appInsts ::: inst)
       case TermProj(info, ty, label) =>
         for {
           (tyT1, insts) <- pureInfer(ty)
@@ -323,30 +323,32 @@ object TypeChecker {
   def inferApp(
       funType: Type,
       exp: Term
-  ): StateEither[(Type, List[TypeESolutionBind])] =
+  ): StateEither[(Type, (List[Instantiation], List[TypeESolutionBind]))] =
     def iter(
         funType: Type,
         exp: Term,
-        acc: List[TypeESolutionBind]
-    ): StateEither[(Type, List[TypeESolutionBind])] =
+        acc: (List[Instantiation], List[TypeESolutionBind])
+    ): StateEither[(Type, (List[Instantiation], List[TypeESolutionBind]))] =
       funType match {
         case TypeAll(info, _, _, cls, tpe) =>
           for {
             eV <- EitherT.liftF(addEVar("a", exp.info, TypeEFreeBind, cls))
             reduced = typeSubstituteTop(eV, tpe)
-            (ty, sols) <- iter(reduced, exp, acc)
-          } yield (ty, acc ::: sols)
+            (ty, (insts, solutions)) <- iter(reduced, exp, acc)
+          } yield (ty, (acc._1 ::: insts, acc._2 ::: solutions))
         case eA: TypeEVar =>
           for {
             (a1, a2, _) <- insertEArrow(eA)
             (insts, solutions) <- check(exp, a1)
-          } yield (a2, acc ::: solutions)
+          } yield (a2, (acc._1 ::: insts, acc._2 ::: solutions))
         case TypeArrow(_, argT, restT) =>
-          check(exp, argT).map(v => (restT, (acc ::: v._2)))
+          check(exp, argT).map { case (insts, solutions) =>
+            (restT, (acc._1 ::: insts, acc._2 ::: solutions))
+          }
         case _ =>
           TypeError.format(VariableNotFunctionTypeError(exp.info, funType))
       }
-    iter(funType, exp, List())
+    iter(funType, exp, (List(), List()))
 
   def inferMethod(
       ty: Type,

@@ -110,4 +110,14 @@ object GrinUtils {
           throw new RuntimeException(e)
       }
     )
+
+  case class PrimOp(t: String, op: String)
+
+  object PrimOp:
+    def unapply(s: String): Option[PrimOp] =
+      val pattern = """!(.*)#(\w+)#(\w+)""".r
+      s match {
+        case pattern(_, ty, op) => Some(PrimOp(ty, op.toLowerCase))
+        case _                  => None
+      }
 }

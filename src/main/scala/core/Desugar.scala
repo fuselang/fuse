@@ -14,6 +14,7 @@ import parser.Identifiers.*
 import parser.Info.ShowInfo.*
 import parser.Info.*
 import parser.Types.*
+import core.BuiltIn.*
 
 // TODO: Add constants for prefixes for specific names in the context.
 
@@ -326,15 +327,32 @@ object Desugar {
           computedTerm <- toTermApp(typedTerm, args)
         } yield computedTerm
       case a: FAbs => toClosure(a, letVariable)
-      case FMultiplication(i1, i2) =>
-        toTermOperator("&multiply", i1, i2)
-      // TODO: Add other operators.
       case FAddition(i1, i2) =>
-        toTermOperator("+", i1, i2)
+        toTermOperator(AddOp.operator, i1, i2)
       case FSubtraction(i1, i2) =>
-        toTermOperator("&sub", i1, i2)
+        toTermOperator(SubOp.operator, i1, i2)
+      case FMultiplication(i1, i2) =>
+        toTermOperator(MulOp.operator, i1, i2)
+      case FDivision(i1, i2) =>
+        toTermOperator(DivOp.operator, i1, i2)
+      case FModulo(i1, i2) =>
+        toTermOperator(ModOp.operator, i1, i2)
       case FEquality(i1, i2) =>
-        toTermOperator("&eq", i1, i2)
+        toTermOperator(EqOp.operator, i1, i2)
+      case FNotEquality(i1, i2) =>
+        toTermOperator(NotEqOp.operator, i1, i2)
+      case FLessThan(i1, i2) =>
+        toTermOperator(LessThanOp.operator, i1, i2)
+      case FLessThanEqual(i1, i2) =>
+        toTermOperator(LessThanEqOp.operator, i1, i2)
+      case FGreaterThan(i1, i2) =>
+        toTermOperator(GreaterThanOp.operator, i1, i2)
+      case FGreaterThanEqual(i1, i2) =>
+        toTermOperator(GreaterThanEqOp.operator, i1, i2)
+      case FAnd(i1, i2) =>
+        toTermOperator(AndOp.operator, i1, i2)
+      case FOr(i1, i2) =>
+        toTermOperator(OrOp.operator, i1, i2)
       case FVar(info, i) =>
         EitherT
           .liftF(toTermVar(info, i))

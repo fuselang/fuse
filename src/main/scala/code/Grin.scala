@@ -584,11 +584,9 @@ object Grin {
 
   def toVariable(idx: Integer): ContextState[String] =
     getNameFromIndex(idx).map(_ match {
-      case "!+#i32#Add" => "_prim_int_add"
-      case "&eq"        => "_prim_int_eq"
-      case "&multiply"  => "_prim_int_mul"
-      case "print"      => "_prim_string_print"
-      case "int_to_str" => "_prim_int_str"
+      case PrimOp(ty, op) => s"_prim_${ty}_${op}"
+      case "print"        => "_prim_string_print"
+      case "int_to_str"   => "_prim_int_str"
       case v if v.startsWith(Desugar.RecursiveFunctionParamPrefix) =>
         v.stripPrefix(Desugar.RecursiveFunctionParamPrefix)
       case v if v.startsWith(Desugar.MethodNamePrefix) => methodToName(v)

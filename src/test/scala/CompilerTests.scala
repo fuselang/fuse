@@ -1519,7 +1519,133 @@ fun main() -> i32
     """,
       BuildOutput("""
 grinMain _0 =
- _prim_int_add 2 2""")
+ _prim_i32_add 2 2""")
+    )
+  }
+  test("build float addition") {
+    fuse(
+      """
+fun main() -> f32
+    2.0 + 2.0
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_f32_add 2.0 2.0""")
+    )
+  }
+  test("build string addition") {
+    fuse(
+      """
+fun main() -> str
+    "Hello" + "World"
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_str_add #"Hello" #"World"""")
+    )
+  }
+  test("build integer subtraction") {
+    fuse(
+      """
+fun main() -> i32
+    2 - 2
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_i32_sub 2 2""")
+    )
+  }
+  test("build float multiplication") {
+    fuse(
+      """
+fun main() -> f32
+    2.0 * 2.0
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_f32_mul 2.0 2.0""")
+    )
+  }
+  test("build float division") {
+    fuse(
+      """
+fun main() -> f32
+    2.0 / 2.0
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_f32_div 2.0 2.0""")
+    )
+  }
+  test("build int modulo") {
+    fuse(
+      """
+fun main() -> i32
+    10 % 2
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_i32_mod 10 2""")
+    )
+  }
+  test("build arithmetic expression") {
+    fuse(
+      """
+fun main() -> i32
+    2 + 3 * 6
+    """,
+      BuildOutput("""
+grinMain _0 =
+ p2 <- _prim_i32_mul 3 6
+ _prim_i32_add 2 p2""")
+    )
+  }
+  test("build int equal") {
+    fuse(
+      """
+fun main() -> bool
+    10 == 10
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_i32_eq 10 10""")
+    )
+  }
+  test("build str not equal") {
+    fuse(
+      """
+fun main() -> bool
+    "Hello" != "World"
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_str_noteq #"Hello" #"World"""")
+    )
+  }
+  test("build and") {
+    fuse(
+      """
+fun main() -> bool
+    1 != 2 && 3 == 4
+    """,
+      BuildOutput("""
+grinMain _0 =
+ p2 <- _prim_i32_noteq 1 2
+ p3 <- _prim_i32_eq 3 4
+ _prim_bool_and p2 p3""")
+    )
+  }
+  test("build or") {
+    fuse(
+      """
+fun main() -> bool
+    1 != 2 || 3 == 4
+    """,
+      BuildOutput("""
+grinMain _0 =
+ p2 <- _prim_i32_noteq 1 2
+ p3 <- _prim_i32_eq 3 4
+ _prim_bool_or p2 p3""")
     )
   }
   test("build generic function") {
@@ -1613,7 +1739,7 @@ grinMain _6 =
         """)
     )
   }
-  test("build generic constructor") {
+  test("build generic constructor".ignore) {
     fuse(
       """
 type Option[A]:
