@@ -21,7 +21,8 @@ object Instantiations {
       i: String,
       term: Term,
       tys: List[Type],
-      cls: List[TypeClass] = List()
+      cls: List[TypeClass] = List(),
+      r: Option[Int] = None
   ) {
     def bindName(): StateEither[String] =
       // NOTE: When class is set on the instantiation it points to a type
@@ -56,4 +57,5 @@ object Instantiations {
 
   def distinct(insts: List[Instantiation]): List[Instantiation] =
     insts.distinctBy(inst => (inst.i, inst.tys))
+
 }

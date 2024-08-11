@@ -1739,6 +1739,50 @@ grinMain _6 =
         """)
     )
   }
+//   test("build simple trait") {
+//     fuse(
+//       """
+// trait Summary:
+//   fun summarize(self) -> str;
+
+// type Tweet:
+//   username: str
+//   content: str
+
+// impl Summary for Tweet:
+//   fun summarize(self) -> str
+//     self.username + ": " + self.content
+
+// fun notify[T: Summary](s: T) -> Unit
+//   print("Breaking news! " + s.summarize())
+
+// fun main() -> i32
+//     let tweet = Tweet("elon", "work!")
+//     print(tweet.summarize())
+//     notify(tweet)
+//     0
+//         """,
+//       BuildOutput("")
+//     )
+//   }
+  test("build addition type bounds") {
+    fuse(
+      """
+fun plus[T: Add](a: T, b: T) -> T
+  a + b
+
+fun main() -> i32
+  plus(2, 3)
+        """,
+      BuildOutput("""
+plusi32Add' a0 b1 =
+ _prim_i32_add a0 b1
+
+grinMain _2 =
+ plusi32Add' 2 3
+       """)
+    )
+  }
   test("build generic constructor".ignore) {
     fuse(
       """

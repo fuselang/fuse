@@ -11,6 +11,7 @@ import core.Terms.*
 import core.TypeChecker
 import core.Types.*
 import parser.Info.UnknownInfo
+import core.BuiltIn
 
 object GrinUtils {
   val dummyType = TypeUnit(UnknownInfo)
@@ -114,10 +115,12 @@ object GrinUtils {
   case class PrimOp(t: String, op: String)
 
   object PrimOp:
+    val BuiltInOps = BuiltIn.Ops.map(_.operator)
     def unapply(s: String): Option[PrimOp] =
       val pattern = """!(.*)#(\w+)#(\w+)""".r
       s match {
-        case pattern(_, ty, op) => Some(PrimOp(ty, op.toLowerCase))
-        case _                  => None
+        case pattern(op, ty, cls) if BuiltInOps.contains(op) =>
+          Some(PrimOp(ty, cls.toLowerCase))
+        case _ => None
       }
 }

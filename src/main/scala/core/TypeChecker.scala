@@ -1069,7 +1069,7 @@ object TypeChecker {
               )
             case _ =>
               EitherT.liftF(
-                replaceEVar(idx, eA, TypeESolutionBind(ty, implCls))
+                replaceEVar(idx, eA, TypeESolutionBind(ty, union(implCls, cls)))
               )
           }
         } yield v

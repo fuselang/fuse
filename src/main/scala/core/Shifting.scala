@@ -25,7 +25,8 @@ object Shifting {
           i.i,
           termShiftAbove(d, c, i.term),
           i.tys.map(typeShiftAbove(d, c, _)),
-          i.cls
+          i.cls,
+          i.r
         )
       )
     )

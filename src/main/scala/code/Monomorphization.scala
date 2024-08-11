@@ -134,6 +134,8 @@ object Monomorphization {
     bind.b match {
       case TermAbbBind(term: TermTAbs, ty) =>
         for {
+          // TODO: Use different bind names for specialized binds, to escape collisions
+          // with type instance (built-in) named binds.
           name <- toContextState(inst.bindName())
           ctxLength <- State.inspect { (ctx: Context) => ctx._1.length }
           binding = TermAbbBind(
@@ -142,12 +144,26 @@ object Monomorphization {
             },
             ty.map(specializeType(_, inst.tys, ctxLength - idx))
           )
-          insts = bind.insts.map(i =>
-            Instantiation(
+          insts <- bind.insts.traverse(i =>
+            val i2 = Instantiation(
               i.i,
-              i.term,
+              termShiftAbove(-1, ctxLength, i.term),
               i.tys.map(specializeType(_, inst.tys, ctxLength - idx)),
               i.cls
+            )
+            // Try to resolve the resulting index of a instantation binding when
+            // specilizing the binding. As resulting method might already exist
+            // in the context. Providing the result while iterating & adding
+            // bindings instead of doing at the `replaceInstantiations` phase.
+            for {
+              n <- toContextState(i2.bindName())
+              tIdx <- State.inspect { (ctx: Context) => nameToIndex(ctx, n) }
+            } yield Instantiation(
+              i2.i,
+              i2.term,
+              i2.tys,
+              i2.cls,
+              tIdx.map(_ + 1)
             )
           )
         } yield Bind(name, binding, insts)
@@ -186,7 +202,7 @@ object Monomorphization {
       tyS: Type
   ): Term =
     term match {
-      case TermTAbs(info, i, _, body) =>
+      case TermTAbs(_, _, _, body) =>
         termSubstituteType(tyS, typeVarIndex, body)
       case _ =>
         throw new RuntimeException(s"can't specialize term ${term}")
@@ -217,14 +233,14 @@ object Monomorphization {
   def replaceInstantiations(bind: Bind): ContextState[Bind] =
     bind.insts.foldM(bind)((acc, inst) =>
       for {
-        specializedBindName <- toContextState(inst.bindName())
-        specializedBindIndex <- State.inspect { (ctx: Context) =>
-          nameToIndex(ctx, specializedBindName)
+        specBindName <- toContextState(inst.bindName())
+        specBindIndex <- State.inspect { (ctx: Context) =>
+          nameToIndex(ctx, specBindName)
         }
         (replacedBinding, insts) = (
           acc.b,
           inst.term,
-          specializedBindIndex
+          inst.r.orElse(specBindIndex)
         ) match {
           case (TermAbbBind(tT, ty), tC: TermVar, Some(s)) =>
             (
