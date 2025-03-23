@@ -13,6 +13,7 @@ import core.TypeChecker.*
 import core.Types.*
 import parser.Info.Info
 import core.Desugar.MethodNamePrefix
+import parser.Info.ShowInfo.ShowInfoOps
 
 object Instantiations {
   val BindTypeSeparator = "#"
@@ -25,14 +26,20 @@ object Instantiations {
       r: Option[Int] = None
   ) {
     def bindName(): StateEither[String] =
-      // NOTE: When class is set on the instantiation it points to a type
-      // instances's method. Hence we need to add a method prefix.
-      val methodPrefix = if cls.isEmpty then "" else MethodNamePrefix
-      tys
-        .traverse(Representation.typeToString(_))
-        .map(t =>
-          s"$methodPrefix${i}$BindTypeSeparator${(t ++ cls.map(_.name)).mkString(BindTypeSeparator)}"
-        )
+      for {
+        typeNames <- tys
+          .traverse(Representation.typeToString(_))
+          .map(_.mkString(BindTypeSeparator))
+        baseName = s"$i$BindTypeSeparator$typeNames"
+        name = cls match {
+          // NOTE: When class is set on the instantiation it points to a type
+          // instances's method. Hence we need to add a method prefix.
+          case v if v.length > 0 =>
+            val cls = v.map(_.name).mkString(BindTypeSeparator)
+            s"$MethodNamePrefix$baseName$BindTypeSeparator$cls"
+          case _ => baseName
+        }
+      } yield name
   }
 
   def build(

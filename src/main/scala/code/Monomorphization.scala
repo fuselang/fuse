@@ -20,6 +20,7 @@ import core.Context
 import core.Shifting.*
 import parser.Info.UnknownInfo
 import core.Desugar.toTypeInstanceMethodID
+import code.GrinUtils.toContextStateOption
 
 object Monomorphization {
 
@@ -51,7 +52,7 @@ object Monomorphization {
           // Replace each generic function invocation with a specialized function.
           modifiedBinds <- specializedBinds.traverse(replaceInstantiations(_))
           // Do a recursive replace until no generic instantiations are found.
-          ibinds <- replaceM(modifiedBinds)
+          ibinds = replace(modifiedBinds)
         } yield ibinds
     }
 
@@ -79,9 +80,12 @@ object Monomorphization {
               val sbind = shifts.foldLeft(bind) { (b, s) =>
                 bindShift(s.d, b, s.c)
               }
-              addBinding(sbind.i, sbind.b).map(_ =>
-                (binds :+ sbind, incrShifts(shifts))
-              )
+              for {
+                _ <- addBinding(sbind.i, sbind.b)
+                sInsts <- sbind.insts
+                  .traverse(instantantionShiftOnContextDiff(_))
+                b = binds :+ Bind(sbind.i, sbind.b, sInsts)
+              } yield (b, incrShifts(shifts))
             case i =>
               i.zipWithIndex
                 .traverse((inst, idx) =>
@@ -100,7 +104,7 @@ object Monomorphization {
       }
       .map(_._1)
 
-  /** Finds all bind instantiations in a specified list.
+  /** Finds all bind instantiations from a specified list.
     *
     * In case bind is:
     *   - an ADT all instantiations for that type are associated to it
@@ -121,10 +125,32 @@ object Monomorphization {
               _.map(_ == typeName).getOrElse(false)
             )
           )
-          .map(_.map(i => Instantiation(bind.i, i.term, i.tys, i.cls)))
+          .map(_.map(i => Instantiation(bind.i, i.term, i.tys, i.cls, i.r)))
           .map(Instantiations.distinct(_))
     }
-  } yield bindInsts.filter(_.tys.forall(_.isPrimitive))
+    // Collect only primitive types for bind instantiations. As complex
+    // types will be reducted in the subsequent iterations.
+    filteredBindInsts <- bindInsts
+      .filter(_.tys.forall(_.isPrimitive))
+      .filterA(
+        instantantionShiftOnContextDiff(_, -1)
+          .flatMap(
+            _.tys
+              .traverse {
+                case TypeVar(info, index, length) =>
+                  for {
+                    b <- toContextStateOption(getBinding(info, index))
+                    isPrimType = b match {
+                      case Some(TypeAbbBind(t, k)) => t.isPrimitive
+                      case _                       => false
+                    }
+                  } yield isPrimType
+                case _ => true.pure[ContextState]
+              }
+          )
+          .map(_.forall(identity))
+      )
+  } yield filteredBindInsts
 
   def buildSpecializedBind(
       bind: Bind,
@@ -134,35 +160,36 @@ object Monomorphization {
     bind.b match {
       case TermAbbBind(term: TermTAbs, ty) =>
         for {
+          shiftedInst <- instantantionShiftOnContextDiff(inst, -1)
           // TODO: Use different bind names for specialized binds, to escape collisions
           // with type instance (built-in) named binds.
-          name <- toContextState(inst.bindName())
-          ctxLength <- State.inspect { (ctx: Context) => ctx._1.length }
+          name <- toContextState(shiftedInst.bindName())
+          ctxlen <- State.inspect { (ctx: Context) => ctx._1.length }
           binding = TermAbbBind(
-            inst.tys.zipWithIndex.foldRight(term: Term) { case ((ty, idx), t) =>
-              specializeTerm(t, idx, ty)
+            shiftedInst.tys.zipWithIndex.foldRight(term: Term) {
+              case ((ty, idx), t) =>
+                specializeTerm(t, idx, ty)
             },
-            ty.map(specializeType(_, inst.tys, ctxLength - idx))
+            ty.map(specializeType(_, shiftedInst.tys, ctxlen - idx))
           )
           insts <- bind.insts.traverse(i =>
-            val i2 = Instantiation(
-              i.i,
-              termShiftAbove(-1, ctxLength, i.term),
-              i.tys.map(specializeType(_, inst.tys, ctxLength - idx)),
-              i.cls
-            )
-            // Try to resolve the resulting index of a instantation binding when
-            // specilizing the binding. As resulting method might already exist
-            // in the context. Providing the result while iterating & adding
-            // bindings instead of doing at the `replaceInstantiations` phase.
+            // Try to resolve the resulting index of an instantation binding when
+            // specilizing the binding (this phase). As target method might
+            // already exist in the context, the resulting index is resolved while
+            // iterating and adding (spec) bindings instead of doing it at the
+            // `replaceInstantiations` phase.
+            // NOTE: Because this logic is the only one that works! :P
+            // Taking the indexes while building the specialized binding will get
+            // us the correct values, otherwise the shifting would lose the
+            // neccessary information on _replacing_ phase.
             for {
-              n <- toContextState(i2.bindName())
+              n <- toContextState(i.bindName())
               tIdx <- State.inspect { (ctx: Context) => nameToIndex(ctx, n) }
             } yield Instantiation(
-              i2.i,
-              i2.term,
-              i2.tys,
-              i2.cls,
+              i.i,
+              termShiftAbove(-1, ctxlen, i.term),
+              i.tys.map(specializeType(_, shiftedInst.tys, ctxlen - idx)),
+              i.cls,
               tIdx.map(_ + 1)
             )
           )
@@ -178,6 +205,9 @@ object Monomorphization {
        * It seems like we should specialize the class method in case it's a
        * ganeric function. In a simple function case we can just use a
        * type instance impl.
+       *
+       * EDIT: I don't think even this is required, as the generic method
+       * will be implemented by the type instance implementation.
        * */
       case TermAbbBind(TermClassMethod(_, _, cls), ty) =>
         bind.pure
@@ -224,6 +254,7 @@ object Monomorphization {
          * */
         val c = (tyT.length - ctxLength) - idx - 1
         typeSubstitute(tyS, c, tyT)
+      case _ if ty.isPrimitive => ty
       case _ => throw new RuntimeException(s"can't specialize type ${ty}")
     }
 
@@ -234,8 +265,8 @@ object Monomorphization {
     bind.insts.foldM(bind)((acc, inst) =>
       for {
         specBindName <- toContextState(inst.bindName())
-        specBindIndex <- State.inspect { (ctx: Context) =>
-          nameToIndex(ctx, specBindName)
+        (specBindIndex, ctxlen) <- State.inspect { (ctx: Context) =>
+          (nameToIndex(ctx, specBindName), ctx._1.length)
         }
         (replacedBinding, insts) = (
           acc.b,
@@ -243,13 +274,17 @@ object Monomorphization {
           inst.r.orElse(specBindIndex)
         ) match {
           case (TermAbbBind(tT, ty), tC: TermVar, Some(s)) =>
+            // NOTE: Use the context length in the term substitute method
+            // only in case the instantiation doesn't have a pre-computed
+            // resulting index to use — that was calculated on the
+            // specialized binding phase.
+            val d = if (inst.r.isDefined) None else Some(ctxlen)
             (
-              TermAbbBind(termVarSubstitute(s, tC, tT), ty),
+              TermAbbBind(termVarSubstitute(s, d, tC, tT), ty),
               bind.insts.filterNot(_ == inst)
             )
           case (b, _, _) => (b, bind.insts)
         }
       } yield Bind(bind.i, replacedBinding, insts)
     )
-
 }

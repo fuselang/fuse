@@ -66,13 +66,14 @@ object Shifting {
       t
     )
 
-  /** Substitutes `tC` instance with `TermVar` having `s` index in provided `tT`
-    * term .
+  /** Substitutes `tC: TermVar` instance with `tS: TermVar` in provided `tT`
+    * term.
     */
-  def termVarSubstitute(s: Int, tC: TermVar, tT: Term): Term =
+  def termVarSubstitute(s: Int, d: Option[Int], tC: TermVar, tT: Term): Term =
     termMap(
       (info, j, x, n) =>
-        if (tC.info == info && tC.i1 == x) TermVar(info, s + j - 1, n)
+        if (tC.info == info && tC.i1 == x)
+          TermVar(info, s + d.map(n - _).getOrElse(j - 1), n)
         else TermVar(info, x, n),
       (_, ty) => ty,
       0,

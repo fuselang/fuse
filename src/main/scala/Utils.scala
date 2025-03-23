@@ -2,6 +2,7 @@ package fuse
 
 import parser.Info.*
 import cats.implicits.*
+import scala.quoted.*
 
 object Utils {
   def consoleError(message: String, info: Info, code: Option[String] = None) = {
@@ -19,4 +20,6 @@ object Utils {
 
   def difference[T](s1: List[T], s2: List[T]): List[T] =
     (s1.toSet.diff(s2.toSet)).toList
+
+  def debug(l: String, v: Any): Unit = println(s"${l}: ${v.toString}")
 }

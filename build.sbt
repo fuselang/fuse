@@ -1,6 +1,6 @@
 // Define common settings for all platforms
 val sharedSettings = Seq(
-  scalaVersion := "3.4.0",
+  scalaVersion := "3.6.4",
   name := "fuse",
   version := "0.1",
   scalacOptions ++= Seq(
@@ -12,12 +12,12 @@ val sharedSettings = Seq(
     "-language:postfixOps"
   ),
   libraryDependencies += "org.parboiled" %%% "parboiled" % "2.5.0",
-  libraryDependencies += "org.typelevel" %%% "cats-core" % "2.10.0",
-  libraryDependencies += "org.typelevel" %%% "cats-effect" % "3.5.2" withSources () withJavadoc (),
-  libraryDependencies += "com.monovore" %%% "decline" % "2.4.1",
-  libraryDependencies += "com.monovore" %%% "decline-effect" % "2.4.1",
+  libraryDependencies += "org.typelevel" %%% "cats-core" % "2.13.0",
+  libraryDependencies += "org.typelevel" %%% "cats-effect" % "3.5.7" withSources () withJavadoc (),
+  libraryDependencies += "com.monovore" %%% "decline" % "2.5.0",
+  libraryDependencies += "com.monovore" %%% "decline-effect" % "2.5.0",
   libraryDependencies += "com.lihaoyi" %%% "fansi" % "0.4.0",
-  libraryDependencies += "org.scalameta" %%% "munit" % "1.0.0-M6" % Test,
+  libraryDependencies += "org.scalameta" %%% "munit" % "1.0.4" % Test,
   testFrameworks += new TestFramework("munit.Framework")
 )
 

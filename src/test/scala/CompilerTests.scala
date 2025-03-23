@@ -1739,32 +1739,112 @@ grinMain _6 =
         """)
     )
   }
-//   test("build simple trait") {
-//     fuse(
-//       """
-// trait Summary:
-//   fun summarize(self) -> str;
+  test("build function with params using generics") {
+    fuse(
+      """
+fun summarize(a: str, b: str) -> str
+  a + b
 
-// type Tweet:
-//   username: str
-//   content: str
+fun main() -> i32
+    let s = summarize("Hello", "World")
+    print(s)
+    0
+        """,
+      BuildOutput("""
+summarize a0 b1 =
+ _prim_str_add a0 b1
 
-// impl Summary for Tweet:
-//   fun summarize(self) -> str
-//     self.username + ": " + self.content
+grinMain _2 =
+ s4 <-  summarize #"Hello" #"World"
+ _6 <-  _prim_string_print s4
+ pure 0
+        """)
+    )
+  }
+  test("build multiple functions using generics") {
+    fuse(
+      """
+fun summarize(a: str, b: str) -> str
+  a + ": " + b
 
-// fun notify[T: Summary](s: T) -> Unit
-//   print("Breaking news! " + s.summarize())
+fun addition[T: Add](a: T, b: T) -> T
+  a + b
+  
+fun main() -> i32
+    let s = summarize("Hello", "World")
+    let a = addition(2, 3)
+    print(s)
+    a
+        """,
+      BuildOutput("""
+summarize a0 b1 =
+ p3 <- _prim_str_add a0 #": "
+ _prim_str_add p3 b1
 
-// fun main() -> i32
-//     let tweet = Tweet("elon", "work!")
-//     print(tweet.summarize())
-//     notify(tweet)
-//     0
-//         """,
-//       BuildOutput("")
-//     )
-//   }
+additioni32Add' a3 b4 =
+ _prim_i32_add a3 b4
+
+grinMain _5 =
+ s7 <-  summarize #"Hello" #"World"
+ a9 <-  additioni32Add' 2 3
+ _11 <-  _prim_string_print s7
+ pure a9
+        """)
+    )
+  }
+  test("build simple trait") {
+    fuse(
+      """
+trait Summary:
+  fun summarize(self) -> str;
+
+type Tweet:
+  username: str
+  content: str
+
+impl Summary for Tweet:
+  fun summarize(self) -> str
+    self.username + ": " + self.content
+
+fun notify[T: Summary](s: T) -> Unit
+  print("Breaking news! " + s.summarize())
+
+fun main() -> i32
+    let tweet = Tweet("elon", "work!")
+    print(tweet.summarize())
+    notify(tweet)
+    0
+        """,
+      BuildOutput("""
+Tweet username0 content1 =
+ pure (CTweet username0 content1)
+
+summarizeTweetSummary' self4 =
+ p9 <- do
+   case self4 of
+    (CTweet p7 p8) ->
+     pure p7
+ p10 <- _prim_str_add p9 #": "
+ p14 <- do
+   case self4 of
+    (CTweet p12 p13) ->
+     pure p13
+ _prim_str_add p10 p14
+
+notifyTweetSummary' s14 =
+ p17 <- summarizeTweetSummary' s14
+ p18 <- _prim_str_add #"Breaking news! " p17
+ _prim_string_print p18
+
+grinMain _18 =
+ tweet20 <-  Tweet #"elon" #"work!"
+ p23 <- summarizeTweetSummary' tweet20
+ _25 <-  _prim_string_print p23
+ _27 <-  notifyTweetSummary' tweet20
+ pure 0
+        """)
+    )
+  }
   test("build addition type bounds") {
     fuse(
       """

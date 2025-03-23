@@ -14,6 +14,7 @@ import scala.annotation.tailrec
 import scala.util.*
 
 import Shifting.*
+import core.Instantiations.Instantiation
 
 object Context {
   type Note = (String, Binding)
@@ -153,6 +154,16 @@ object Context {
         .map((n, idx) => (n, idx, notes.length))
     }
 
+  def instantantionShiftOnContextDiff(
+      inst: Instantiation,
+      d: Int = 0
+  ): ContextState[Instantiation] =
+    inst.tys
+      .traverse(typeShiftOnContextDiff(_).map(typeShift(d, _)))
+      .map(
+        Instantiation(inst.i, inst.term, _, inst.cls, inst.r)
+      )
+
   /** Shifts type based on the difference between TypeVar length and current
     * length of the context.
     *
@@ -201,17 +212,11 @@ object Context {
       .flatMap(_.traverse(typeShiftOnContextDiff(_)))
 
   /** Retrieves type classes that implement given type. */
-  def getTypeInstances(t: TypeVar): ContextState[List[TypeClass]] =
+  def getTypeInstances(typeName: String): ContextState[List[TypeClass]] =
     State.inspect { (ctx: Context) =>
       getNotes(ctx).foldLeft(List[TypeClass]()) {
-        case (acc, (_, TypeClassInstanceBind(cls, tc: TypeVar, _)))
-            // NOTE: Because the type class instance bind type var isn't
-            // shifted we can instead calculate if its equal to the _current_
-            // type var by including the context length into the calculation
-            // i.e. by taking the difference between the context length and
-            // adding it up to the current index type var (the diff would
-            // usually be negative).
-            if tc.index == (t.index + tc.length - t.length) =>
+        case (acc, (binding, TypeClassInstanceBind(cls, tc: TypeVar, _)))
+            if Desugar.toTypeInstanceBindID(cls, typeName) == binding =>
           TypeClass(tc.info, cls) :: acc
         case (acc, _) => acc
       }
@@ -250,7 +255,7 @@ object Context {
       case Some(idx) => getType(info, idx)
       case None =>
         for {
-          cls <- EitherT.liftF(getTypeInstances(rootTypeVar))
+          cls <- EitherT.liftF(getTypeInstances(typeName))
           tys <- cls.traverse(
             getTypeClassMethodType(_, method)
               .map(Some(_))

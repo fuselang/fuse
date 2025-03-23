@@ -18,6 +18,7 @@ object Types {
 
   case class TypeVar(info: Info, index: Integer, length: Integer) extends Type {
     def containsEVar(eV: TypeEVar): Boolean = false
+    override def isPrimitive: Boolean = true
   }
   case class TypeEVar(info: Info, name: String, cls: List[TypeClass] = List())
       extends Type {
@@ -39,16 +40,18 @@ object Types {
     override def isPrimitive: Boolean = true
     def containsEVar(eV: TypeEVar): Boolean = false
   }
-  // TODO: Add `isPrimitive` imp for `TypeRecord` & `TypeVariant` (?)
   case class TypeRecord(info: Info, f: List[(String, Type)]) extends Type {
     def containsEVar(eV: TypeEVar): Boolean =
       f.unzip._2.exists(_.containsEVar(eV))
+    override def isPrimitive: Boolean = f.unzip._2.forall(_.isPrimitive)
   }
   case class TypeVariant(info: Info, v: List[(String, Type)]) extends Type {
     def containsEVar(eV: TypeEVar): Boolean =
       v.unzip._2.exists(_.containsEVar(eV))
+    override def isPrimitive: Boolean = v.unzip._2.forall(_.isPrimitive)
   }
   case class TypeRec(info: Info, v: String, k: Kind, t: Type) extends Type {
+    override def isPrimitive: Boolean = t.isPrimitive
     def containsEVar(eV: TypeEVar): Boolean = t.containsEVar(eV)
   }
   case class TypeAll(

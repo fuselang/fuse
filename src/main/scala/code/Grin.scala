@@ -396,8 +396,16 @@ object Grin {
           tyT1 <- typeCheck(t)
           tyT1S <- TypeChecker.simplifyType(tyT1)
           typeName <- getNameFromType(tyT1)
-          f = methodToName(Desugar.toMethodID(method, typeName))
-        } yield Value(s"$f")
+          instances <- getTypeInstances(typeName)
+          cls <- instances.findM(c =>
+            getTypeClassMethods(c.name).map(_.exists(_ == method))
+          )
+          f = cls match {
+            case Some(value) =>
+              Desugar.toTypeInstanceMethodID(method, typeName, value.name)
+            case None => Desugar.toMethodID(method, typeName)
+          }
+        } yield Value(s"${methodToName(f)}")
       case TermFold(_, _)   => StateT.pure(Value("pure "))
       case TermInt(_, i)    => StateT.pure(Value(i.toString))
       case TermFloat(_, f)  => StateT.pure(Value(f.toString))

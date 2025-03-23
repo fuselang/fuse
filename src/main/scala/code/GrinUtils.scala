@@ -112,6 +112,16 @@ object GrinUtils {
       }
     )
 
+  def toContextStateOption[T](
+      stateEither: StateEither[T]
+  ): ContextState[Option[T]] =
+    stateEither.value.map(v =>
+      v match {
+        case Right(v) => Some(v)
+        case Left(e)  => None
+      }
+    )
+
   case class PrimOp(t: String, op: String)
 
   object PrimOp:
