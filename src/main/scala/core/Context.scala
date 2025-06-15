@@ -155,11 +155,10 @@ object Context {
     }
 
   def instantantionShiftOnContextDiff(
-      inst: Instantiation,
-      d: Int = 0
+      inst: Instantiation
   ): ContextState[Instantiation] =
     inst.tys
-      .traverse(typeShiftOnContextDiff(_).map(typeShift(d, _)))
+      .traverse(typeShiftOnContextDiff(_))
       .map(
         Instantiation(inst.i, inst.term, _, inst.cls, inst.r)
       )

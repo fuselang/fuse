@@ -1845,6 +1845,57 @@ grinMain _18 =
         """)
     )
   }
+  test("build simple trait with no-op generic func") {
+    fuse(
+      """
+trait Summary:
+  fun summarize(self) -> str;
+
+type Tweet:
+  username: str
+  content: str
+
+impl Summary for Tweet:
+  fun summarize(self) -> str
+    self.username + ": " + self.content
+
+fun notify[T: Summary](s: T) -> str
+  "no news!"
+
+fun main() -> i32
+    let tweet = Tweet("elon", "work!")
+    print(tweet.summarize())
+    notify(tweet)
+    0
+        """,
+      BuildOutput("""
+Tweet username0 content1 =
+ pure (CTweet username0 content1)
+
+summarizeTweetSummary' self4 =
+ p9 <- do
+   case self4 of
+    (CTweet p7 p8) ->
+     pure p7
+ p10 <- _prim_str_add p9 #": "
+ p14 <- do
+   case self4 of
+    (CTweet p12 p13) ->
+     pure p13
+ _prim_str_add p10 p14
+
+notifyTweetSummary' s14 =
+ pure #"no news!"
+
+grinMain _15 =
+ tweet17 <-  Tweet #"elon" #"work!"
+ p20 <- summarizeTweetSummary' tweet17
+ _22 <-  _prim_string_print p20
+ _24 <-  notifyTweetSummary' tweet17
+ pure 0
+        """)
+    )
+  }
   test("build addition type bounds") {
     fuse(
       """

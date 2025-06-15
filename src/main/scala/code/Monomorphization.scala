@@ -64,7 +64,7 @@ object Monomorphization {
     * binds are inserted into the bind list.
     *
     * Because specialized binds are inserted into the list, the binds that
-    * appear after it gotta be shifted. As their variable indxes may point to
+    * appear after it gotta be shifted. As their variable indexes may point to
     * the symbols before newly inserted binds. That's why a list of shifts is
     * accumulated on iterating the binds list.
     */
@@ -104,7 +104,11 @@ object Monomorphization {
       }
       .map(_._1)
 
-  /** Finds all bind instantiations from a specified list.
+  /** Finds bind instantiations from a specified list when bind is a a generic
+    * function.
+    *
+    * Once instantations for a bind are found we can build specialized binds for
+    * each one of them.
     *
     * In case bind is:
     *   - an ADT all instantiations for that type are associated to it
@@ -116,10 +120,18 @@ object Monomorphization {
       insts: List[Instantiation]
   ): ContextState[List[Instantiation]] = for {
     typeNameOption <- getAlgebraicDataTypeName(UnknownInfo, bind.i)
+    // NOTE: Only get instantations for a bind that represents a generic function.
+    //
+    // This logic skips class methods that may have instantitations,
+    // as we shouldn't build a specialized bind for them.
+    genericFuncInsts = bind.b match {
+      case TermAbbBind(term: TermTAbs, ty) => insts
+      case _                               => Nil
+    }
     bindInsts <- typeNameOption match {
-      case None => insts.filter(_.i == bind.i).pure[ContextState]
+      case None => genericFuncInsts.filter(_.i == bind.i).pure[ContextState]
       case Some(typeName) =>
-        insts
+        genericFuncInsts
           .filterA(i =>
             getAlgebraicDataTypeName(UnknownInfo, i.i).map(
               _.map(_ == typeName).getOrElse(false)
@@ -133,7 +145,7 @@ object Monomorphization {
     filteredBindInsts <- bindInsts
       .filter(_.tys.forall(_.isPrimitive))
       .filterA(
-        instantantionShiftOnContextDiff(_, -1)
+        instantantionShiftOnContextDiff(_)
           .flatMap(
             _.tys
               .traverse {
@@ -160,7 +172,7 @@ object Monomorphization {
     bind.b match {
       case TermAbbBind(term: TermTAbs, ty) =>
         for {
-          shiftedInst <- instantantionShiftOnContextDiff(inst, -1)
+          shiftedInst <- instantantionShiftOnContextDiff(inst)
           // TODO: Use different bind names for specialized binds, to escape collisions
           // with type instance (built-in) named binds.
           name <- toContextState(shiftedInst.bindName())
@@ -194,32 +206,6 @@ object Monomorphization {
             )
           )
         } yield Bind(name, binding, insts)
-      /* TODO:
-       * 1. Find type class for the class method in the context.
-       * 2. Find class instances for the type class.
-       * 3. Specilize the class method with type instance term bind.
-       *
-       * Hmm should we really specialize the class method? We can just replace
-       * the instantiation with the specialized type instance term bind.
-       * ---
-       * It seems like we should specialize the class method in case it's a
-       * ganeric function. In a simple function case we can just use a
-       * type instance impl.
-       *
-       * EDIT: I don't think even this is required, as the generic method
-       * will be implemented by the type instance implementation.
-       * */
-      case TermAbbBind(TermClassMethod(_, _, cls), ty) =>
-        bind.pure
-      // for {
-      //   typeInstanceID <- toTypeInstanceMethodID(
-      //     bind.i,
-      //     inst.tys.head,
-      //     cls.name
-      //   )
-      //   binding <- getBinding(typeInstanceID)
-      //
-      // } yield Bind(name, binding, insts)
       case _ =>
         throw new RuntimeException(
           s"can't build specialized binding ${inst.i}"
