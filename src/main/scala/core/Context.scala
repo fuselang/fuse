@@ -15,6 +15,7 @@ import scala.util.*
 
 import Shifting.*
 import core.Instantiations.Instantiation
+import core.Desugar.RecordConstrPrefix
 
 object Context {
   type Note = (String, Binding)
@@ -129,7 +130,8 @@ object Context {
       info: Info,
       node: String
   ): ContextState[Option[String]] =
-    findAlgebraicDataType(info, node).map(_.map(_._1._1))
+    findAlgebraicDataType(info, node.stripPrefix(RecordConstrPrefix))
+      .map(_.map(_._1._1))
 
   /** Finds algebraic data type name using the name from one of its nodes.
     *
@@ -420,11 +422,11 @@ object Context {
   def solution(
       eV: TypeEVar,
       shift: Boolean = true
-  ): ContextState[Option[Type]] =
+  ): ContextState[Option[(Type, List[TypeClass])]] =
     State.inspect { ctx =>
       val notes = getNotes(ctx, withMarks = true)
-      val t = notes.collectFirst {
-        case (v, TypeESolutionBind(ty, _)) if v == eV.name => ty
+      val sol = notes.collectFirst {
+        case (v, TypeESolutionBind(ty, cls)) if v == eV.name => (ty, cls)
       }
       // NOTE: We are shifting the existential variable solution by the number
       // of "regular" (non-mark) bindings untill its place in the context. This
@@ -432,9 +434,10 @@ object Context {
       // if any regular binding is inserted afterwards the index in the
       // solution type is incorrect – cause we haven't shifted it. So we
       // "manually" gotta do that, count the bindings and shift.
-      t.map(ty =>
-        if (shift) typeShift(countBindingsTillEVar(notes, eV), ty) else ty
-      )
+      sol.map { case (ty, c) =>
+        if (shift) (typeShift(countBindingsTillEVar(notes, eV), ty), c)
+        else (ty, c)
+      }
     }
 
   def countBindingsTillEVar(notes: LazyList[Note], eV: TypeEVar): Int =

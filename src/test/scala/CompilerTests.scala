@@ -425,7 +425,7 @@ fun main() -> i32
     value(Dog)
         """)
   }
-  test("check clsoure inference with match statement for product type") {
+  test("check closure inference with match statement for product type") {
     fuse("""
 type Point:
   x: i32
@@ -870,7 +870,6 @@ fun main() -> i32
     o.map(a => a + 1)
     0
         """)
-
   }
   test("check generic trait monad implementation") {
     fuse("""
@@ -1648,6 +1647,72 @@ grinMain _0 =
  _prim_bool_or p2 p3""")
     )
   }
+  test("build inline lambda with type annotation") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a: i32) => a + 1
+    value(1)
+        """,
+      BuildOutput("""
+grinMain _0 =
+ c2  1
+
+c2 a2 =
+ _prim_i32_add a2 1
+        """)
+    )
+  }
+  test("build inline lambda with two variables with type annotations") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a: i32, b: i32) => a + b + 2
+    value(1, 2)
+        """,
+      BuildOutput("""
+grinMain _0 =
+ c2  1 2
+
+c2 a2 b3 =
+ p5 <- _prim_i32_add a2 b3
+ _prim_i32_add p5 2
+        """)
+    )
+  }
+  test("build inline lambda") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a) => a + 1
+    value(1)
+        """,
+      BuildOutput("""
+grinMain _0 =
+ c2  1
+
+c2 a2 =
+ _prim_i32_add a2 1
+        """)
+    )
+  }
+  test("build inline lambda with two variables") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a, b) => a + b + 2
+    value(1, 2)
+        """,
+      BuildOutput("""
+grinMain _0 =
+ c2  1 2
+
+c2 a2 b3 =
+ p5 <- _prim_i32_add a2 b3
+ _prim_i32_add p5 2
+        """)
+    )
+  }
   test("build generic function") {
     fuse(
       """
@@ -1914,7 +1979,78 @@ grinMain _2 =
        """)
     )
   }
-  test("build generic constructor".ignore) {
+  test("build generic record type") {
+    fuse(
+      """
+type X[T]:
+  v: T
+
+fun main() -> i32
+  let x = X(1)
+  x.v
+        """,
+      BuildOutput("""
+X#i32 v0 =
+ pure (CX v0)
+
+grinMain _2 =
+ x4 <-  X#i32 1
+ p8 <- do
+   case x4 of
+    (CX p7) ->
+     pure p7
+ pure p8""")
+    )
+  }
+  test("build generic point type") {
+    fuse(
+      """
+type Point[T, V]:
+  x: T
+  y: V
+
+fun main() -> i32
+  let p = Point(1, "2")
+  p.x
+        """,
+      BuildOutput("""
+Point#i32#str x0 y1 =
+ pure (CPoint x0 y1)
+
+grinMain _4 =
+ p6 <-  Point#i32#str 1 #"2"
+ p11 <- do
+   case p6 of
+    (CPoint p9 p10) ->
+     pure p9
+ pure p11
+    """)
+    )
+  }
+  test("build generic tuple type") {
+    fuse(
+      """
+type Tuple[A, B](A, B)
+
+fun main() -> i32
+  let t = Tuple(1, "2")
+  t.1
+        """,
+      BuildOutput("""
+Tuple#i32#str t10 t21 =
+ pure (CTuple t10 t21)
+
+grinMain _4 =
+ t6 <-  Tuple#i32#str 1 #"2"
+ p11 <- do
+   case t6 of
+    (CTuple p9 p10) ->
+     pure p9
+ pure p11
+        """)
+    )
+  }
+  test("build generic sum type".ignore) {
     fuse(
       """
 type Option[A]:
@@ -1928,6 +2064,87 @@ fun main() -> i32
         None => 1
         """,
       BuildOutput("")
+    )
+  }
+  test("build generic trait functor implementation".ignore) {
+    fuse(
+      """
+trait Functor[A]:
+  fun map[B](self, f: A -> B) -> Self[B];
+
+type Option[T]:
+  Some(T)
+  None
+
+impl Functor for Option[A]:
+  fun map[B](self, f: A -> B) -> Option[B]
+    match self:
+      Some(v) => Some(f(v))
+      _ => None
+
+fun main() -> i32
+    let o = Some(5)
+    o.map(a => a + 1)
+    0
+        """,
+      BuildOutput("")
+    )
+  }
+  test("build function on record with tuple type") {
+    fuse(
+      """
+type Tuple[A, B](A, B)
+
+type State[S, A]:
+  run: S -> Tuple[A, S]
+
+fun value(a: State[i32, i32]) -> i32
+  let t = (a.run)(1)
+  t.1 + t.2
+  
+fun main() -> i32
+  # TODO: value(State(a => Tuple(a + 1, a + 2)))
+  let f = a => Tuple(a + 1, a + 2)
+  value(State(f))
+        """,
+      BuildOutput("""
+Tuple#i32#i32 t10 t21 =
+ pure (CTuple t10 t21)
+
+State#i32#i32 run''4 =
+ p7 <- fetch run''4
+ pure (CState p7)
+
+value a7 =
+ p11 <- do
+   case a7 of
+    (CState p10) ->
+     pure p10
+ t13 <-  p11 1
+ p18 <- do
+   case t13 of
+    (CTuple p16 p17) ->
+     pure p16
+ p22 <- do
+   case t13 of
+    (CTuple p20 p21) ->
+     pure p21
+ _prim_i32_add p18 p22
+
+grinMain _22 =
+ p40 <- pure (P1c24 )
+ p41 <- State#i32#i32 p40
+ value p41
+
+c24 a24 =
+ p26 <- _prim_i32_add a24 1
+ p27 <- _prim_i32_add a24 2
+ Tuple#i32#i32 p26 p27
+
+apply p42 p43 =
+ case p42 of
+  (P1c24  ) ->
+   c24   p43""")
     )
   }
 }

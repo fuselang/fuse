@@ -61,8 +61,9 @@ object TypeChecker {
     m <- EitherT.liftF(addMark("p"))
     (iT, insts) <- infer(t)
     aT <- apply(iT)(shift = false)
+    aI <- insts.traverse(applyInst(_)(shift = false))
     _ <- EitherT.liftF(peel(m))
-  } yield (aT, insts)
+  } yield (aT, aI)
 
   /** Infers a type for `exp` with input context `ctx`.
     * @return
@@ -103,7 +104,11 @@ object TypeChecker {
           _ <- EitherT.liftF(peel(b))
           eAS1 <- EitherT.liftF(typeShiftOnContextDiff(eAS))
           eCS <- apply(eC)(shift = true)
-        } yield (TypeArrow(info, eAS1, typeShift(-1, eCS)), insts)
+          aI <- insts.traverse(applyInst(_)(shift = true))
+          // TODO: Build closure instantiation to have its var type
+          // available in monomorphization and code-gen phases.
+          // instC <- Instantiations.build(exp, List(TypeESolutionBind(eAS1)))
+        } yield (TypeArrow(info, eAS1, typeShift(-1, eCS)), aI)
       case TermAbs(info, variable, variableType, expr, returnType) =>
         for {
           _ <- checkKindStar(variableType)
@@ -130,8 +135,9 @@ object TypeChecker {
           (funType, insts) <- infer(fun)
           simplifiedFun <- EitherT.liftF(simplifyType(funType))
           (ty, (appInsts, solutions)) <- inferApp(simplifiedFun, arg)
-          inst <- Instantiations.build(fun, solutions)
-        } yield (ty, insts ::: appInsts ::: inst)
+          buildInsts <- Instantiations.build(fun, solutions, insts ::: appInsts)
+          _ = debug("------> buildInsts", buildInsts)
+        } yield (ty, buildInsts)
       case TermProj(info, ty, label) =>
         for {
           (tyT1, insts) <- pureInfer(ty)
@@ -811,30 +817,52 @@ object TypeChecker {
         } yield (insts, solutions)
     }
 
+  /** Applies `ctx` to `inst` (substituting existential vars for their solutions
+    * for instantation types).
+    */
+  def applyInst(
+      inst: Instantiation
+  )(implicit shift: Boolean = true): StateEither[Instantiation] =
+    inst.tys
+      .traverse(applyC(_)(shift = shift))
+      .map(v => v.unzip)
+      .map { case (tys, cls) =>
+        Instantiation(inst.i, inst.term, tys, inst.cls ::: cls.flatten, inst.r)
+      }
+
   /** Applies `ctx` to `tpe` (substituting existential vars for their
     * solutions).
     */
   def apply(t: Type)(implicit shift: Boolean = true): StateEither[Type] =
+    applyC(t).map(_._1)
+
+  def applyC(
+      t: Type
+  )(implicit shift: Boolean = true): StateEither[(Type, List[TypeClass])] =
     t match {
       case ev: TypeEVar =>
         EitherT
           .liftF(Context.solution(ev, shift))
-          .flatMap(ty =>
-            ty.map(apply(_)).getOrElse((ev: Type).pure[StateEither])
+          .flatMap(
+            _.map { case (ty1, cls1) =>
+              applyC(ty1).map { case (ty2, cls2) => (ty2, cls1 ::: cls2) }
+            }.getOrElse((ev: Type, ev.cls).pure)
           )
       case TypeArrow(info, a, b) =>
         for {
-          t1 <- apply(a)
-          t2 <- apply(b)
-        } yield TypeArrow(info, t1, t2)
+          (t1, cls1) <- applyC(a)
+          (t2, cls2) <- applyC(b)
+        } yield (TypeArrow(info, t1, t2), cls1 ::: cls2)
       case TypeApp(info, a, b) =>
         for {
-          t1 <- apply(a)
-          t2 <- apply(b)
-        } yield TypeApp(info, t1, t2)
+          (t1, cls1) <- applyC(a)
+          (t2, cls2) <- applyC(b)
+        } yield (TypeApp(info, t1, t2), cls1 ::: cls2)
       case TypeAll(info, i, k, cls, tpe) =>
-        apply(tpe).map(TypeAll(info, i, k, cls, _))
-      case _ => t.pure[StateEither]
+        applyC(tpe).map { case (t, c) =>
+          (TypeAll(info, i, k, cls, t), c)
+        }
+      case _ => (t, List[TypeClass]()).pure
     }
 
   /** Derives a subtyping relationship `tpeA <: tpeB` with input context `ctx`.

@@ -94,6 +94,7 @@ object GrinUtils {
   def addTempVariable(name: String = "p"): ContextState[String] =
     pickFreshName(name)
 
+  // Retrieve a name of the passed `ty` param type.
   def getNameFromType(ty: Type): ContextState[String] =
     getNameFromIndex(TypeChecker.findRootTypeVar(ty).get.index)
 

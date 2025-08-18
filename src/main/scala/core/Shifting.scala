@@ -122,6 +122,13 @@ object Shifting {
           iter(c + 1, e),
           r.map(onType(c + 1, _))
         )
+      case TermTAbs(info, i, cls, e) =>
+        TermTAbs(
+          info,
+          i,
+          cls,
+          iter(c + 1, e)
+        )
       case TermClosure(info, i, ty, e) =>
         TermClosure(
           info,

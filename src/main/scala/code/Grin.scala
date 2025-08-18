@@ -14,6 +14,8 @@ import core.Types.*
 import parser.Info.UnknownInfo
 
 import GrinUtils.*
+import fuse.Utils.debug
+import core.TypeChecker.findRootTypeVar
 
 object Grin {
   val MainFunction = "grinMain"
@@ -269,7 +271,8 @@ object Grin {
         } yield Abs(toParamVariable(variable2), b)
       case TermApp(_, TermFold(_, ty), r: TermRecord) =>
         for {
-          typeName <- getNameFromType(ty)
+          tyD <- typeShiftOnContextDiff(ty)
+          typeName <- getNameFromType(tyD)
           recordExpr <- pureToExpr(r)
           (prepExprs, parameters) <- prepParameters(recordExpr)
           constr = show"pure (${cTag(typeName)} $parameters)"
@@ -351,8 +354,9 @@ object Grin {
         for {
           e <- pureToExpr(t)
           ty <- typeCheck(t)
-          typeName <- getNameFromType(ty)
-          tyS <- TypeChecker.simplifyType(ty)
+          tyD <- typeShiftOnContextDiff(ty)
+          typeName <- getNameFromType(tyD)
+          tyS <- TypeChecker.simplifyType(tyD)
           (variables, labelVariable) <- tyS match {
             case TypeRec(_, _, _, TypeRecord(_, fields)) =>
               fields
@@ -364,6 +368,10 @@ object Grin {
                     v.get(fields.indexWhere { case (f, _) => f == label }).get
                   )
                 )
+            case _ =>
+              throw new RuntimeException(
+                s"failed to map type on field access for grin generation $tyS; $typeName"
+              )
           }
           doExpr: Expr = DoExpr(
             CaseExpr(
@@ -394,8 +402,9 @@ object Grin {
       case TermMethodProj(_, t, method) =>
         for {
           tyT1 <- typeCheck(t)
-          tyT1S <- TypeChecker.simplifyType(tyT1)
-          typeName <- getNameFromType(tyT1)
+          tyT1D <- typeShiftOnContextDiff(tyT1)
+          tyT1S <- TypeChecker.simplifyType(tyT1D)
+          typeName <- getNameFromType(tyT1D)
           instances <- getTypeInstances(typeName)
           cls <- instances.findM(c =>
             getTypeClassMethods(c.name).map(_.exists(_ == method))
@@ -455,6 +464,17 @@ object Grin {
   )(implicit substFunc: String => String): ContextState[Expr] =
     closure match {
       case TermClosure(_, variable, Some(variableType), body) =>
+        for {
+          variable1 <- includeFunctionSuffix(variable, variableType)
+          variable2 <- Context.addBinding(variable1, VarBind(variableType))
+          b <- toClosureAbs(body)
+        } yield Abs(toParamVariable(variable2), b)
+      case TermClosure(_, variable, None, body) =>
+        // TODO: Remove this simplification of variable type for closure,
+        // once all term closures are populated with var types during
+        // monomorphization phase. This logic is primarly used to test
+        // building inline lambdas without type annotations.
+        val variableType = TypeUnit(UnknownInfo)
         for {
           variable1 <- includeFunctionSuffix(variable, variableType)
           variable2 <- Context.addBinding(variable1, VarBind(variableType))

@@ -43,11 +43,13 @@ object Monomorphization {
   def replaceM(binds: List[Bind]): ContextState[List[Bind]] =
     // Collect instantiations.
     val insts = Instantiations.distinct(binds.map(_.insts).flatten)
+    debug("insts", insts)
     insts match {
       case Nil => binds.pure[ContextState]
       case _ =>
         for {
-          // Create specialilized functions for each bindig that has an instantiation.
+          // Create specialilized functions for each bindig that has corresponding
+          // instantiation.
           specializedBinds <- toSpecializedBinds(binds, insts)
           // Replace each generic function invocation with a specialized function.
           modifiedBinds <- specializedBinds.traverse(replaceInstantiations(_))
@@ -124,14 +126,17 @@ object Monomorphization {
     //
     // This logic skips class methods that may have instantitations,
     // as we shouldn't build a specialized bind for them.
-    genericFuncInsts = bind.b match {
+    // _ = debug("bind.i", bind.i)
+    // _ = debug("bind.b", bind.b)
+    // _ = debug("typeNameOption", typeNameOption)
+    genInsts = bind.b match {
       case TermAbbBind(term: TermTAbs, ty) => insts
       case _                               => Nil
     }
     bindInsts <- typeNameOption match {
-      case None => genericFuncInsts.filter(_.i == bind.i).pure[ContextState]
+      case None => genInsts.filter(_.i == bind.i).pure[ContextState]
       case Some(typeName) =>
-        genericFuncInsts
+        genInsts
           .filterA(i =>
             getAlgebraicDataTypeName(UnknownInfo, i.i).map(
               _.map(_ == typeName).getOrElse(false)
@@ -178,9 +183,10 @@ object Monomorphization {
           name <- toContextState(shiftedInst.bindName())
           ctxlen <- State.inspect { (ctx: Context) => ctx._1.length }
           binding = TermAbbBind(
-            shiftedInst.tys.zipWithIndex.foldRight(term: Term) {
-              case ((ty, idx), t) =>
-                specializeTerm(t, idx, ty)
+            shiftedInst.tys.foldLeft(term: Term) { case (t, ty) =>
+              debug(s"foldLeft -> ty${idx}", ty)
+              debug(s"foldLeft -> t", t)
+              specializeTerm(t, idx, ty)
             },
             ty.map(specializeType(_, shiftedInst.tys, ctxlen - idx))
           )
@@ -219,16 +225,16 @@ object Monomorphization {
   ): Term =
     term match {
       case TermTAbs(_, _, _, body) =>
-        termSubstituteType(tyS, typeVarIndex, body)
+        termSubstituteType(tyS, 0, body)
       case _ =>
         throw new RuntimeException(s"can't specialize term ${term}")
     }
 
   def specializeType(ty: Type, tys: List[Type], ctxLength: Int): Type =
-    tys.zipWithIndex.foldRight(ty) {
-      case ((tyS, idx), TypeAll(_, _, _, _, tyT)) =>
-        typeSubstitute(tyS, idx, tyT)
-      case ((tyS, idx), tyT: TypeVar) =>
+    tys.zipWithIndex.foldLeft(ty) {
+      case (TypeAll(_, _, _, _, tyT), (tyS, _)) =>
+        typeSubstitute(tyS, 0, tyT)
+      case (tyT: TypeVar, (tyS, idx)) =>
         /* NOTE: As we don't have complete context information of the type
          * variable that should be substituted, we calculate its index
          * by using:
@@ -264,6 +270,8 @@ object Monomorphization {
             // only in case the instantiation doesn't have a pre-computed
             // resulting index to use — that was calculated on the
             // specialized binding phase.
+            // TODO: Enrich `TermClosure` objects with type parameters
+            // to allow code generation phase to use it.
             val d = if (inst.r.isDefined) None else Some(ctxlen)
             (
               TermAbbBind(termVarSubstitute(s, d, tC, tT), ty),
