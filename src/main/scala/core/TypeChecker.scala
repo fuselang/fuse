@@ -99,7 +99,7 @@ object TypeChecker {
           eA <- EitherT.liftF(addEVar("a", info, TypeEFreeBind))
           eC <- EitherT.liftF(addEVar("c", info, TypeEFreeBind))
           b <- EitherT.liftF(addBinding(variable, VarBind(eA)))
-          (insts, _) <- check(expr, eC)
+          (insts, sol1) <- check(expr, eC)
           eAS <- apply(eA)(shift = true)
           _ <- EitherT.liftF(peel(b))
           eAS1 <- EitherT.liftF(typeShiftOnContextDiff(eAS))
@@ -107,7 +107,7 @@ object TypeChecker {
           aI <- insts.traverse(applyInst(_)(shift = true))
           // TODO: Build closure instantiation to have its var type
           // available in monomorphization and code-gen phases.
-          // instC <- Instantiations.build(exp, List(TypeESolutionBind(eAS1)))
+          // _ = debug("sol1", sol1)
         } yield (TypeArrow(info, eAS1, typeShift(-1, eCS)), aI)
       case TermAbs(info, variable, variableType, expr, returnType) =>
         for {
@@ -344,9 +344,9 @@ object TypeChecker {
           } yield (ty, (acc._1 ::: insts, acc._2 ::: solutions))
         case eA: TypeEVar =>
           for {
-            (a1, a2, _) <- insertEArrow(eA)
+            (a1, a2, s1) <- insertEArrow(eA)
             (insts, solutions) <- check(exp, a1)
-          } yield (a2, (acc._1 ::: insts, acc._2 ::: solutions))
+          } yield (a2, (acc._1 ::: insts, acc._2 ::: (s1 :: solutions)))
         case TypeArrow(_, argT, restT) =>
           check(exp, argT).map { case (insts, solutions) =>
             (restT, (acc._1 ::: insts, acc._2 ::: solutions))
@@ -790,9 +790,13 @@ object TypeChecker {
       case (TermClosure(_, arg, None, exp), TypeArrow(_, argT, expT)) =>
         for {
           b <- EitherT.liftF(addBinding(arg, VarBind(argT)))
-          insts <- check(exp, expT) // Γ,α ⊢ e ⇐ A ⊣ ∆,α,Θ
+          (insts, sol) <- check(exp, expT) // Γ,α ⊢ e ⇐ A ⊣ ∆,α,Θ
+          // NOTE: The `argT` parameter is reduced and included as
+          // type solution, as its solution might be lost in the
+          // inferring of a nested expression.
+          redArgT <- apply(argT)
           _ <- EitherT.liftF(peel(b))
-        } yield insts
+        } yield (insts, sol :+ TypeESolutionBind(redArgT))
       // ∀I :: (e, ∀α.A)
       case (exp, TypeAll(_, uA, k, cls, tpe)) =>
         for {
@@ -960,19 +964,19 @@ object TypeChecker {
         case (eC: TypeEVar, _, true, _) => solve(eC, eA).map(List(_))
         case (TypeApp(_, a1, a2), _, _, true) =>
           for {
-            (eA1, eA2, _) <- insertEApp(eA)
+            (eA1, eA2, sol1) <- insertEApp(eA)
             sR <- instantiateR(a1, eA1)
             redA2 <- apply(a2)(shift = false)
             sL <- instantiateL(eA2, redA2)
-          } yield sR ::: sL
+          } yield sol1 :: sR ::: sL
         // InstLArr :: Γ[â] ⊢ â :=< A1 → A2 ⊣ ∆
         case (TypeArrow(info, a1, a2), _, _, true) =>
           for {
-            (eA1, eA2, _) <- insertEArrow(eA)
+            (eA1, eA2, sol1) <- insertEArrow(eA)
             sR <- instantiateR(a1, eA1)
             redA2 <- apply(a2)(shift = false)
             sL <- instantiateL(eA2, redA2)
-          } yield sR ::: sL
+          } yield sol1 :: sR ::: sL
         // InstLAllR :: Γ[â] ⊢ â :=< ∀β.B ⊣ ∆
         case (TypeAll(_, uB, k, cls, b), _, _, true) =>
           for {
@@ -1010,19 +1014,19 @@ object TypeChecker {
         case (eC: TypeEVar, _, true, _) => solve(eC, eA).map(List(_))
         case (TypeApp(_, a1, a2), _, _, true) =>
           for {
-            (eA1, eA2, _) <- insertEApp(eA)
+            (eA1, eA2, sol1) <- insertEApp(eA)
             sL <- instantiateL(eA1, a1)
             redA2 <- apply(a2)(shift = false)
             sR <- instantiateR(redA2, eA2)
-          } yield sL ::: sR
+          } yield sol1 :: sL ::: sR
         // InstRArr :: Γ[â] ⊢ A1 → A2 :=< â ⊣ ∆
         case (TypeArrow(info, a1, a2), _, _, true) =>
           for {
-            (eA1, eA2, _) <- insertEArrow(eA)
+            (eA1, eA2, sol1) <- insertEArrow(eA)
             sL <- instantiateL(eA1, a1)
             redA2 <- apply(a2)(shift = false)
             sR <- instantiateR(redA2, eA2)
-          } yield sL ::: sR
+          } yield sol1 :: sL ::: sR
         // InstRAllL :: Γ[â],▶ĉ,ĉ ⊢ [ĉ/β]B :=< â ⊣ ∆,▶ĉ,∆′
         case (TypeAll(info, _, _, cls, b), _, _, true) =>
           for {

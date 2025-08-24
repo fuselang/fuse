@@ -21,5 +21,5 @@ object Utils {
   def difference[T](s1: List[T], s2: List[T]): List[T] =
     (s1.toSet.diff(s2.toSet)).toList
 
-  def debug(l: String, v: Any): Unit = println(s"${l}: ${v.toString}")
+  def debug(l: String, v: Any): Unit = println(s">>> ${l}\n${v.toString}")
 }

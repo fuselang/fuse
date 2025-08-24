@@ -2103,9 +2103,7 @@ fun value(a: State[i32, i32]) -> i32
   t.1 + t.2
   
 fun main() -> i32
-  # TODO: value(State(a => Tuple(a + 1, a + 2)))
-  let f = a => Tuple(a + 1, a + 2)
-  value(State(f))
+  value(State(a => Tuple(a + 1, a + 2)))
         """,
       BuildOutput("""
 Tuple#i32#i32 t10 t21 =
@@ -2132,19 +2130,19 @@ value a7 =
  _prim_i32_add p18 p22
 
 grinMain _22 =
- p40 <- pure (P1c24 )
- p41 <- State#i32#i32 p40
- value p41
+ p32 <- pure (P1c24 )
+ p33 <- State#i32#i32 p32
+ value p33
 
 c24 a24 =
  p26 <- _prim_i32_add a24 1
  p27 <- _prim_i32_add a24 2
  Tuple#i32#i32 p26 p27
 
-apply p42 p43 =
- case p42 of
-  (P1c24  ) ->
-   c24   p43""")
+apply p34 p35 =
+ case p34 of
+  (P1c24 ) ->
+   c24  p35""")
     )
   }
 }

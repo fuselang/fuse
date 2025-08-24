@@ -339,13 +339,13 @@ object Context {
 
   def insertEArrow(
       eA: TypeEVar
-  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeArrow]] = for {
+  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeESolutionBind]] = for {
     (idx, cls) <- getFreeEVarIndex(eA)
     ty1 <- EitherT.liftF(freshEVar("a1", eA.info, cls))
     ty2 <- EitherT.liftF(freshEVar("a2", eA.info, cls))
-    ty = TypeArrow(eA.info, ty1, ty2)
+    sol = TypeESolutionBind(TypeArrow(eA.info, ty1, ty2))
     notes = List(
-      (eA.name, TypeESolutionBind(ty)),
+      (eA.name, sol),
       (ty1.name, TypeEFreeBind),
       (ty2.name, TypeEFreeBind)
     )
@@ -356,17 +356,17 @@ object Context {
         (postNotes ::: notes ::: preNotes.tail, ctx._2)
       }
     })
-  } yield (ty1, ty2, ty)
+  } yield (ty1, ty2, sol)
 
   def insertEApp(
       eA: TypeEVar
-  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeApp]] = for {
+  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeESolutionBind]] = for {
     (idx, cls) <- getFreeEVarIndex(eA)
     ty1 <- EitherT.liftF(freshEVar("a1", eA.info, cls))
     ty2 <- EitherT.liftF(freshEVar("a2", eA.info, cls))
-    ty = TypeApp(eA.info, ty1, ty2)
+    sol = TypeESolutionBind(TypeApp(eA.info, ty1, ty2))
     notes = List(
-      (eA.name, TypeESolutionBind(ty)),
+      (eA.name, sol),
       (ty1.name, TypeEFreeBind),
       (ty2.name, TypeEFreeBind)
     )
@@ -377,7 +377,7 @@ object Context {
         (postNotes ::: notes ::: preNotes.tail, ctx._2)
       }
     })
-  } yield (ty1, ty2, ty)
+  } yield (ty1, ty2, sol)
 
   /** Replaces existential variable at specified index with existential type
     * solution binding.
