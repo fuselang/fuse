@@ -2050,7 +2050,35 @@ grinMain _4 =
         """)
     )
   }
-  test("build generic sum type".ignore) {
+  test("build sum type") {
+    fuse(
+      """
+type OptionI32:
+    None
+    Some(i32)
+
+fun main() -> i32
+    let o = Some(5)
+    match o:
+        Some(v) => v
+        None => 1
+        """,
+      BuildOutput("""
+None =  pure  (CNone)
+
+Some t10 =
+ pure  (CSome t10)
+
+grinMain _2 =
+ o4 <-  Some 5
+ case o4 of
+  (CSome v6) ->
+   pure v6
+  (CNone ) ->
+   pure 1""")
+    )
+  }
+  test("build generic sum type") {
     fuse(
       """
 type Option[A]:
@@ -2060,10 +2088,23 @@ type Option[A]:
 fun main() -> i32
     let o = Some(5)
     match o:
-        Some(v) => 0
+        Some(v) => v
         None => 1
         """,
-      BuildOutput("")
+      BuildOutput("""
+None#i32 =  pure  (CNone)
+
+Some#i32 t10 =
+ pure  (CSome t10)
+
+grinMain _2 =
+ o4 <-  Some#i32 5
+ case o4 of
+  (CSome v6) ->
+   pure v6
+  (CNone ) ->
+   pure 1
+        """)
     )
   }
   test("build generic trait functor implementation".ignore) {

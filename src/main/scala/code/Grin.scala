@@ -392,7 +392,8 @@ object Grin {
       case TermMatch(_, e, patterns) =>
         for {
           ty1 <- typeCheck(e)
-          exprType <- TypeChecker.unfoldType(ty1)
+          tyT1D <- typeShiftOnContextDiff(ty1)
+          exprType <- TypeChecker.unfoldType(tyT1D)
           t <- pureToExpr(e)
           (prepExprs, result) <- prepParameters(t)
           p <- patterns.traverse { case (p, e) =>
@@ -491,7 +492,7 @@ object Grin {
     case PatternNode(_, node, vars) =>
       for {
         (_, bindVariables, _) <- toContextState(
-          TypeChecker.inferPattern(p, matchExprType)
+          TypeChecker.inferPattern(p, matchExprType)(checking = false)
         )
         cpat = s"(${cTag(node)} ${bindVariables.mkString(" ")})"
         caseClause <- buildCaseClause(cpat, e)

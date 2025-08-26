@@ -407,6 +407,8 @@ object TypeChecker {
   def inferPattern(
       p: Pattern,
       matchExprType: Type
+  )(implicit
+      checking: Boolean = true
   ): StateEither[(Option[Type], List[String], List[Instantiation])] =
     p match {
       case t: Term => infer(t).map { (ty, insts) => (Some(ty), List(), insts) }
@@ -417,6 +419,8 @@ object TypeChecker {
   def inferNodePattern(
       p: PatternNode,
       matchExprType: Type
+  )(implicit
+      checking: Boolean
   ): StateEither[(Option[Type], List[String], List[Instantiation])] = for {
     unfoldedExprType <- EitherT.liftF(unfoldType(matchExprType))
     v <- unfoldedExprType match {
@@ -442,24 +446,29 @@ object TypeChecker {
         } yield (Some(matchExprType), variables, List())
       case TypeRecord(_, fields) =>
         for {
-          optionIdx <- EitherT.liftF(
-            State.inspect((ctx: Context) =>
-              Context
-                .nameToIndex(ctx, p.tag)
-            )
-          )
-          idx <- optionIdx
-            .map(_.pure[StateEither])
-            .getOrElse(
-              TypeError.format(
-                MatchRecordPatternMismatchTypeError(
-                  p.info,
-                  matchExprType,
-                  p.tag
-                )
+          // NOTE: In case we're not in process of type checking, there's no
+          // need to do additional type fetching/checking on the pattern tag
+          // type. Useful during code generation as we can escape further
+          // monomorphization for specialized type patterns.
+          _ <- checking match {
+            case true =>
+              val idx = EitherT.liftF(
+                State.inspect((ctx: Context) => Context.nameToIndex(ctx, p.tag))
               )
-            )
-          _ <- Context.getType(p.info, idx)
+              idx.flatMap(i =>
+                i.map(getType(p.info, _))
+                  .getOrElse(
+                    TypeError.format(
+                      MatchRecordPatternMismatchTypeError(
+                        p.info,
+                        matchExprType,
+                        p.tag
+                      )
+                    )
+                  )
+              )
+            case false => ().pure[StateEither]
+          }
           variables <- bindFieldsToVars(
             p.info,
             fields,
@@ -552,7 +561,7 @@ object TypeChecker {
       tyT <- tyA match {
         case TypeApp(info, tyT1, tyT2) =>
           simplifyType(tyT1).map(TypeApp(info, _, tyT2))
-        // NOTE: Here we return the original type, not the we tried to apply.
+        // NOTE: Here we return the original type, not the one ewe tried to apply.
         // Since we wanna extract type application only for applied types.
         case _ => ty.pure[ContextState]
       }
