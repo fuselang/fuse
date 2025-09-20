@@ -85,8 +85,13 @@ object Context {
   def run[T](state: ContextState[T]): ContextState[T] =
     State { ctx =>
       {
-        val (ctx1, t) = state.run(ctx).value
-        ((ctx._1, ctx._2 + (ctx1._2 - ctx._2)), t)
+        try {
+          val (ctx1, t) = state.run(ctx).value
+          ((ctx._1, ctx._2 + (ctx1._2 - ctx._2)), t)
+        } catch {
+          case e: NoSuchElementException =>
+            throw new RuntimeException(s"Context state computation failed - ${e.getMessage} - Context has ${ctx._1.length} bindings", e)
+        }
       }
     }
 

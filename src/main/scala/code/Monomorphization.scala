@@ -18,6 +18,7 @@ import code.GrinUtils.toContextState
 import core.Instantiations.Instantiation
 import core.Context
 import core.Shifting.*
+import fuse.SpecializedMethodUtils
 import parser.Info.UnknownInfo
 import core.Desugar.toTypeInstanceMethodID
 import code.GrinUtils.toContextStateOption
@@ -43,7 +44,6 @@ object Monomorphization {
   def replaceM(binds: List[Bind]): ContextState[List[Bind]] =
     // Collect instantiations.
     val insts = Instantiations.distinct(binds.map(_.insts).flatten)
-    debug("insts", insts)
     insts match {
       case Nil => binds.pure[ContextState]
       case _ =>
@@ -126,9 +126,6 @@ object Monomorphization {
     //
     // This logic skips class methods that may have instantitations,
     // as we shouldn't build a specialized bind for them.
-    // _ = debug("bind.i", bind.i)
-    // _ = debug("bind.b", bind.b)
-    // _ = debug("typeNameOption", typeNameOption)
     genInsts = bind.b match {
       case TermAbbBind(term: TermTAbs, ty) => insts
       case _                               => Nil
@@ -184,11 +181,11 @@ object Monomorphization {
           ctxlen <- State.inspect { (ctx: Context) => ctx._1.length }
           binding = TermAbbBind(
             shiftedInst.tys.foldLeft(term: Term) { case (t, ty) =>
-              debug(s"foldLeft -> ty${idx}", ty)
-              debug(s"foldLeft -> t", t)
               specializeTerm(t, idx, ty)
             },
-            ty.map(specializeType(_, shiftedInst.tys, ctxlen - idx))
+            ty.map(originalTy => {
+              specializeType(originalTy, shiftedInst.tys, ctxlen - idx)
+            })
           )
           insts <- bind.insts.traverse(i =>
             // Try to resolve the resulting index of an instantation binding when
@@ -206,7 +203,11 @@ object Monomorphization {
             } yield Instantiation(
               i.i,
               termShiftAbove(-1, ctxlen, i.term),
-              i.tys.map(specializeType(_, shiftedInst.tys, ctxlen - idx)),
+              i.tys.map(originalTy => {
+                val specializedTy =
+                  specializeType(originalTy, shiftedInst.tys, ctxlen - idx)
+                specializedTy
+              }),
               i.cls,
               tIdx.map(_ + 1)
             )
@@ -265,20 +266,57 @@ object Monomorphization {
           inst.term,
           inst.r.orElse(specBindIndex)
         ) match {
+          case (TermAbbBind(tT, ty), tC: TermMethodProj, Some(s)) =>
+            handleMethodProjReplacement(tT, ty, tC, specBindName, acc, inst)
           case (TermAbbBind(tT, ty), tC: TermVar, Some(s)) =>
-            // NOTE: Use the context length in the term substitute method
-            // only in case the instantiation doesn't have a pre-computed
-            // resulting index to use — that was calculated on the
-            // specialized binding phase.
-            // TODO: Enrich `TermClosure` objects with type parameters
-            // to allow code generation phase to use it.
-            val d = if (inst.r.isDefined) None else Some(ctxlen)
-            (
-              TermAbbBind(termVarSubstitute(s, d, tC, tT), ty),
-              bind.insts.filterNot(_ == inst)
-            )
-          case (b, _, _) => (b, bind.insts)
+            handleVarReplacement(tT, ty, tC, s, ctxlen, acc, inst)
+          case (b, _, _) => (b, acc.insts)
         }
       } yield Bind(bind.i, replacedBinding, insts)
     )
+
+  /** Handle TermMethodProj instantiation replacement */
+  private def handleMethodProjReplacement(
+      tT: Term,
+      ty: Option[Type],
+      tC: TermMethodProj,
+      methodName: String,
+      bind: Bind,
+      inst: Instantiation
+  ): (Binding, List[Instantiation]) = {
+    val replacedTerm = termMap(
+      (info, c, k, n) => TermVar(info, k, n),
+      (c, ty) => ty,
+      (methodProj: TermMethodProj) =>
+        if (methodProj.i == tC.i && methodProj.t == tC.t) {
+          // Found the matching TermMethodProj - update its method name
+          TermMethodProj(methodProj.info, methodProj.t, methodName)
+        } else {
+          methodProj
+        },
+      0,
+      tT
+    )
+    (
+      TermAbbBind(replacedTerm, ty),
+      bind.insts.filterNot(_ == inst)
+    )
+  }
+
+  /** Handle TermVar instantiation replacement */
+  private def handleVarReplacement(
+      tT: Term,
+      ty: Option[Type],
+      tC: TermVar,
+      s: Int,
+      ctxlen: Int,
+      bind: Bind,
+      inst: Instantiation
+  ): (Binding, List[Instantiation]) = {
+    val d = if (inst.r.isDefined) None else Some(ctxlen)
+    (
+      TermAbbBind(termVarSubstitute(s, d, tC, tT), ty),
+      bind.insts.filterNot(_ == inst)
+    )
+  }
 }

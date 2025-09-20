@@ -14,8 +14,8 @@ import core.Types.*
 import parser.Info.UnknownInfo
 
 import GrinUtils.*
-import fuse.Utils.debug
 import core.TypeChecker.findRootTypeVar
+import fuse.SpecializedMethodUtils
 
 object Grin {
   val MainFunction = "grinMain"
@@ -295,7 +295,15 @@ object Grin {
         for {
           letValue <- pureToExpr(t1)
           (prepExprs, result) <- getResult(letValue)
-          variableType <- typeCheck(t1)
+          // Skip type checking if the term contains specialized methods
+          variableType <-
+            if (SpecializedMethodUtils.containsSpecializedMethod(t1)) {
+              // Use a placeholder type - the actual type doesn't matter since
+              // this is post-monomorphization and won't be used for type checking
+              State.pure(TypeUnit(UnknownInfo))
+            } else {
+              typeCheck(t1)
+            }
           fVar <- result match {
             case c: ClosureValue =>
               Context.addBinding(
@@ -401,21 +409,34 @@ object Grin {
           }
         } yield CaseExpr(MultiLineExpr(prepExprs, Value(result)), p)
       case TermMethodProj(_, t, method) =>
-        for {
-          tyT1 <- typeCheck(t)
-          tyT1D <- typeShiftOnContextDiff(tyT1)
-          tyT1S <- TypeChecker.simplifyType(tyT1D)
-          typeName <- getNameFromType(tyT1D)
-          instances <- getTypeInstances(typeName)
-          cls <- instances.findM(c =>
-            getTypeClassMethods(c.name).map(_.exists(_ == method))
-          )
-          f = cls match {
-            case Some(value) =>
-              Desugar.toTypeInstanceMethodID(method, typeName, value.name)
-            case None => Desugar.toMethodID(method, typeName)
-          }
-        } yield Value(s"${methodToName(f)}")
+        method match {
+          case m if SpecializedMethodUtils.isSpecializedMethod(m) =>
+            // Already specialized - skip ALL processing and use as-is
+            State.pure(Value(s"${methodToName(m)}"))
+          case m =>
+            // Not specialized - need type checking and method ID computation
+            for {
+              binding <- t match {
+                case TermVar(_, idx, _) =>
+                  toContextState(Context.getBinding(UnknownInfo, idx))
+                    .map(b => Some(b))
+                case _ => State.pure(None)
+              }
+              tyT1 <- typeCheck(t)
+              tyT1D <- typeShiftOnContextDiff(tyT1)
+              tyT1S <- TypeChecker.simplifyType(tyT1D)
+              typeName <- getNameFromType(tyT1D)
+              instances <- getTypeInstances(typeName)
+              cls <- instances.findM(c =>
+                getTypeClassMethods(c.name).map(_.exists(_ == m))
+              )
+              f = cls match {
+                case Some(value) =>
+                  Desugar.toTypeInstanceMethodID(m, typeName, value.name)
+                case None => Desugar.toMethodID(m, typeName)
+              }
+            } yield Value(s"${methodToName(f)}")
+        }
       case TermFold(_, _)   => StateT.pure(Value("pure "))
       case TermInt(_, i)    => StateT.pure(Value(i.toString))
       case TermFloat(_, f)  => StateT.pure(Value(f.toString))
@@ -426,7 +447,7 @@ object Grin {
       // an error would be thrown if we use the grin `()` unit value
       // for return in functions. Thus we use the integer `0` instead.
       case TermUnit(_) => State.pure(Value("0"))
-      case TermVar(_, idx, _) =>
+      case TermVar(info, idx, ctxLen) =>
         for {
           variable <- toVariable(idx)
           sVariable = substFunc(variable)

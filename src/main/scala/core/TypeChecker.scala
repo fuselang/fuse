@@ -17,6 +17,7 @@ import parser.Info.ShowInfo.*
 import scala.annotation.tailrec
 import scala.util.*
 import fuse.Utils.*
+import fuse.SpecializedMethodUtils
 import core.Instantiations.Instantiation
 
 object TypeChecker {
@@ -107,7 +108,6 @@ object TypeChecker {
           aI <- insts.traverse(applyInst(_)(shift = true))
           // TODO: Build closure instantiation to have its var type
           // available in monomorphization and code-gen phases.
-          // _ = debug("sol1", sol1)
         } yield (TypeArrow(info, eAS1, typeShift(-1, eCS)), aI)
       case TermAbs(info, variable, variableType, expr, returnType) =>
         for {
@@ -136,7 +136,6 @@ object TypeChecker {
           simplifiedFun <- EitherT.liftF(simplifyType(funType))
           (ty, (appInsts, solutions)) <- inferApp(simplifiedFun, arg)
           buildInsts <- Instantiations.build(fun, solutions, insts ::: appInsts)
-          _ = debug("------> buildInsts", buildInsts)
         } yield (ty, buildInsts)
       case TermProj(info, ty, label) =>
         for {
@@ -163,7 +162,9 @@ object TypeChecker {
           typeBounds <- EitherT.liftF(
             getTypeBounds(rootTypeVarOption.getOrElse(tyT1S))
           )
-          methodType <- inferMethod(tyT1, tyT1S, typeBounds, method, info)
+          // If method is already specialized, extract the base method name
+          baseMethod = SpecializedMethodUtils.extractBaseMethodName(method)
+          methodType <- inferMethod(tyT1, tyT1S, typeBounds, baseMethod, info)
         } yield (methodType, insts)
       case TermAssocProj(info, ty, method) =>
         for {
@@ -362,7 +363,7 @@ object TypeChecker {
       typeBounds: List[TypeClass],
       method: String,
       info: Info
-  ): StateEither[Type] =
+  ): StateEither[Type] = {
     (simplifiedType, findRootTypeVar(ty), typeBounds) match {
       case (_: TypeRec | _: TypeAbs, Some(rootTypeVar), _) =>
         getTypeMethod(info, ty, rootTypeVar, method)
@@ -372,8 +373,10 @@ object TypeChecker {
         TypeError.format(
           MissingTypeAnnotation(info, typeShift(-1, simplifiedType))
         )
-      case _ => TypeError.format(NoMethodsOnTypeError(info, simplifiedType))
+      case _ => 
+        TypeError.format(NoMethodsOnTypeError(info, simplifiedType))
     }
+  }
 
   def inferTypeClassMethod(
       info: Info,

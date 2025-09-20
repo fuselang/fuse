@@ -14,9 +14,9 @@ import core.Types.*
 import parser.Info.Info
 import core.Desugar.MethodNamePrefix
 import parser.Info.ShowInfo.ShowInfoOps
-import fuse.Utils.debug
 import scala.annotation.tailrec
 import parser.Info.UnknownInfo
+import code.GrinUtils.getNameFromType
 
 object Instantiations {
   val BindTypeSeparator = "#"
@@ -61,15 +61,29 @@ object Instantiations {
       solutions: List[TypeESolutionBind],
       acc: List[Instantiation]
   ): StateEither[List[Instantiation]] =
-    debug("t", t)
-    debug("solutions", solutions)
-    debug("acc", acc)
     val tys = solutions.map(_.t)
     val cls = solutions.map(_.cls).flatten
-    (t, solutions) match {
-      case (_, Nil) => acc.pure
-      case (app: TermApp, _) =>
-        val rootTerm = findRootTerm(app)
+    val rootTerm = findRootTerm(t)
+    (t, rootTerm, solutions) match {
+      case (_, _, Nil) => acc.pure
+      case (_: TermApp, methodTerm @ TermMethodProj(_, obj, method), _) =>
+        for {
+          (objType, _) <- pureInfer(obj) // Infer type of the object, not the method
+          typeName <- EitherT.liftF(getNameFromType(objType))
+          // Enhanced: Detect if this is a trait method vs direct type method
+          typeInstances <- EitherT.liftF(getTypeInstances(typeName))
+          matchingTraitOpt <- EitherT.liftF(typeInstances.findM(instance =>
+            getTypeClassMethods(instance.name).map(_.exists(_ == method))
+          ))
+          methodID = matchingTraitOpt match {
+            case Some(traitInstance) =>
+              Desugar.toTypeInstanceMethodID(method, typeName, traitInstance.name)
+            case None =>
+              Desugar.toMethodID(method, typeName)
+          }
+        } yield acc :+ Instantiation(methodID, methodTerm, tys, cls) // Store the whole TermMethodProj
+      
+      case (app: TermApp, _, _) =>
         for {
           isFormedSolution <- EitherT.liftF(
             tys
@@ -87,7 +101,7 @@ object Instantiations {
             case _ => acc
           }
         } yield r
-      case (termVar @ TermVar(info, idx, c), _) =>
+      case (termVar @ TermVar(info, idx, c), _, _) =>
         for {
           optionName <- EitherT.liftF(State.inspect { (ctx: Context) =>
             indexToName(ctx, idx)

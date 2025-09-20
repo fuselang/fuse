@@ -2107,7 +2107,56 @@ grinMain _2 =
         """)
     )
   }
-  test("build generic trait functor implementation".ignore) {
+  test("build generic sum type with map function") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+  fun map[B](self, f: A -> B) -> Option[B]
+    match self:
+      Some(v) => Some(f(v))
+      _ => None
+
+fun main() -> i32
+    let o = Some(5)
+    o.map(a => a + 1)
+    0
+        """,
+      BuildOutput("""None#i32 =  pure  (CNone)
+
+Some#i32 t10 =
+ pure  (CSome t10)
+
+mapOptioni32i32' self2 f''3 =
+ case self2 of
+  (CSome v5) ->
+   p7 <- apply f''3 v5
+   p8 <- Some#i32 p7
+   pure p8
+  #default ->
+   p9 <- None#i32
+   pure p9
+
+grinMain _9 =
+ o11 <-  Some#i32 5
+ p19 <- pure (P1c13 )
+ _19 <-  mapOptioni32i32' o11 p19
+ pure 0
+
+c13 a13 =
+ _prim_i32_add a13 1
+
+apply p21 p22 =
+ case p21 of
+  (P1c13 ) ->
+   c13  p22
+""")
+    )
+  }
+  test("build generic trait functor implementation") {
     fuse(
       """
 trait Functor[A]:
@@ -2128,7 +2177,91 @@ fun main() -> i32
     o.map(a => a + 1)
     0
         """,
-      BuildOutput("")
+      BuildOutput("""
+Some#i32 t10 =
+ pure  (CSome t10)
+
+None#i32 =  pure  (CNone)
+
+mapOptionFunctori32i32' self2 f''3 =
+ case self2 of
+  (CSome v5) ->
+   p7 <- apply f''3 v5
+   p8 <- Some#i32 p7
+   pure p8
+  #default ->
+   p9 <- None#i32
+   pure p9
+
+grinMain _9 =
+ o11 <-  Some#i32 5
+ p19 <- pure (P1c13 )
+ _19 <-  mapOptionFunctori32i32' o11 p19
+ pure 0
+
+c13 a13 =
+ _prim_i32_add a13 1
+
+apply p21 p22 =
+ case p21 of
+  (P1c13 ) ->
+   c13  p22
+        """)
+    )
+  }
+  test("build generic option") {
+    fuse("""
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+    fun is_some(self) -> bool
+        match self:
+            Some(v) => true
+            _ => false
+
+    fun is_none(self) -> bool
+        match self:
+            Some(v) => false
+            _ => true
+
+    fun map[B](self, f: A -> B) -> Option[B]
+        match self:
+            Some(v) => Some(f(v))
+            _ => None
+
+    fun get_or_else(self, default: A) -> A
+        match self:
+            Some(a) => a
+            None => default
+
+    fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
+        let v = self.map(f)
+        v.get_or_else(None)
+
+    fun filter(self, f: A -> bool) -> Option[A]
+        match self:
+            Some(a) => {
+                match f(a):
+                    true => self
+                    _ => None
+            }
+            _ => None
+
+    fun to_str(v: i32) -> Option[str]
+        let s = Some(v)
+        s.map(a => int_to_str(a))
+
+fun main() -> i32
+    let o = Some(5)
+    let o1 = o.flat_map(t => Some(t + 1))
+    let l = Option::to_str(5)
+    match l:
+        Some(v) => 0
+        None => 1
+        """,
+      BuildOutput("PLACEHOLDER")
     )
   }
   test("build function on record with tuple type") {

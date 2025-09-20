@@ -95,11 +95,28 @@ object GrinUtils {
     pickFreshName(name)
 
   // Retrieve a name of the passed `ty` param type.
-  def getNameFromType(ty: Type): ContextState[String] =
-    getNameFromIndex(TypeChecker.findRootTypeVar(ty).get.index)
+  def getNameFromType(ty: Type): ContextState[String] = ty match {
+    // For TypeApp like Option[A], extract the root type constructor
+    case TypeApp(_, ty1, _) => getNameFromType(ty1)
+    // For TypeVar, get the name from context
+    case typeVar: TypeVar => getNameFromIndex(typeVar.index)
+    // For other types, try to find root TypeVar
+    case _ =>
+      TypeChecker.findRootTypeVar(ty)
+        .map(typeVar => getNameFromIndex(typeVar.index))
+        .getOrElse(getTypeFallbackName(ty))
+  }
+
+  private def getTypeFallbackName(ty: Type): ContextState[String] = ty match {
+    case TypeArrow(_, _, _) => State.pure("Function")
+    case TypeAll(_, _, _, _, _) => State.pure("Generic")
+    case _ => State.pure(s"UnknownType_${ty.getClass.getSimpleName}")
+  }
 
   def getNameFromIndex(idx: Int): ContextState[String] =
-    State.inspect { ctx => Context.indexToName(ctx, idx).get }
+    State.inspect { ctx =>
+      Context.indexToName(ctx, idx).getOrElse(s"UnknownIndex_$idx")
+    }
 
   def typeCheck(term: Term): ContextState[Type] =
     toContextState(TypeChecker.pureInfer(term).map(_._1))
