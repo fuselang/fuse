@@ -196,6 +196,11 @@ object Grin {
     binding.b match {
       case TermAbbBind(expr: (TermBuiltin | TermClassMethod), _) =>
         State.pure(None)
+      case TermAbbBind(expr: TermTAbs, _) =>
+        // Skip uninstantiated generic functions - these are generic functions
+        // that were never called with concrete types (e.g., unused Option[A].map)
+        // and therefore cannot be code-generated
+        State.pure(None)
       case TermAbbBind(expr, _) =>
         pureToExpr(expr).map(e => {
           val partialFun = extractPartialFun(e)
@@ -295,15 +300,8 @@ object Grin {
         for {
           letValue <- pureToExpr(t1)
           (prepExprs, result) <- getResult(letValue)
-          // Skip type checking if the term contains specialized methods
-          variableType <-
-            if (SpecializedMethodUtils.containsSpecializedMethod(t1)) {
-              // Use a placeholder type - the actual type doesn't matter since
-              // this is post-monomorphization and won't be used for type checking
-              State.pure(TypeUnit(UnknownInfo))
-            } else {
-              typeCheck(t1)
-            }
+          // Get type, using cached type for specialized methods to avoid re-inference
+          variableType <- getSpecializedTermType(t1).flatMap(_.fold(typeCheck(t1))(State.pure))
           fVar <- result match {
             case c: ClosureValue =>
               Context.addBinding(
@@ -411,8 +409,8 @@ object Grin {
       case TermMethodProj(_, t, method) =>
         method match {
           case m if SpecializedMethodUtils.isSpecializedMethod(m) =>
-            // Already specialized - skip ALL processing and use as-is
-            State.pure(Value(s"${methodToName(m)}"))
+            // For specialized methods, return as FunctionValue to preserve type information
+            State.pure(FunctionValue(s"${methodToName(m)}", 2))
           case m =>
             // Not specialized - need type checking and method ID computation
             for {
@@ -447,6 +445,14 @@ object Grin {
       // an error would be thrown if we use the grin `()` unit value
       // for return in functions. Thus we use the integer `0` instead.
       case TermUnit(_) => State.pure(Value("0"))
+      case TermTAbs(_, _, _, _) =>
+        // Uninstantiated generic functions should not reach here during normal compilation
+        // This can happen when a generic function is defined but never used with concrete types
+        // Return a placeholder to avoid match errors during processing
+        State.pure(Value("#UNINSTANTIATED_GENERIC"))
+      case TermAssocProj(_, _, method) =>
+        // Associated function projections (like Option::to_str when used as a value)
+        State.pure(Value(s"${methodToName(method)}"))
       case TermVar(info, idx, ctxLen) =>
         for {
           variable <- toVariable(idx)
@@ -460,7 +466,8 @@ object Grin {
               })
             case (v, TermAbbBind(t, Some(ty))) =>
               FunctionValue(v, getFunctionArity(ty)).pure[ContextState]
-            case (v, _) => Value(v).pure[ContextState]
+            case (v, _) =>
+              Value(v).pure[ContextState]
           }
         } yield expr
     }

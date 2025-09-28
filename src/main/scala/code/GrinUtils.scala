@@ -125,8 +125,7 @@ object GrinUtils {
     stateEither.value.map(v =>
       v match {
         case Right(v) => v
-        case Left(e) =>
-          throw new RuntimeException(e)
+        case Left(e) => throw new RuntimeException(e)
       }
     )
 
@@ -141,6 +140,25 @@ object GrinUtils {
     )
 
   case class PrimOp(t: String, op: String)
+
+  /** Get type of specialized terms without re-inferring */
+  def getSpecializedTermType(term: Term): ContextState[Option[Type]] = term match {
+    case TermApp(_, fun, _) => getSpecializedTermType(fun).map(_.flatMap {
+      case TypeArrow(_, _, res) => Some(res)
+      case _ => None
+    })
+    case TermMethodProj(_, _, m) if fuse.SpecializedMethodUtils.isSpecializedMethod(m) =>
+      for {
+        idx <- State.inspect[Context, Option[Int]](nameToIndex(_, m))
+        result <- idx.fold(State.pure[Context, Option[Type]](None))(i =>
+          toContextStateOption(getBinding(parser.Info.UnknownInfo, i)).map(_.flatMap {
+            case TermAbbBind(_, Some(ty)) => Some(ty)
+            case _ => None
+          })
+        )
+      } yield result
+    case _ => State.pure(None)
+  }
 
   object PrimOp:
     val BuiltInOps = BuiltIn.Ops.map(_.operator)

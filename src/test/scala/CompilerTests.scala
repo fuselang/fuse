@@ -127,8 +127,9 @@ impl Option[A]:
             None => default
 
     fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
-        let v = self.map(f)
-        v.get_or_else(None)
+        match self:
+            Some(a) => f(a)
+            None => None
 
     fun filter(self, f: A -> bool) -> Option[A]
         match self:
@@ -2209,6 +2210,85 @@ apply p21 p22 =
         """)
     )
   }
+  test("build minimal generic option") {
+    fuse("""
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+    fun map[B](self, f: A -> B) -> Option[B]
+        match self:
+            Some(v) => Some(f(v))
+            _ => None
+
+    fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
+        match self:
+            Some(a) => f(a)
+            None => None
+
+fun main() -> i32
+    0
+        """,
+      BuildOutput("""grinMain _0 =
+ pure 0
+""")
+    )
+  }
+  test("build generic option with map") {
+    fuse("""
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+    fun map[B](self, f: A -> B) -> Option[B]
+        match self:
+            Some(v) => Some(f(v))
+            _ => None
+
+fun main() -> i32
+    let o = Some(5)
+    let o1 = o.map(a => a + 1)
+    match o1:
+        Some(v) => v
+        None => 0
+        """,
+      BuildOutput("""None#i32 =  pure  (CNone)
+
+Some#i32 t10 =
+ pure  (CSome t10)
+
+mapOptioni32i32' self2 f''3 =
+ case self2 of
+  (CSome v5) ->
+   p7 <- apply f''3 v5
+   p8 <- Some#i32 p7
+   pure p8
+  #default ->
+   p9 <- None#i32
+   pure p9
+
+grinMain _9 =
+ o11 <-  Some#i32 5
+ p19 <- pure (P1c13 )
+ o119 <-  mapOptioni32i32' o11 p19
+ case o119 of
+  (CSome v21) ->
+   pure v21
+  (CNone ) ->
+   pure 0
+
+c13 a13 =
+ _prim_i32_add a13 1
+
+apply p23 p24 =
+ case p23 of
+  (P1c13 ) ->
+   c13  p24
+""")
+    )
+  }
   test("build generic option") {
     fuse("""
 type Option[A]:
@@ -2237,8 +2317,9 @@ impl Option[A]:
             None => default
 
     fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
-        let v = self.map(f)
-        v.get_or_else(None)
+        match self:
+            Some(a) => f(a)
+            None => None
 
     fun filter(self, f: A -> bool) -> Option[A]
         match self:
@@ -2261,7 +2342,69 @@ fun main() -> i32
         Some(v) => 0
         None => 1
         """,
-      BuildOutput("PLACEHOLDER")
+      BuildOutput("""None#i32 =  pure  (CNone)
+
+None#i32 =  pure  (CNone)
+
+Some#i32 t10 =
+ pure  (CSome t10)
+
+Some#i32 t12 =
+ pure  (CSome t12)
+
+mapOptionstri32' self4 f''5 =
+ case self4 of
+  (CSome v7) ->
+   p9 <- apply f''5 v7
+   p10 <- Some#i32 p9
+   pure p10
+  #default ->
+   p11 <- pure (P1Some#i32)
+   pure p11
+
+flatmapOptioni32i32' self11 f''12 =
+ case self11 of
+  (CSome a14) ->
+   p16 <- apply f''12 a14
+   pure p16
+  (CNone ) ->
+   p17 <- pure (P1Some#i32)
+   pure p17
+
+tostrOption' v17 =
+ s19 <-  Some#i32 v17
+ p27 <- pure (P1c21 )
+ mapOptionstri32' s19 p27
+
+c21 a21 =
+ _prim_int_str a21
+
+grinMain _27 =
+ o29 <-  Some#i32 5
+ p38 <- pure (P1c31 )
+ o138 <-  flatmapOptioni32i32' o29 p38
+ l40 <-  tostr' 5
+ case l40 of
+  (CSome v42) ->
+   pure 0
+  (CNone ) ->
+   pure 1
+
+c31 t31 =
+ p33 <- _prim_i32_add t31 1
+ Some#i32 p33
+
+apply p44 p45 =
+ case p44 of
+  (P1Some#i32 ) ->
+   Some#i32  p45
+  (P1Some#i32 ) ->
+   Some#i32  p45
+  (P1c21 ) ->
+   c21  p45
+  (P1c31 ) ->
+   c31  p45
+""")
     )
   }
   test("build function on record with tuple type") {

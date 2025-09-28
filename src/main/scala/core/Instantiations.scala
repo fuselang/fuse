@@ -21,6 +21,17 @@ import code.GrinUtils.getNameFromType
 object Instantiations {
   val BindTypeSeparator = "#"
 
+  def getTypeArrity(ty: Type): Int = ty match {
+    case TypeAll(_, _, _, _, a: TypeAll) => 1 + getTypeArrity(a)
+    case TypeAll(_, _, _, _, _)          => 1
+    case _                               => 0
+  }
+
+  def isAllPureTypeVars(tys: List[Type]): Boolean = tys.forall {
+    case _: TypeVar => true
+    case _ => false
+  }
+
   case class Instantiation(
       i: String,
       term: Term,
@@ -60,12 +71,13 @@ object Instantiations {
       t: Term,
       solutions: List[TypeESolutionBind],
       acc: List[Instantiation]
-  ): StateEither[List[Instantiation]] =
+  ): StateEither[List[Instantiation]] = {
     val tys = solutions.map(_.t)
     val cls = solutions.map(_.cls).flatten
     val rootTerm = findRootTerm(t)
+
     (t, rootTerm, solutions) match {
-      case (_, _, Nil) => acc.pure
+      case (_, _, Nil) => acc.pure[StateEither]
       case (_: TermApp, methodTerm @ TermMethodProj(_, obj, method), _) =>
         for {
           (objType, _) <- pureInfer(obj) // Infer type of the object, not the method
@@ -81,7 +93,7 @@ object Instantiations {
             case None =>
               Desugar.toMethodID(method, typeName)
           }
-        } yield acc :+ Instantiation(methodID, methodTerm, tys, cls) // Store the whole TermMethodProj
+        } yield acc :+ Instantiation(methodID, methodTerm, tys, cls)
       
       case (app: TermApp, _, _) =>
         for {
@@ -103,28 +115,29 @@ object Instantiations {
         } yield r
       case (termVar @ TermVar(info, idx, c), _, _) =>
         for {
-          optionName <- EitherT.liftF(State.inspect { (ctx: Context) =>
-            indexToName(ctx, idx)
-          })
+          optionName <- EitherT.liftF(State.inspect(indexToName(_, idx)))
           name <- optionName match {
             case Some(name) => name.pure[StateEither]
             case None       => TypeError.format(NotFoundTypeError(info))
           }
-        } yield acc :+ Instantiation(name, termVar, tys, cls)
-      case _ => acc.pure
+          // Skip data constructors with unresolved type parameters
+          // Data constructors are uppercase and don't contain specialized suffix
+          isDataConstructor = name.headOption.exists(_.isUpper) && !name.contains("#")
+          shouldSkip = isAllPureTypeVars(tys) && isDataConstructor
+          result <- shouldSkip match {
+            case true  => acc.pure[StateEither]
+            case false => (acc :+ Instantiation(name, termVar, tys, cls)).pure[StateEither]
+          }
+        } yield result
+      case _ => acc.pure[StateEither]
     }
+  }
 
   @tailrec
   def findRootTerm(t: Term): Term = t match {
     case v @ TermVar(_, _, _) => v
     case TermApp(_, t1, t2)   => findRootTerm(t1)
     case _                    => t
-  }
-
-  def getTypeArrity(ty: Type): Int = ty match {
-    case TypeAll(_, _, _, _, a: TypeAll) => 1 + getTypeArrity(a)
-    case TypeAll(_, _, _, _, _)          => 1
-    case _                               => 0
   }
 
   def distinct(insts: List[Instantiation]): List[Instantiation] =

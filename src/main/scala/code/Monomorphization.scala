@@ -41,11 +41,12 @@ object Monomorphization {
   def replace(binds: List[Bind]): List[Bind] =
     replaceM(binds).runEmptyA.value
 
-  def replaceM(binds: List[Bind]): ContextState[List[Bind]] =
+  def replaceM(binds: List[Bind]): ContextState[List[Bind]] = {
     // Collect instantiations.
     val insts = Instantiations.distinct(binds.map(_.insts).flatten)
     insts match {
-      case Nil => binds.pure[ContextState]
+      case Nil =>
+        binds.pure[ContextState]
       case _ =>
         for {
           // Create specialilized functions for each bindig that has corresponding
@@ -54,9 +55,10 @@ object Monomorphization {
           // Replace each generic function invocation with a specialized function.
           modifiedBinds <- specializedBinds.traverse(replaceInstantiations(_))
           // Do a recursive replace until no generic instantiations are found.
-          ibinds = replace(modifiedBinds)
+          ibinds <- replaceM(modifiedBinds)
         } yield ibinds
     }
+  }
 
   /** Creates specialized functions (binds) for `binds` by using list of
     * instantiations.
@@ -74,8 +76,7 @@ object Monomorphization {
       binds: List[Bind],
       insts: List[Instantiation]
   ): ContextState[List[Bind]] =
-    binds
-      .foldLeftM((List[Bind](), List[Shift]())) {
+    binds.foldLeftM((List[Bind](), List[Shift]())) {
         case ((binds, shifts), bind) =>
           getBindInstantiations(bind, insts).flatMap(_ match {
             case Nil =>
@@ -261,11 +262,7 @@ object Monomorphization {
         (specBindIndex, ctxlen) <- State.inspect { (ctx: Context) =>
           (nameToIndex(ctx, specBindName), ctx._1.length)
         }
-        (replacedBinding, insts) = (
-          acc.b,
-          inst.term,
-          inst.r.orElse(specBindIndex)
-        ) match {
+        (replacedBinding, insts) = (acc.b, inst.term, inst.r.orElse(specBindIndex)) match {
           case (TermAbbBind(tT, ty), tC: TermMethodProj, Some(s)) =>
             handleMethodProjReplacement(tT, ty, tC, specBindName, acc, inst)
           case (TermAbbBind(tT, ty), tC: TermVar, Some(s)) =>
