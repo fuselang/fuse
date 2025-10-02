@@ -129,3 +129,7 @@ De Bruijn index bugs often manifest as type errors in later phases (like Grin ge
 - add to memory; always try to make as least number of changes (files and lines) to find the correct solution.
 - add to memory; always define functions in file below the function it's being used it
 - add to memory. every instantiation collected during monomorphization phase must be applied; in case they're not applied an infinite recurion (stack overflow) might happen, do not apply band-aid fixes for such cases rather focus on root cause resolution of instantiation not being replaced.
+- add to memory. always try to make the test pass with its existing structure, instead of changing the test.
+- add to memory. always use the assertion for the complete `BuildOutput` (grin code) for compiler build tests.
+- add to memory. always incluide a debugging step in the planning phase when requested to solve an issue.
+- add to memory. always ensure all tests are passing when making incremental changes by running the whole test suite.

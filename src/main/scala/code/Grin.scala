@@ -192,7 +192,7 @@ object Grin {
 
   def toLambdaBinding(
       binding: Bind
-  ): ContextState[Option[(List[LambdaBinding], List[PartialFunValue])]] =
+  ): ContextState[Option[(List[LambdaBinding], List[PartialFunValue])]] = {
     binding.b match {
       case TermAbbBind(expr: (TermBuiltin | TermClassMethod), _) =>
         State.pure(None)
@@ -205,11 +205,13 @@ object Grin {
         pureToExpr(expr).map(e => {
           val partialFun = extractPartialFun(e)
           val closures = lambdaLift(e)
-          val lambda = LambdaBinding(nameBind(binding.i), e)
+          val lambdaName = nameBind(binding.i)
+          val lambda = LambdaBinding(lambdaName, e)
           Some(lambda :: closures, partialFun)
         })
       case _ => State.pure(None)
     }
+  }
 
   def extractPartialFun(e: Expr): List[PartialFunValue] = e match {
     case p: PartialFunValue       => List(p)
@@ -265,9 +267,9 @@ object Grin {
       case TermAbs(_, variable, variableType, c: TermClosure, _) =>
         Context
           .addBinding("c", VarBind(variableType))
-          .flatMap(name => toClosureValue(name, c))
+          .flatMap(name => toClosureValue(name, name, c))
       case c: TermClosure =>
-        addTempVariable("c").flatMap(name => toClosureValue(name, c))
+        addTempVariable("c").flatMap(name => toClosureValue(name, name, c))
       case TermAbs(_, variable, variableType, body, _) =>
         for {
           variable1 <- includeFunctionSuffix(variable, variableType)
@@ -297,31 +299,52 @@ object Grin {
           }
         } yield MultiLineExpr(prepExprs, app)
       case TermLet(_, variable, t1, t2) =>
-        for {
-          letValue <- pureToExpr(t1)
-          (prepExprs, result) <- getResult(letValue)
-          // Get type, using cached type for specialized methods to avoid re-inference
-          variableType <- getSpecializedTermType(t1).flatMap(_.fold(typeCheck(t1))(State.pure))
-          fVar <- result match {
-            case c: ClosureValue =>
-              Context.addBinding(
-                (c: Expr).show,
-                TermAbbBind(t1, Some(variableType))
-              )
-            case _ => Context.addBinding(variable, VarBind(variableType))
-          }
-          prepExprs2 = result match {
-            case _: ClosureValue =>
-              prepExprs :+ BindExpr("", "", List(result))
-            case _ =>
-              prepExprs :+ BindExpr(
+        // Special handling for TermFix(TermClosure): use original variable name instead of temp name
+        // This makes recursive calls work naturally (e.g., "iter" instead of "c7")
+        t1 match {
+          case TermFix(_, c: TermClosure) =>
+            for {
+              // Generate unique numbered name for closure to prevent collisions with top-level functions
+              counter <- addTempVariable().map(_.filter(_.isDigit))
+              closureName = s"$variable$counter"  // e.g., "iter" -> "iter7"
+              // Use original variable name for matching self-references, numbered name for output
+              letValue <- toClosureValue(variable, closureName, c)
+              (prepExprs, result) <- getResult(letValue)
+              // Get type, extracting from closure structure to avoid re-inference
+              closureType <- GrinUtils.getClosureType(c)
+              specializedType <- getSpecializedTermType(t1)
+              variableTypeRaw <- specializedType.orElse(closureType).fold(typeCheck(t1))(State.pure)
+              variableType <- typeShiftOnContextDiff(variableTypeRaw)
+              // Store the unwrapped TermClosure (not TermFix) to avoid infinite recursion when referenced
+              // Use numbered name to prevent collision with top-level functions
+              fVar <- Context.addBinding(closureName, TermAbbBind(c, Some(variableType)))
+              prepExprs2 = prepExprs :+ BindExpr("", "", List(result))
+              expr <- pureToExpr(t2)
+            } yield MultiLineExpr(prepExprs2, expr)
+          case _ =>
+            // Regular TermLet processing
+            for {
+              letValue <- pureToExpr(t1)
+              (prepExprs, result) <- getResult(letValue)
+              // Get type, using cached type for specialized methods to avoid re-inference
+              specializedType <- getSpecializedTermType(t1)
+              // For closures, try to extract type from structure without type-checking
+              closureType <- t1 match {
+                case c: TermClosure => GrinUtils.getClosureType(c)
+                case TermFix(_, c) => GrinUtils.getClosureType(c)
+                case _ => State.pure(None)
+              }
+              variableTypeRaw <- specializedType.orElse(closureType).fold(typeCheck(t1))(State.pure)
+              variableType <- typeShiftOnContextDiff(variableTypeRaw)
+              fVar <- Context.addBinding(variable, VarBind(variableType))
+              prepExprs2 = prepExprs :+ BindExpr(
                 show"$fVar <- ${PureExpr(result)}".strip(),
                 fVar,
                 List(result)
               )
-          }
-          expr <- pureToExpr(t2)
-        } yield MultiLineExpr(prepExprs2, expr)
+              expr <- pureToExpr(t2)
+            } yield MultiLineExpr(prepExprs2, expr)
+        }
       case TermTag(_, tag, TermUnit(_), _) =>
         State.pure(Value(s"(${cTag(tag)})"))
       case TermTag(_, tag, term, _) =>
@@ -450,8 +473,12 @@ object Grin {
         // This can happen when a generic function is defined but never used with concrete types
         // Return a placeholder to avoid match errors during processing
         State.pure(Value("#UNINSTANTIATED_GENERIC"))
+      case TermTApp(_, t, _) =>
+        // Type applications like Nil[B] reach here as TermTApp nodes
+        // Process the underlying term (the constructor/variable)
+        toExpr(t)
       case TermAssocProj(_, _, method) =>
-        // Associated function projections (like Option::to_str when used as a value)
+        // Associated function projections (like List::foldRight when used as a value)
         State.pure(Value(s"${methodToName(method)}"))
       case TermVar(info, idx, ctxLen) =>
         for {
@@ -464,6 +491,19 @@ object Grin {
                 case false => Value(v)
                 case true  => FunctionValue(v, getFunctionArity(ty))
               })
+            case (v, TermAbbBind(c: TermClosure, Some(ty))) =>
+              // When referencing a TermClosure binding (from TermFix in TermLet),
+              // extract free variables and create ClosureValue for partial application
+              GrinUtils.freeVars(c).map { fvs =>
+                val freeVars = fvs.filter(_._1 != v).map(_._1)
+                val arity = GrinUtils.getClosureArity(c)
+                if (freeVars.isEmpty) {
+                  FunctionValue(v, arity)
+                } else {
+                  // Dummy lambda is safe: ClosureValue only used to extract name/freeVars in TermApp (not lifted)
+                  ClosureValue(v, arity, freeVars, LambdaBinding(v, DoExpr(Value(""), 0)))
+                }
+              }
             case (v, TermAbbBind(t, Some(ty))) =>
               FunctionValue(v, getFunctionArity(ty)).pure[ContextState]
             case (v, _) =>
@@ -472,21 +512,22 @@ object Grin {
         } yield expr
     }
 
-  def toClosureValue(name: String, c: TermClosure): ContextState[Expr] = for {
-    substVars <- freeVars(c).map(_.filter(_._1 != name))
+  def toClosureValue(matchName: String, outputName: String, c: TermClosure): ContextState[Expr] = for {
+    substVars <- freeVars(c).map(_.filter(_._1 != matchName))
     (freeVars, tempVars) = substVars.unzip
     substFunc = (variable: String) => {
-      name == variable match {
+      matchName == variable match {
         case false =>
           substVars.find(_._1 == variable).map(_._2).getOrElse(variable)
-        case true => s"$name ${tempVars.mkString(" ")}"
+        case true => s"$outputName ${tempVars.mkString(" ")}"
       }
     }
     expr <- Context.run(toClosureAbs(c)(substFunc))
     closure = tempVars.foldLeft(expr) { (term, v) => Abs(v, term) }
-    ty <- typeCheck(c)
-    arity = getFunctionArity(ty)
-  } yield ClosureValue(name, arity, freeVars, LambdaBinding(name, closure))
+    // Compute arity from closure structure instead of type-checking
+    // (avoids De Bruijn index issues when closure has stale indices from type-checking phase)
+    arity = getClosureArity(c)
+  } yield ClosureValue(outputName, arity, freeVars, LambdaBinding(outputName, closure))
 
   def toClosureAbs(
       closure: Term

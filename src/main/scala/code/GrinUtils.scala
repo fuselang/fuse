@@ -38,6 +38,30 @@ object GrinUtils {
     case _                             => 0
   }
 
+  /** Get closure arity without type-checking (avoids De Bruijn index issues) */
+  def getClosureArity(c: Term): Int = c match {
+    case TermClosure(_, _, _, body) => 1 + getClosureArity(body)
+    case _                           => 0
+  }
+
+  /** Extract closure type from structure without type-checking (avoids De Bruijn index issues) */
+  def getClosureType(c: Term): ContextState[Option[Type]] = c match {
+    case TermFix(_, body) =>
+      // Recursive closure wrapped in fixpoint
+      getClosureType(body)
+    case TermClosure(_, _, Some(paramType), body) =>
+      getClosureType(body).map {
+        case Some(bodyType) => Some(TypeArrow(UnknownInfo, paramType, bodyType))
+        case None => Some(paramType)  // Last parameter, no return type info
+      }
+    case TermClosure(_, _, None, _) =>
+      // No type information available, need to infer
+      State.pure(None)
+    case _ =>
+      // Not a closure, try to get its type if it's a simple term
+      State.pure(None)
+  }
+
   def freeVars(term: Term): ContextState[List[(String, String)]] =
     Context.run(extractFreeVars(term))
 
@@ -50,6 +74,8 @@ object GrinUtils {
               getNameFromIndex(idx).flatMap(v =>
                 addTempVariable(v).map { p => List((v, p)) }
               )
+            // TODO: Capture constructors/functions in closures to avoid De Bruijn index issues
+            // Currently TermAbbBind captures cause wrong constructors due to index corruption
             case _ =>
               State.pure(Nil)
           })
@@ -100,6 +126,8 @@ object GrinUtils {
     case TypeApp(_, ty1, _) => getNameFromType(ty1)
     // For TypeVar, get the name from context
     case typeVar: TypeVar => getNameFromIndex(typeVar.index)
+    // For TypeId (resolved type constructor), return the name directly
+    case TypeId(_, name) => State.pure(name)
     // For other types, try to find root TypeVar
     case _ =>
       TypeChecker.findRootTypeVar(ty)
@@ -110,6 +138,7 @@ object GrinUtils {
   private def getTypeFallbackName(ty: Type): ContextState[String] = ty match {
     case TypeArrow(_, _, _) => State.pure("Function")
     case TypeAll(_, _, _, _, _) => State.pure("Generic")
+    case TypeId(_, name) => State.pure(name)
     case _ => State.pure(s"UnknownType_${ty.getClass.getSimpleName}")
   }
 
@@ -119,7 +148,7 @@ object GrinUtils {
     }
 
   def typeCheck(term: Term): ContextState[Type] =
-    toContextState(TypeChecker.pureInfer(term).map(_._1))
+    toContextState(TypeChecker.pureInfer(term)(checking = false).map(_._1))
 
   def toContextState[T](stateEither: StateEither[T]): ContextState[T] =
     stateEither.value.map(v =>
@@ -156,6 +185,19 @@ object GrinUtils {
             case _ => None
           })
         )
+      } yield result
+    case TermVar(_, idx, _) =>
+      // Handle specialized data constructors (e.g., Cons#i32, Nil#i32)
+      for {
+        nameOpt <- State.inspect[Context, Option[String]](indexToName(_, idx))
+        result <- nameOpt match {
+          case Some(name) if name.contains("#") =>
+            toContextStateOption(getBinding(parser.Info.UnknownInfo, idx)).map(_.flatMap {
+              case TermAbbBind(_, Some(ty)) => Some(ty)
+              case _ => None
+            })
+          case _ => State.pure(None)
+        }
       } yield result
     case _ => State.pure(None)
   }

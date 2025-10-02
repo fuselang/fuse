@@ -112,11 +112,20 @@ object Shifting {
       c: Int,
       t: Term
   ): Term = termMap(onVar, onType, (term) => term, c, t)
-  
+
   def termMap(
       onVar: ShiftVarFunc[Term],
       onType: TypeVarFunc,
       onMethodProj: TermMethodProj => Term,
+      c: Int,
+      t: Term
+  ): Term = termMap(onVar, onType, onMethodProj, (assocProj) => assocProj, c, t)
+
+  def termMap(
+      onVar: ShiftVarFunc[Term],
+      onType: TypeVarFunc,
+      onMethodProj: TermMethodProj => Term,
+      onAssocProj: TermAssocProj => Term,
       c: Int,
       t: Term
   ): Term = {
@@ -151,11 +160,12 @@ object Shifting {
       case TermLet(info, i, t1, t2) =>
         TermLet(info, i, iter(c, t1), iter(c + 1, t2))
       case TermProj(info, t, i)       => TermProj(info, iter(c, t), i)
-      case m: TermMethodProj => 
+      case m: TermMethodProj =>
         val processed = TermMethodProj(m.info, iter(c, m.t), m.i)
         onMethodProj(processed)
-      case TermAssocProj(info, ty, i) =>
-        TermAssocProj(info, onType(c, ty), i)
+      case a: TermAssocProj =>
+        val processed = TermAssocProj(a.info, onType(c, a.t), a.i)
+        onAssocProj(processed)
       case TermRecord(info, v) =>
         TermRecord(info, v.map((i, t) => (i, iter(c, t))))
       case TermTag(info, i, t, ty) =>

@@ -123,6 +123,26 @@ object Context {
         case _            => TypeError.format(BindingNotFoundTypeError(info))
       })
 
+  /** Check if a variable at the given index is a closure parameter.
+    *
+    * Closure parameters are:
+    * - Bound with VarBind (not TermAbbBind or other types)
+    * - Not recursive function parameters (which start with "^")
+    *
+    * This is used during instantiation collection to skip creating
+    * instantiations for runtime closure parameters, which should not
+    * be monomorphized.
+    */
+  def isClosureParameter(ctx: Context, idx: Int): Boolean = {
+    getNotes(ctx, withMarks = false).lift(idx).exists {
+      case (name, VarBind(_)) =>
+        // VarBind indicates a variable binding (like closure parameters)
+        // Exclude recursive function parameters (start with "^")
+        !name.startsWith(Desugar.RecursiveFunctionParamPrefix)
+      case _ => false
+    }
+  }
+
   def getAlgebraicDataTypeVar(
       info: Info,
       node: String

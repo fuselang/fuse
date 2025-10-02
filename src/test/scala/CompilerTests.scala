@@ -182,6 +182,24 @@ fun main() -> Unit
     ()
         """)
   }
+  test("check generic list with map_2 non-recursive") {
+    fuse("""
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun simple_map[B](self, f: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(f(h), Nil[B])
+            Nil => Nil[B]
+
+fun main() -> Unit
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.simple_map(v => v + 1)
+    ()
+        """)
+  }
   test("check lambda calc") {
     fuse("""
 type List[T]:
@@ -1657,9 +1675,9 @@ fun main() -> i32
         """,
       BuildOutput("""
 grinMain _0 =
- c2  1
+ value2 1
 
-c2 a2 =
+value2 a2 =
  _prim_i32_add a2 1
         """)
     )
@@ -1673,9 +1691,9 @@ fun main() -> i32
         """,
       BuildOutput("""
 grinMain _0 =
- c2  1 2
+ value2 1 2
 
-c2 a2 b3 =
+value2 a2 b3 =
  p5 <- _prim_i32_add a2 b3
  _prim_i32_add p5 2
         """)
@@ -1690,9 +1708,9 @@ fun main() -> i32
         """,
       BuildOutput("""
 grinMain _0 =
- c2  1
+ value2 1
 
-c2 a2 =
+value2 a2 =
  _prim_i32_add a2 1
         """)
     )
@@ -1706,9 +1724,9 @@ fun main() -> i32
         """,
       BuildOutput("""
 grinMain _0 =
- c2  1 2
+ value2 1 2
 
-c2 a2 b3 =
+value2 a2 b3 =
  p5 <- _prim_i32_add a2 b3
  _prim_i32_add p5 2
         """)
@@ -1729,8 +1747,8 @@ identity#str v0 =
  pure v0
 
 grinMain _1 =
- s3 <-  identity#str #"Hello World"
- _prim_string_print s3
+ s2 <-  identity#str #"Hello World"
+ _prim_string_print s2
         """)
     )
   }
@@ -1754,10 +1772,10 @@ identity#i32 v1 =
  pure v1
 
 grinMain _2 =
- s4 <-  identity#str #"Hello World"
- i6 <-  identity#i32 1
- _8 <-  _prim_string_print s4
- pure i6
+ s3 <-  identity#str #"Hello World"
+ i4 <-  identity#i32 1
+ _6 <-  _prim_string_print s3
+ pure i4
         """)
     )
   }
@@ -1797,11 +1815,11 @@ id#f32 a5 =
  identity#str a5
 
 grinMain _6 =
- s8 <-  id#str #"Hello World"
- i10 <-  id#i32 5
- f12 <-  id#f32 99.9
- _14 <-  _prim_string_print s8
- pure i10
+ s7 <-  id#str #"Hello World"
+ i8 <-  id#i32 5
+ f9 <-  id#f32 99.9
+ _11 <-  _prim_string_print s7
+ pure i8
         """)
     )
   }
@@ -1852,9 +1870,9 @@ additioni32Add' a3 b4 =
 
 grinMain _5 =
  s7 <-  summarize #"Hello" #"World"
- a9 <-  additioni32Add' 2 3
- _11 <-  _prim_string_print s7
- pure a9
+ a8 <-  additioni32Add' 2 3
+ _10 <-  _prim_string_print s7
+ pure a8
         """)
     )
   }
@@ -1906,7 +1924,7 @@ grinMain _18 =
  tweet20 <-  Tweet #"elon" #"work!"
  p23 <- summarizeTweetSummary' tweet20
  _25 <-  _prim_string_print p23
- _27 <-  notifyTweetSummary' tweet20
+ _26 <-  notifyTweetSummary' tweet20
  pure 0
         """)
     )
@@ -1957,7 +1975,7 @@ grinMain _15 =
  tweet17 <-  Tweet #"elon" #"work!"
  p20 <- summarizeTweetSummary' tweet17
  _22 <-  _prim_string_print p20
- _24 <-  notifyTweetSummary' tweet17
+ _23 <-  notifyTweetSummary' tweet17
  pure 0
         """)
     )
@@ -1995,12 +2013,12 @@ X#i32 v0 =
  pure (CX v0)
 
 grinMain _2 =
- x4 <-  X#i32 1
- p8 <- do
-   case x4 of
-    (CX p7) ->
-     pure p7
- pure p8""")
+ x3 <-  X#i32 1
+ p7 <- do
+   case x3 of
+    (CX p6) ->
+     pure p6
+ pure p7""")
     )
   }
   test("build generic point type") {
@@ -2019,12 +2037,12 @@ Point#i32#str x0 y1 =
  pure (CPoint x0 y1)
 
 grinMain _4 =
- p6 <-  Point#i32#str 1 #"2"
- p11 <- do
-   case p6 of
-    (CPoint p9 p10) ->
-     pure p9
- pure p11
+ p5 <-  Point#i32#str 1 #"2"
+ p10 <- do
+   case p5 of
+    (CPoint p8 p9) ->
+     pure p8
+ pure p10
     """)
     )
   }
@@ -2042,12 +2060,12 @@ Tuple#i32#str t10 t21 =
  pure (CTuple t10 t21)
 
 grinMain _4 =
- t6 <-  Tuple#i32#str 1 #"2"
- p11 <- do
-   case t6 of
-    (CTuple p9 p10) ->
-     pure p9
- pure p11
+ t5 <-  Tuple#i32#str 1 #"2"
+ p10 <- do
+   case t5 of
+    (CTuple p8 p9) ->
+     pure p8
+ pure p10
         """)
     )
   }
@@ -2099,10 +2117,10 @@ Some#i32 t10 =
  pure  (CSome t10)
 
 grinMain _2 =
- o4 <-  Some#i32 5
- case o4 of
-  (CSome v6) ->
-   pure v6
+ o3 <-  Some#i32 5
+ case o3 of
+  (CSome v5) ->
+   pure v5
   (CNone ) ->
    pure 1
         """)
@@ -2142,18 +2160,18 @@ mapOptioni32i32' self2 f''3 =
    pure p9
 
 grinMain _9 =
- o11 <-  Some#i32 5
- p19 <- pure (P1c13 )
- _19 <-  mapOptioni32i32' o11 p19
+ o10 <-  Some#i32 5
+ p14 <- pure (P1c12 )
+ _14 <-  mapOptioni32i32' o10 p14
  pure 0
 
-c13 a13 =
- _prim_i32_add a13 1
+c12 a12 =
+ _prim_i32_add a12 1
 
-apply p21 p22 =
- case p21 of
-  (P1c13 ) ->
-   c13  p22
+apply p16 p17 =
+ case p16 of
+  (P1c12 ) ->
+   c12  p17
 """)
     )
   }
@@ -2195,18 +2213,18 @@ mapOptionFunctori32i32' self2 f''3 =
    pure p9
 
 grinMain _9 =
- o11 <-  Some#i32 5
- p19 <- pure (P1c13 )
- _19 <-  mapOptionFunctori32i32' o11 p19
+ o10 <-  Some#i32 5
+ p14 <- pure (P1c12 )
+ _14 <-  mapOptionFunctori32i32' o10 p14
  pure 0
 
-c13 a13 =
- _prim_i32_add a13 1
+c12 a12 =
+ _prim_i32_add a12 1
 
-apply p21 p22 =
- case p21 of
-  (P1c13 ) ->
-   c13  p22
+apply p16 p17 =
+ case p16 of
+  (P1c12 ) ->
+   c12  p17
         """)
     )
   }
@@ -2270,22 +2288,22 @@ mapOptioni32i32' self2 f''3 =
    pure p9
 
 grinMain _9 =
- o11 <-  Some#i32 5
- p19 <- pure (P1c13 )
- o119 <-  mapOptioni32i32' o11 p19
- case o119 of
-  (CSome v21) ->
-   pure v21
+ o10 <-  Some#i32 5
+ p14 <- pure (P1c12 )
+ o114 <-  mapOptioni32i32' o10 p14
+ case o114 of
+  (CSome v16) ->
+   pure v16
   (CNone ) ->
    pure 0
 
-c13 a13 =
- _prim_i32_add a13 1
+c12 a12 =
+ _prim_i32_add a12 1
 
-apply p23 p24 =
- case p23 of
-  (P1c13 ) ->
-   c13  p24
+apply p18 p19 =
+ case p18 of
+  (P1c12 ) ->
+   c12  p19
 """)
     )
   }
@@ -2344,66 +2362,57 @@ fun main() -> i32
         """,
       BuildOutput("""None#i32 =  pure  (CNone)
 
-None#i32 =  pure  (CNone)
-
 Some#i32 t10 =
  pure  (CSome t10)
 
-Some#i32 t12 =
- pure  (CSome t12)
-
-mapOptionstri32' self4 f''5 =
- case self4 of
-  (CSome v7) ->
-   p9 <- apply f''5 v7
-   p10 <- Some#i32 p9
-   pure p10
+mapOptionstri32' self2 f''3 =
+ case self2 of
+  (CSome v5) ->
+   p7 <- apply f''3 v5
+   p8 <- Some#i32 p7
+   pure p8
   #default ->
-   p11 <- pure (P1Some#i32)
-   pure p11
+   p9 <- None#i32
+   pure p9
 
-flatmapOptioni32i32' self11 f''12 =
- case self11 of
-  (CSome a14) ->
-   p16 <- apply f''12 a14
-   pure p16
+flatmapOptioni32i32' self9 f''10 =
+ case self9 of
+  (CSome a12) ->
+   p14 <- apply f''10 a12
+   pure p14
   (CNone ) ->
-   p17 <- pure (P1Some#i32)
-   pure p17
+   p15 <- None#i32
+   pure p15
 
-tostrOption' v17 =
- s19 <-  Some#i32 v17
- p27 <- pure (P1c21 )
- mapOptionstri32' s19 p27
+tostrOption' v15 =
+ s16 <-  Some#i32 v15
+ p20 <- pure (P1c18 )
+ mapOptionstri32' s16 p20
 
-c21 a21 =
- _prim_int_str a21
+c18 a18 =
+ _prim_int_str a18
 
-grinMain _27 =
- o29 <-  Some#i32 5
- p38 <- pure (P1c31 )
- o138 <-  flatmapOptioni32i32' o29 p38
- l40 <-  tostr' 5
- case l40 of
-  (CSome v42) ->
+grinMain _20 =
+ o21 <-  Some#i32 5
+ p26 <- pure (P1c23 )
+ o126 <-  flatmapOptioni32i32' o21 p26
+ l28 <-  tostr' 5
+ case l28 of
+  (CSome v30) ->
    pure 0
   (CNone ) ->
    pure 1
 
-c31 t31 =
- p33 <- _prim_i32_add t31 1
- Some#i32 p33
+c23 t23 =
+ p25 <- _prim_i32_add t23 1
+ Some#i32 p25
 
-apply p44 p45 =
- case p44 of
-  (P1Some#i32 ) ->
-   Some#i32  p45
-  (P1Some#i32 ) ->
-   Some#i32  p45
-  (P1c21 ) ->
-   c21  p45
-  (P1c31 ) ->
-   c31  p45
+apply p32 p33 =
+ case p32 of
+  (P1c18 ) ->
+   c18  p33
+  (P1c23 ) ->
+   c23  p33
 """)
     )
   }
@@ -2447,19 +2456,309 @@ value a7 =
  _prim_i32_add p18 p22
 
 grinMain _22 =
- p32 <- pure (P1c24 )
- p33 <- State#i32#i32 p32
- value p33
+ p28 <- pure (P1c24 )
+ p29 <- State#i32#i32 p28
+ value p29
 
 c24 a24 =
  p26 <- _prim_i32_add a24 1
  p27 <- _prim_i32_add a24 2
  Tuple#i32#i32 p26 p27
 
-apply p34 p35 =
- case p34 of
+apply p30 p31 =
+ case p30 of
   (P1c24 ) ->
-   c24  p35""")
+   c24  p31""")
+    )
+  }
+  test("build generic list with fold right") {
+    fuse("""
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun foldRight[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::foldRight(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::foldRight(self, Nil[B], (h, t) => Cons(f(h), t))
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    0
+        """,
+      BuildOutput("""Cons#i32 h0 t1 =
+ pure  (CCons h0 t1)
+
+Nil#i32 =  pure  (CNil)
+
+foldRightListi32i32' as4 z5 f''6 =
+ case as4 of
+  (CCons x8 xs'9) ->
+   p12'' <- apply f''6 x8
+   p11 <- fetch xs'9
+   p13 <- foldRightListi32i32' p11 z5 f''6
+   p14 <- apply p12'' p13
+   pure p14
+  (CNil ) ->
+   pure z5
+
+mapListi32i32' self14 f''15 =
+ p17 <- Nil#i32
+ p23 <- pure (P2c18 f''15)
+ foldRightListi32i32' self14 p17 p23
+
+c18 f''1519 h19 t20 =
+ p22 <- apply f''1519 h19
+ Cons#i32 p22 t20
+
+grinMain _23 =
+ p25 <- Nil#i32
+ p26 <- Cons#i32 3 p25
+ l26 <-  Cons#i32 2 p26
+ p30 <- pure (P1c28 )
+ l130 <-  mapListi32i32' l26 p30
+ pure 0
+
+c28 v28 =
+ _prim_i32_add v28 1
+
+apply p32 p33 =
+ case p32 of
+  (P2c18 p36) ->
+   pure (P1c18 p36 p33)
+  (P1c18 p34 p35) ->
+   c18 p34 p35 p33
+  (P1c28 ) ->
+   c28  p33
+""")
+    )
+  }
+  test("build generic list with simple map") {
+    fuse("""
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun simple_map[B](self, f: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(f(h), Nil[B])
+            Nil => Nil[B]
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.simple_map(v => v + 1)
+    0
+        """,
+      BuildOutput("""Cons#i32 h0 t1 =
+ pure  (CCons h0 t1)
+
+Nil#i32 =  pure  (CNil)
+
+simplemapListi32i32' self4 f''5 =
+ case self4 of
+  (CCons h7 t'8) ->
+   p10 <- apply f''5 h7
+   p11 <- Nil#i32
+   p12 <- Cons#i32 p10 p11
+   pure p12
+  (CNil ) ->
+   p13 <- Nil#i32
+   pure p13
+
+grinMain _13 =
+ p15 <- Nil#i32
+ p16 <- Cons#i32 3 p15
+ l16 <-  Cons#i32 2 p16
+ p20 <- pure (P1c18 )
+ l120 <-  simplemapListi32i32' l16 p20
+ pure 0
+
+c18 v18 =
+ _prim_i32_add v18 1
+
+apply p22 p23 =
+ case p22 of
+  (P1c18 ) ->
+   c18  p23
+""")
+    )
+  }
+
+  test("build generic list with varied parameter names") {
+    fuse("""
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun map_with_mapper[B](self, mapper: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(mapper(h), Nil[B])
+            Nil => Nil[B]
+
+    fun map_with_transform[B](self, transform: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(transform(h), Nil[B])
+            Nil => Nil[B]
+
+    fun map_with_callback[B](self, callback: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(callback(h), Nil[B])
+            Nil => Nil[B]
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map_with_mapper(x => x + 1)
+    let l2 = l.map_with_transform(y => y * 2)
+    let l3 = l.map_with_callback(z => z + 3)
+    0
+        """,
+      BuildOutput("""Cons#i32 h0 t1 =
+ pure  (CCons h0 t1)
+
+Nil#i32 =  pure  (CNil)
+
+mapwithmapperListi32i32' self4 mapper''5 =
+ case self4 of
+  (CCons h7 t'8) ->
+   p10 <- apply mapper''5 h7
+   p11 <- Nil#i32
+   p12 <- Cons#i32 p10 p11
+   pure p12
+  (CNil ) ->
+   p13 <- Nil#i32
+   pure p13
+
+mapwithtransformListi32i32' self13 transform''14 =
+ case self13 of
+  (CCons h16 t'17) ->
+   p19 <- apply transform''14 h16
+   p20 <- Nil#i32
+   p21 <- Cons#i32 p19 p20
+   pure p21
+  (CNil ) ->
+   p22 <- Nil#i32
+   pure p22
+
+mapwithcallbackListi32i32' self22 callback''23 =
+ case self22 of
+  (CCons h25 t'26) ->
+   p28 <- apply callback''23 h25
+   p29 <- Nil#i32
+   p30 <- Cons#i32 p28 p29
+   pure p30
+  (CNil ) ->
+   p31 <- Nil#i32
+   pure p31
+
+grinMain _31 =
+ p33 <- Nil#i32
+ p34 <- Cons#i32 3 p33
+ l34 <-  Cons#i32 2 p34
+ p38 <- pure (P1c36 )
+ l138 <-  mapwithmapperListi32i32' l34 p38
+ p42 <- pure (P1c40 )
+ l242 <-  mapwithtransformListi32i32' l34 p42
+ p46 <- pure (P1c44 )
+ l346 <-  mapwithcallbackListi32i32' l34 p46
+ pure 0
+
+c36 x36 =
+ _prim_i32_add x36 1
+
+c40 y40 =
+ _prim_i32_mul y40 2
+
+c44 z44 =
+ _prim_i32_add z44 3
+
+apply p48 p49 =
+ case p48 of
+  (P1c36 ) ->
+   c36  p49
+  (P1c40 ) ->
+   c40  p49
+  (P1c44 ) ->
+   c44  p49
+""")
+    )
+  }
+
+  // LIMITATION: Recursive closures with generic types
+  // This test is disabled because recursive closures in generic contexts (like map_2[B])
+  // create TermClosure nodes without type annotations. During monomorphization, we cannot
+  // infer these types because:
+  // 1. The specialized term still contains TypeVars pointing to context (e.g., List type constructor)
+  // 2. Re-inferring types during monomorphization creates existential variables that remain unresolved
+  // 3. GRIN generation runs in a fresh context, so cannot look up types from bindings
+  //
+  // Possible solutions (not yet implemented):
+  // - Type-guided population: traverse specialized type and term in parallel to extract parameter types
+  // - Reconstruct closures with types during type checking phase (before monomorphization)
+  // - Extend GRIN generation to handle closure parameter type inference
+  test("build generic list with iter map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun map_2[B](self, f: A -> B) -> List[B]
+        let iter = (acc, l) => {
+            match l:
+                Cons(h, t) => Cons(f(h), iter(acc, t))
+                Nil => acc
+        }
+        iter(Nil[B], self)
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map_2(v => v + 1)
+    0
+        """,
+      BuildOutput("""Cons#i32 h0 t1 =
+ pure  (CCons h0 t1)
+
+Nil#i32 =  pure  (CNil)
+
+map2Listi32i32' self4 f''5 =
+ p19 <- Nil#i32
+ iter7 f''5 p19 self4
+
+iter7 f''58 acc8 l9 =
+ case l9 of
+  (CCons h11 t'12) ->
+   p14 <- apply f''58 h11
+   p15 <- fetch t'12
+   p16 <- iter7 f''58 acc8 p15
+   p17 <- Cons#i32 p14 p16
+   pure p17
+  (CNil ) ->
+   pure acc8
+
+grinMain _19 =
+ p21 <- Nil#i32
+ p22 <- Cons#i32 3 p21
+ l22 <-  Cons#i32 2 p22
+ p26 <- pure (P1c24 )
+ l126 <-  map2Listi32i32' l22 p26
+ pure 0
+
+c24 v24 =
+ _prim_i32_add v24 1
+
+apply p28 p29 =
+ case p28 of
+  (P1c24 ) ->
+   c24  p29
+""")
     )
   }
 }
