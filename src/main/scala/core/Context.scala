@@ -439,7 +439,7 @@ object Context {
     })
     r <- idx match {
       case Some(v) => v.pure[StateEither]
-      case None    => TypeError.format(ExistentialVariableNotFoundTypeError(eA))
+      case None    => TypeError.format(VariableRequiresTypeAnnotationError(eA))
     }
   } yield (r, eA.cls)
 
@@ -528,7 +528,7 @@ object Context {
   def peel(name: String, emptyOnNotFound: Boolean = false): ContextState[Unit] =
     State.modify { (ctx: Context) =>
       nameToIndex(ctx, name, withMarks = true) match {
-        case Some(_) =>
+        case Some(idx) =>
           val notes = getNotes(ctx, withMarks = true).dropWhile {
             case (v, _) if v == name => false
             case _                   => true
@@ -540,7 +540,8 @@ object Context {
             },
             ctx._2
           )
-        case None => if (emptyOnNotFound) emptyContext else ctx
+        case None =>
+          if (emptyOnNotFound) emptyContext else ctx
       }
     }
 

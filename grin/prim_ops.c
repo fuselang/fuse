@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 #include "prim_ops.h"
 
 #define BUFFER_SIZE 256
@@ -240,4 +241,25 @@ int64_t _prim_char_int(char p1) {
     printf("_prim_char_int(%c)\n", p1);
 #endif
     return (int64_t)p1;
+}
+
+// Additional primitives not in GRIN prelude
+int64_t _prim_int_mod(int64_t p1, int64_t p2) {
+    return p1 % p2;
+}
+
+float _prim_float_mod(float p1, float p2) {
+    return fmodf(p1, p2);
+}
+
+int64_t _prim_bool_and(int64_t p1, int64_t p2) {
+    return p1 && p2;
+}
+
+int64_t _prim_bool_or(int64_t p1, int64_t p2) {
+    return p1 || p2;
+}
+
+int64_t _prim_string_ne(struct string* p1, struct string* p2) {
+    return !_prim_string_eq(p1, p2);
 }

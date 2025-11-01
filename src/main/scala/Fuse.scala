@@ -62,6 +62,8 @@ object Fuse
       "-C",
       GrinPrimOpsFile
     )
+    // IMPORTANT: GRIN must always be invoked through nix-shell to ensure proper environment
+    val grinCommand = s"""nix-shell --run "${grinCommandParts.mkString(" ")}""""
     for {
       result <- compileFile(
         command,
@@ -74,7 +76,7 @@ object Fuse
       }
       grinExitCode <- fuseExitCode match {
         case ExitCode.Success =>
-          executeCommandIO(grinCommandParts.mkString(" ")).map(_ match {
+          executeCommandIO(grinCommand).map(_ match {
             case 0 => ExitCode.Success
             case _ => ExitCode.Error
           })
@@ -118,7 +120,8 @@ object Fuse
 
   /** Execute a command using IO. */
   def executeCommandIO(command: String): IO[Int] = IO.blocking {
-    val pb = new ProcessBuilder(command.split(" ")*)
+    // Use sh -c to handle shell commands like nix-shell properly
+    val pb = new ProcessBuilder("sh", "-c", command)
     val process = pb.start()
     val exitValue = process.waitFor()
     exitValue

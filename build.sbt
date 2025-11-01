@@ -18,6 +18,7 @@ val sharedSettings = Seq(
   libraryDependencies += "com.monovore" %%% "decline-effect" % "2.5.0",
   libraryDependencies += "com.lihaoyi" %%% "fansi" % "0.4.0",
   libraryDependencies += "org.scalameta" %%% "munit" % "1.0.4" % Test,
+  libraryDependencies += "org.typelevel" %%% "munit-cats-effect" % "2.0.0-M5" % Test,
   testFrameworks += new TestFramework("munit.Framework")
 )
 

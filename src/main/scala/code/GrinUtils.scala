@@ -31,6 +31,16 @@ object GrinUtils {
     }
   } yield value
 
+  /** Check if a type requires heap allocation (store/fetch semantics).
+    * User-defined types (records, variants, recursive types) are heap-allocated.
+    */
+  def isHeapAllocatedType(ty: Type): Boolean = ty match {
+    case _: TypeRec => true     // Recursive types
+    case _: TypeVariant => true // Sum types
+    case _: TypeRecord => true  // Product types
+    case _ => false
+  }
+
   def getFunctionArity(ty: Type): Int = ty match {
     case TypeAbs(_, _, a: TypeArrow)   => getFunctionArity(a)
     case TypeArrow(_, _, a: TypeArrow) => 1 + getFunctionArity(a)
@@ -38,27 +48,76 @@ object GrinUtils {
     case _                             => 0
   }
 
+  /** Normalize a function type to a string key for closure map lookup.
+    * This allows distinguishing closures with same arity but different types.
+    * e.g., "i32 -> str" vs "i32 -> Option[i32]"
+    */
+  def typeToKey(ty: Type): String = ty match {
+    case TypeArrow(_, param, result) =>
+      s"${typeToKey(param)}->${typeToKey(result)}"
+    case TypeAbs(_, _, body) =>
+      typeToKey(body)
+    case TypeApp(_, constructor, arg) =>
+      // For TypeApp, normalize to "Constructor[Arg]" format
+      val constructorKey = typeToKey(constructor)
+      val argKey = typeToKey(arg)
+      s"$constructorKey[$argKey]"
+    case TypeVar(_, idx, _) =>
+      // TypeVars are problematic - just use a generic placeholder based on index
+      // This will likely cause mismatches, but better than crashing
+      s"T$idx"
+    case TypeId(_, name) =>
+      name
+    case TypeInt(_) => "i32"
+    case TypeFloat(_) => "f32"
+    case TypeString(_) => "str"
+    case TypeBool(_) => "bool"
+    case TypeUnit(_) => "unit"
+    case TypeRec(_, name, _, _) => name
+    case TypeRecord(_, fields) =>
+      fields.map { case (n, t) => s"$n:${typeToKey(t)}" }.mkString("{", ",", "}")
+    case TypeVariant(_, variants) =>
+      variants.map { case (n, t) => s"$n:${typeToKey(t)}" }.mkString("[", "|", "]")
+    case TypeAll(_, name, _, _, body) =>
+      s"forall $name.${typeToKey(body)}"
+    case _ => ty.getClass.getSimpleName
+  }
+
+  /** Type-to-key that simplifies the type first to resolve TypeVars */
+  def typeToKeySimplified(ty: Type): ContextState[String] = for {
+    simplified <- TypeChecker.simplifyType(ty)
+  } yield typeToKey(simplified)
+
   /** Get closure arity without type-checking (avoids De Bruijn index issues) */
   def getClosureArity(c: Term): Int = c match {
     case TermClosure(_, _, _, body) => 1 + getClosureArity(body)
     case _                           => 0
   }
 
-  /** Extract closure type from structure without type-checking (avoids De Bruijn index issues) */
+  /** Extract closure type from parameter annotations only.
+    * Returns a type built from parameter type annotations.
+    * Uses Unit as placeholder for return type since we only need parameter types for typeKey.
+    * For closures without annotations, returns None to rely on arity-based fallback.
+    */
   def getClosureType(c: Term): ContextState[Option[Type]] = c match {
     case TermFix(_, body) =>
       // Recursive closure wrapped in fixpoint
       getClosureType(body)
     case TermClosure(_, _, Some(paramType), body) =>
+      // Extract inner closure type (if body is also a closure)
       getClosureType(body).map {
-        case Some(bodyType) => Some(TypeArrow(UnknownInfo, paramType, bodyType))
-        case None => Some(paramType)  // Last parameter, no return type info
+        case Some(bodyType) =>
+          // Inner closure - combine types
+          Some(TypeArrow(UnknownInfo, paramType, bodyType))
+        case None =>
+          // Innermost closure - use Unit as placeholder for return type
+          Some(TypeArrow(UnknownInfo, paramType, TypeUnit(UnknownInfo)))
       }
     case TermClosure(_, _, None, _) =>
-      // No type information available, need to infer
+      // No type annotation - return None and rely on arity-based fallback
       State.pure(None)
     case _ =>
-      // Not a closure, try to get its type if it's a simple term
+      // Not a closure
       State.pure(None)
   }
 

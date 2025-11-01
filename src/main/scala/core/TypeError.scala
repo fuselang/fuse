@@ -221,6 +221,11 @@ case class ExistentialVariableNotFoundTypeError(
     code: String = "E0033"
 ) extends TypeError
 
+case class VariableRequiresTypeAnnotationError(
+    eA: TypeEVar,
+    code: String = "E0043"
+) extends TypeError
+
 case class InvalidSubtypeTypeError(
     info: Info,
     termType: Type,
@@ -647,6 +652,13 @@ object TypeError {
       case ExistentialVariableNotFoundTypeError(eA, code) =>
         consoleError(
           s"`${eA.name}` existential variable not found",
+          eA.info,
+          Some(code)
+        )
+          .pure[StateEither]
+      case VariableRequiresTypeAnnotationError(eA, code) =>
+        consoleError(
+          s"explicit type annotation required for variable",
           eA.info,
           Some(code)
         )
