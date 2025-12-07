@@ -130,7 +130,7 @@ object Shifting {
       t: Term
   ): Term = {
     def iter(c: Int, term: Term): Term = term match {
-      case TermVar(info, x, n) => onVar(info, c, x, n)
+      case TermVar(info, x, n)        => onVar(info, c, x, n)
       case TermAbs(info, i, ty, e, r) =>
         TermAbs(
           info,
@@ -153,14 +153,14 @@ object Shifting {
           ty.map(onType(c, _)),
           iter(c + 1, e)
         )
-      case TermApp(info, t1, t2) => TermApp(info, iter(c, t1), iter(c, t2))
-      case TermFix(info, t)      => TermFix(info, iter(c, t))
+      case TermApp(info, t1, t2)     => TermApp(info, iter(c, t1), iter(c, t2))
+      case TermFix(info, t)          => TermFix(info, iter(c, t))
       case TermMatch(info, t, cases) =>
         TermMatch(info, t, cases.map((p, e) => (p, iter(c, e))))
       case TermLet(info, i, t1, t2) =>
         TermLet(info, i, iter(c, t1), iter(c + 1, t2))
-      case TermProj(info, t, i)       => TermProj(info, iter(c, t), i)
-      case m: TermMethodProj =>
+      case TermProj(info, t, i) => TermProj(info, iter(c, t), i)
+      case m: TermMethodProj    =>
         val processed = TermMethodProj(m.info, iter(c, m.t), m.i)
         onMethodProj(processed)
       case a: TermAssocProj =>
@@ -222,11 +222,11 @@ object Shifting {
     */
   def typeMap(onVar: ShiftVarFunc[Type], c: Int, t: Type): Type = {
     def iter(c: Int, tyT: Type): Type = tyT match {
-      case TypeVar(info, x, n) => onVar(info, c, x, n)
-      case TypeEVar(_, _, _)   => tyT
-      case TypeAny(_)          => tyT
-      case TypeId(_, _)        => tyT
-      case TypeClass(_, _)     => tyT
+      case TypeVar(info, x, n)          => onVar(info, c, x, n)
+      case TypeEVar(_, _, _)            => tyT
+      case TypeAny(_)                   => tyT
+      case TypeId(_, _)                 => tyT
+      case TypeClass(_, _)              => tyT
       case TypeRecord(info, fieldTypes) =>
         TypeRecord(
           info,
@@ -242,7 +242,7 @@ object Shifting {
       case TypeRec(info, x, k, tyTi) => TypeRec(info, x, k, iter(c + 1, tyTi))
       case TypeAll(info, x, k, cls, tyTi) =>
         TypeAll(info, x, k, cls, iter(c + 1, tyTi))
-      case TypeAbs(info, x, tyTi) => TypeAbs(info, x, iter(c + 1, tyTi))
+      case TypeAbs(info, x, tyTi)    => TypeAbs(info, x, iter(c + 1, tyTi))
       case TypeApp(info, tyT1, tyT2) =>
         TypeApp(info, iter(c, tyT1), iter(c, tyT2))
       case TypeString(info) => TypeString(info)

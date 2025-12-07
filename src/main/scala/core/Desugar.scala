@@ -132,7 +132,7 @@ object Desugar {
         bt <- bindTypeClass(traitIdentifier.value, typeParams)
         bf <- functions.toList
           .traverse {
-            case Left(f) => bind(FFuncDecl(modifySignature(f.sig), f.exprs))
+            case Left(f)  => bind(FFuncDecl(modifySignature(f.sig), f.exprs))
             case Right(s) =>
               val ms = modifySignature(s)
               for {
@@ -326,7 +326,7 @@ object Desugar {
           typedTerm <- toTermTApp(assocProj, typeArgs)
           computedTerm <- toTermApp(typedTerm, args)
         } yield computedTerm
-      case a: FAbs => toClosure(a, letVariable)
+      case a: FAbs           => toClosure(a, letVariable)
       case FAddition(i1, i2) =>
         toTermOperator(AddOp.operator, i1, i2)
       case FSubtraction(i1, i2) =>
@@ -358,7 +358,7 @@ object Desugar {
           .liftF(toTermVar(info, i))
           .flatMap(_ match {
             case Some(v) => v.pure[StateEither]
-            case None =>
+            case None    =>
               DesugarError.format(VariableNotFoundDesugarError(info, i))
           })
       case FBool(info, true)  => EitherT.rightT(TermTrue(info))
@@ -367,7 +367,7 @@ object Desugar {
       case FFloat(info, f)    => EitherT.rightT(TermFloat(info, f))
       case FString(info, s)   => EitherT.rightT(TermString(info, s))
       case FUnit(info)        => EitherT.rightT(TermUnit(info))
-      case _ =>
+      case _                  =>
         DesugarError.format(ExpressionNotSupportedDesugarError(e.info))
     }
 
@@ -474,7 +474,7 @@ object Desugar {
     optionFuncVar <- EitherT.liftF(toTermVar(e1.info, func))
     funcVar <- optionFuncVar match {
       case Some(v) => v.pure[StateEither]
-      case None =>
+      case None    =>
         DesugarError.format(
           FunctionOperatorNotFoundDesugarError(e1.info, func)
         )
@@ -522,7 +522,7 @@ object Desugar {
 
   def toFlatExpr(actions: List[FDoAction], body: FExpr): StateEither[Term] =
     actions match {
-      case (h: FAssign) :: Nil => toMap(h, body)
+      case (h: FAssign) :: Nil      => toMap(h, body)
       case (a: FAssign) :: lactions =>
         for {
           ft <- withFlatMap(a)
@@ -809,7 +809,7 @@ object Desugar {
       tp: FTypeParamClause
   ): StateEither[Type] =
     tp match {
-      case None => toTypeVar(info, name)
+      case None      => toTypeVar(info, name)
       case Some(tys) =>
         tys
           .foldLeft(toTypeVar(info, name))((acc, tp) =>

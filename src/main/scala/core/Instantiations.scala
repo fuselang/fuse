@@ -29,7 +29,7 @@ object Instantiations {
 
   def isAllPureTypeVars(tys: List[Type]): Boolean = tys.forall {
     case _: TypeVar => true
-    case _ => false
+    case _          => false
   }
 
   case class Instantiation(
@@ -84,21 +84,30 @@ object Instantiations {
         acc.pure[StateEither]
       case (_: TermApp, methodTerm @ TermMethodProj(_, obj, method), _) =>
         for {
-          (objType, _) <- pureInfer(obj) // Infer type of the object, not the method
+          (objType, _) <- pureInfer(
+            obj
+          ) // Infer type of the object, not the method
           typeName <- EitherT.liftF(getNameFromType(objType))
           // Enhanced: Detect if this is a trait method vs direct type method
           typeInstances <- EitherT.liftF(getTypeInstances(typeName))
-          matchingTraitOpt <- EitherT.liftF(typeInstances.findM(instance =>
-            getTypeClassMethods(instance.name).map(_.exists(_ == method))
-          ))
+          matchingTraitOpt <- EitherT.liftF(
+            typeInstances.findM(instance =>
+              getTypeClassMethods(instance.name).map(_.exists(_ == method))
+            )
+          )
           methodID = matchingTraitOpt match {
             case Some(traitInstance) =>
-              Desugar.toTypeInstanceMethodID(method, typeName, traitInstance.name)
+              Desugar.toTypeInstanceMethodID(
+                method,
+                typeName,
+                traitInstance.name
+              )
             case None =>
               Desugar.toMethodID(method, typeName)
           }
         } yield acc :+ Instantiation(methodID, methodTerm, tys, cls)
-      case (_: TermApp, assocProj @ TermAssocProj(_, ty, method), _) if tys.nonEmpty =>
+      case (_: TermApp, assocProj @ TermAssocProj(_, ty, method), _)
+          if tys.nonEmpty =>
         // Handle static method calls with type solutions
         // Extract type arguments from TypeApp structures to get actual type parameter values
         // For foldRight[A, B], solutions may contain [TypeApp(List, A), B]
@@ -135,10 +144,13 @@ object Instantiations {
             case None       => TypeError.format(NotFoundTypeError(info))
           }
           // Handle explicit type applications to data constructors (e.g., Nil[B])
-          isDataConstructor = name.headOption.exists(_.isUpper) && !name.contains("#")
+          isDataConstructor = name.headOption.exists(_.isUpper) && !name
+            .contains("#")
           result <- isDataConstructor match {
-            case true  => (acc :+ Instantiation(name, termVar, List(typ), cls)).pure[StateEither]
-            case false => acc.pure[StateEither]  // Non-constructor, skip
+            case true =>
+              (acc :+ Instantiation(name, termVar, List(typ), cls))
+                .pure[StateEither]
+            case false => acc.pure[StateEither] // Non-constructor, skip
           }
         } yield result
       case (termVar @ TermVar(info, idx, c), _, _) =>
@@ -150,14 +162,20 @@ object Instantiations {
           }
           // Skip data constructors with unresolved type parameters
           // Data constructors are uppercase and don't contain specialized suffix
-          isDataConstructor = name.headOption.exists(_.isUpper) && !name.contains("#")
+          isDataConstructor = name.headOption.exists(_.isUpper) && !name
+            .contains("#")
           // Skip closure parameters - these are runtime values, not generic functions
           // Use semantic binding-based check instead of name pattern matching
-          isClosureParam <- EitherT.liftF(State.inspect(Context.isClosureParameter(_, idx)))
-          shouldSkip = (isAllPureTypeVars(tys) && isDataConstructor) || isClosureParam
+          isClosureParam <- EitherT.liftF(
+            State.inspect(Context.isClosureParameter(_, idx))
+          )
+          shouldSkip = (isAllPureTypeVars(
+            tys
+          ) && isDataConstructor) || isClosureParam
           result <- shouldSkip match {
             case true  => acc.pure[StateEither]
-            case false => (acc :+ Instantiation(name, termVar, tys, cls)).pure[StateEither]
+            case false =>
+              (acc :+ Instantiation(name, termVar, tys, cls)).pure[StateEither]
           }
         } yield result
       case _ => acc.pure[StateEither]
@@ -173,7 +191,7 @@ object Instantiations {
 
   def distinct(insts: List[Instantiation]): List[Instantiation] =
     insts
-      .groupBy(_.i)  // Group by method ID
+      .groupBy(_.i) // Group by method ID
       .flatMap { case (methodID, group) =>
         // For each method, keep only instantiations with max type count
         // This filters out partial instantiations created during incremental type solving
@@ -181,9 +199,12 @@ object Instantiations {
         group.filter(_.tys.length == maxTypeCount)
       }
       .toList
-      .distinctBy(inst => (inst.i, inst.tys))  // Still deduplicate exact duplicates
+      .distinctBy(inst =>
+        (inst.i, inst.tys)
+      ) // Still deduplicate exact duplicates
 
-  /** Extract type arguments from TypeApp structures for static method instantiations.
+  /** Extract type arguments from TypeApp structures for static method
+    * instantiations.
     *
     * For static method calls like `List::foldRight[A, B](...)`, type solutions
     * may contain TypeApp(List, A) instead of just A. This function extracts the

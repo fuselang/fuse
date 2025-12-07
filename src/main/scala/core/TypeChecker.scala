@@ -58,7 +58,9 @@ object TypeChecker {
     case _ => EitherT.rightT(b, Nil)
   }
 
-  def pureInfer(t: Term)(implicit checking: Boolean = true): StateEither[(Type, List[Instantiation])] = for {
+  def pureInfer(t: Term)(implicit
+      checking: Boolean = true
+  ): StateEither[(Type, List[Instantiation])] = for {
     m <- EitherT.liftF(addMark("p"))
     (iT, insts) <- infer(t)
     aT <- apply(iT)(shift = false)
@@ -70,7 +72,9 @@ object TypeChecker {
     * @return
     *   the inferred type and the output context.
     */
-  def infer(exp: Term)(implicit checking: Boolean = true): StateEither[(Type, List[Instantiation])] =
+  def infer(exp: Term)(implicit
+      checking: Boolean = true
+  ): StateEither[(Type, List[Instantiation])] =
     exp match {
       case TermAscribe(info, t1, typeToAscribe) =>
         for {
@@ -113,11 +117,14 @@ object TypeChecker {
             resolveTypeConstructors(eAS1, ctx)
           })
           closureInst = Instantiation(
-            i = variable,  // Use variable name as identifier
+            i = variable, // Use variable name as identifier
             term = TermClosure(info, variable, None, expr),
-            tys = List(resolvedType),  // The resolved parameter type with TypeIds
+            tys =
+              List(resolvedType), // The resolved parameter type with TypeIds
             cls = List(),
-            r = Some(-1)  // Special marker: -1 indicates closure param instantiation
+            r = Some(
+              -1
+            ) // Special marker: -1 indicates closure param instantiation
           )
         } yield (TypeArrow(info, eAS1, typeShift(-1, eCS)), closureInst :: aI)
       case TermAbs(info, variable, variableType, expr, returnType) =>
@@ -192,7 +199,7 @@ object TypeChecker {
           tyT1S <- EitherT.liftF(simplifyType(tyT1))
           bodyType <- tyT1S match {
             case TypeArrow(_, tyT11, tyT12) => tyT12.pure[StateEither]
-            case _ =>
+            case _                          =>
               TypeError.format(InvalidFunctionTypeError(info, tyT1S))
           }
         } yield (bodyType, insts)
@@ -286,7 +293,7 @@ object TypeChecker {
                 .getOrElse(EitherT.pure[ContextState, Error](()))
               cT <- caseExprType match {
                 case TypeEVar(_, _, _) => apply(caseExprType)(shift = false)
-                case _ =>
+                case _                 =>
                   typeShift(-variables.length, caseExprType)
                     .pure[StateEither]
               }
@@ -301,7 +308,7 @@ object TypeChecker {
           tyS <- EitherT.liftF(simplifyType(ty1))
           tySVar <- tyS match {
             case TypeRec(_, _, _, v @ TypeVariant(_, _)) => v.pure[StateEither]
-            case _ =>
+            case _                                       =>
               TypeError.format(TagNotVariantTypeError(info, ty1))
           }
           tyTiExpected <- tySVar.v
@@ -384,7 +391,7 @@ object TypeChecker {
         TypeError.format(
           MissingTypeAnnotation(info, typeShift(-1, simplifiedType))
         )
-      case _ => 
+      case _ =>
         TypeError.format(NoMethodsOnTypeError(info, simplifiedType))
     }
   }
@@ -399,7 +406,7 @@ object TypeChecker {
       methodTypes <- cls.traverse(getTypeClassMethodType(_, method))
       ty <- methodTypes match {
         case h :: Nil => h.pure[StateEither]
-        case Nil =>
+        case Nil      =>
           TypeError.format(NoMethodsOnTypeError(info, simplifiedType))
         case _ =>
           TypeError.format(
@@ -427,7 +434,8 @@ object TypeChecker {
     p match {
       case t: Term => infer(t).map { (ty, insts) => (Some(ty), List(), insts) }
       case PatternDefault(_)        => EitherT.pure((None, List(), List()))
-      case n @ PatternNode(_, _, _) => inferNodePattern(n, matchExprType)(checking)
+      case n @ PatternNode(_, _, _) =>
+        inferNodePattern(n, matchExprType)(checking)
     }
 
   def inferNodePattern(
@@ -491,7 +499,7 @@ object TypeChecker {
           )
         } yield (Some(matchExprType), variables, List())
       case TypeEVar(info, _, _) => inferNodePatternWithEVar(info, p)
-      case _ =>
+      case _                    =>
         TypeError.format(
           MatchExprNotDataTypeError(p.info, matchExprType, p.tag)
         )
@@ -585,14 +593,15 @@ object TypeChecker {
     } yield tyT1
 
   def computeType(ty: Type): StateOption[Type] = ty match {
-    case TypeVar(_, idx, _) => getTypeAbb(idx)
+    case TypeVar(_, idx, _)                        => getTypeAbb(idx)
     case TypeApp(info, TypeAbs(_, _, tyT12), tyT2) =>
       OptionT.some[ContextState](typeSubstituteTop(tyT2, tyT12))
     case TypeApp(info, TypeId(_, name), tyT2) =>
       // Handle TypeApp(TypeId, arg) by looking up the TypeId and applying the argument
       for {
-        idx <- OptionT.liftF[ContextState, Option[Int]](State.inspect { (ctx: Context) =>
-          Context.nameToIndex(ctx, name)
+        idx <- OptionT.liftF[ContextState, Option[Int]](State.inspect {
+          (ctx: Context) =>
+            Context.nameToIndex(ctx, name)
         })
         index <- OptionT.fromOption[ContextState](idx)
         typeAbb <- getTypeAbb(index)
@@ -601,7 +610,7 @@ object TypeChecker {
           case TypeAbs(_, _, tyT12) =>
             OptionT.some[ContextState](typeSubstituteTop(tyT2, tyT12))
           case _ =>
-            OptionT.none[ContextState, Type]  // Not a type abstraction
+            OptionT.none[ContextState, Type] // Not a type abstraction
         }
       } yield result
     case _ => OptionT.none[ContextState, Type]
@@ -684,14 +693,18 @@ object TypeChecker {
         _ <- checkKindStar(ty1)
       } yield KindStar
     case TypeVar(info, idx, _) => getKind(info, idx)
-    case TypeId(info, name) =>
+    case TypeId(info, name)    =>
       // TypeId might be a monomorphized type or a type constructor
       // Try to look it up in the context
       for {
-        idxOpt <- EitherT.liftF(State.inspect[Context, Option[Int]](ctx => Context.nameToIndex(ctx, name)))
+        idxOpt <- EitherT.liftF(
+          State.inspect[Context, Option[Int]](ctx =>
+            Context.nameToIndex(ctx, name)
+          )
+        )
         kind <- idxOpt match {
           case Some(idx) => getKind(info, idx)
-          case None =>
+          case None      =>
             // Not found in context - might be a monomorphized name like "List#i32"
             // These are fully applied types, so they have kind *
             EitherT.rightT[ContextState, String](KindStar)
@@ -756,7 +769,7 @@ object TypeChecker {
         for {
           m1 <- EitherT.liftF(getTypeClassMethods(cls))
           v <- difference(m1, m2) match {
-            case Nil => ().pure[StateEither]
+            case Nil  => ().pure[StateEither]
             case diff =>
               TypeError.format(
                 MissingTypeInstanceMethods(UnknownInfo, ty, cls, diff)
@@ -781,7 +794,7 @@ object TypeChecker {
         )
         (isSubType, _) <- subtype(typeClassMethodType, ty)
         v <- isSubType match {
-          case true => ().pure[StateEither]
+          case true  => ().pure[StateEither]
           case false =>
             TypeError.format(
               InvalidTypeInstanceMethod(
@@ -818,7 +831,7 @@ object TypeChecker {
       .flatMap(_ match {
         case TypeVarBind(k, _)       => k.pure
         case TypeAbbBind(_, Some(k)) => k.pure
-        case TypeAbbBind(_, None) =>
+        case TypeAbbBind(_, None)    =>
           TypeError.format(NoKindForTypeError(info, idx))
         case TypeClassBind(k) => k.pure
         case _ => TypeError.format(BindingNotFoundTypeError(info))
@@ -866,7 +879,7 @@ object TypeChecker {
           reducedType <- apply(tpe)
           (r, solutions) <- subtype(redExpType, reducedType)
           _ <- r match {
-            case true => ().pure[StateEither]
+            case true  => ().pure[StateEither]
             case false =>
               TypeError.format(
                 InvalidSubtypeTypeError(exp.info, redExpType, reducedType)
@@ -938,7 +951,7 @@ object TypeChecker {
         EitherT
           .liftF(containsFreeEVar(eA))
           .flatMap(_ match {
-            case true => (true, List()).pure
+            case true  => (true, List()).pure
             case false =>
               TypeError.format(UnboundExistentialVariableTypeError(info, eA))
           })
@@ -1015,7 +1028,7 @@ object TypeChecker {
       (a, isSimple, containsEVarWithPeel, containsEVar) match {
         case (a, true, _, _) /* Γ ⊢ τ */ =>
           solve(eA, a).map(List(_)) // Γ,â=τ,Γ′
-        case (eC: TypeEVar, _, true, _) => solve(eC, eA).map(List(_))
+        case (eC: TypeEVar, _, true, _)       => solve(eC, eA).map(List(_))
         case (TypeApp(_, a1, a2), _, _, true) =>
           for {
             (eA1, eA2, sol1) <- insertEApp(eA)
@@ -1065,7 +1078,7 @@ object TypeChecker {
       (a, isSimple, containsEVarWithPeel, containsEVar) match {
         case (a, true, _, _) /* Γ ⊢ τ */ =>
           solve(eA, a).map(List(_)) // Γ,â=τ,Γ′
-        case (eC: TypeEVar, _, true, _) => solve(eC, eA).map(List(_))
+        case (eC: TypeEVar, _, true, _)       => solve(eC, eA).map(List(_))
         case (TypeApp(_, a1, a2), _, _, true) =>
           for {
             (eA1, eA2, sol1) <- insertEApp(eA)
@@ -1213,21 +1226,28 @@ object TypeChecker {
     }
   }
 
-  /** Resolve type constructor TypeVars to TypeIds while preserving type parameter TypeVars.
+  /** Resolve type constructor TypeVars to TypeIds while preserving type
+    * parameter TypeVars.
     *
-    * This is critical for closure types: type constructors (like "List") are captured
-    * as TypeVars with De Bruijn indices during type checking. These indices become
-    * invalid when the context changes during monomorphization. By resolving them to
-    * TypeIds (names) during type checking when the context is still valid, we preserve
-    * the type constructor information across compilation phases.
+    * This is critical for closure types: type constructors (like "List") are
+    * captured as TypeVars with De Bruijn indices during type checking. These
+    * indices become invalid when the context changes during monomorphization.
+    * By resolving them to TypeIds (names) during type checking when the context
+    * is still valid, we preserve the type constructor information across
+    * compilation phases.
     *
     * For TypeApp(TypeVar(9), TypeVar(6)) representing List[B]:
-    * - TypeVar(9) points to "List" (type constructor) → resolve to TypeId("List")
-    * - TypeVar(6) points to "B" (type parameter) → keep as TypeVar for specialization
+    *   - TypeVar(9) points to "List" (type constructor) → resolve to
+    *     TypeId("List")
+    *   - TypeVar(6) points to "B" (type parameter) → keep as TypeVar for
+    *     specialization
     *
-    * @param ty The type to process
-    * @param ctx The current context (used to resolve TypeVar indices)
-    * @return Type with constructor TypeVars resolved to TypeIds
+    * @param ty
+    *   The type to process
+    * @param ctx
+    *   The current context (used to resolve TypeVar indices)
+    * @return
+    *   Type with constructor TypeVars resolved to TypeIds
     */
   private def resolveTypeConstructors(ty: Type, ctx: Context): Type = ty match {
     case TypeApp(info, ctor, param) =>
@@ -1241,7 +1261,7 @@ object TypeChecker {
               if (name.headOption.exists(_.isUpper) && !name.contains("#")) {
                 TypeId(info, name)
               } else {
-                ctor  // Keep as TypeVar (it's a type parameter, not constructor)
+                ctor // Keep as TypeVar (it's a type parameter, not constructor)
               }
             case None =>
               ctor
@@ -1254,11 +1274,15 @@ object TypeChecker {
       TypeApp(info, resolvedCtor, param)
 
     case TypeArrow(info, t1, t2) =>
-      TypeArrow(info, resolveTypeConstructors(t1, ctx), resolveTypeConstructors(t2, ctx))
+      TypeArrow(
+        info,
+        resolveTypeConstructors(t1, ctx),
+        resolveTypeConstructors(t2, ctx)
+      )
 
     case TypeAll(info, name, kind, cls, t) =>
       TypeAll(info, name, kind, cls, resolveTypeConstructors(t, ctx))
 
-    case _ => ty  // Other types remain unchanged
+    case _ => ty // Other types remain unchanged
   }
 }

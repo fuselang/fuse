@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  format:
+    name: Check Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: coursier/setup-action@v2
+        with:
+          apps: scalafmt
+      - name: Check scalafmt
+        run: scalafmt --check .
+
+  test:
+    name: Check & Build Tests
+    runs-on: ubuntu-latest
+    needs: format
+    steps:
+      - uses: actions/checkout@v6
+      - uses: coursier/cache-action@v6
+      - uses: coursier/setup-action@v2
+        with:
+          jvm: temurin:17
+          apps: sbt bloop
+      - name: Setup Bloop
+        run: sbt bloopInstall
+      - name: Run check tests
+        run: bloop test fuse-test -- 'fuse.CompilerCheckTests.*'
+      - name: Run build tests
+        run: bloop test fuse-test -- 'fuse.CompilerBuildTests.*'
+
+  test-exec:
+    name: Executable Tests
+    runs-on: ubuntu-latest
+    needs: format
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v31
+      - name: Cache Nix store
+        uses: actions/cache@v4
+        with:
+          path: /nix/store
+          key: nix-${{ runner.os }}-${{ hashFiles('shell.nix') }}
+          restore-keys: nix-${{ runner.os }}-
+      - name: Clone GRIN compiler
+        run: git clone --depth 1 https://github.com/grin-compiler/grin.git grin-compiler
+      - name: Cache GRIN build
+        uses: actions/cache@v4
+        with:
+          path: grin-compiler/result
+          key: grin-${{ runner.os }}-${{ hashFiles('grin-compiler/default.nix') }}
+      - name: Build GRIN
+        run: |
+          cd grin-compiler
+          nix build
+      - name: Setup Bloop
+        env:
+          GRIN_PATH: ${{ github.workspace }}/grin-compiler
+        run: nix-shell --run "sbt bloopInstall"
+      - name: Run exec tests
+        env:
+          GRIN_PATH: ${{ github.workspace }}/grin-compiler
+        run: nix-shell --run "bloop test fuse-test -- 'fuse.CompilerExecTests.*'"

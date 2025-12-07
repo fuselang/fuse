@@ -81,7 +81,7 @@ object Grin {
     case BindExpr(expr, variable, value, _) =>
       BindExpr(expr, variable, value, indent)
     case AppExpr(expr, arity, _, ptag) => AppExpr(expr, arity, indent, ptag)
-    case CaseExpr(expr, cases, _) =>
+    case CaseExpr(expr, cases, _)      =>
       val t = cases.map(c => indentExpr(indent + 1, c)).map {
         case c: CaseClause => c
       }
@@ -106,7 +106,7 @@ object Grin {
       case PartialFunValue(f, _, _, _)        => f
       case AppExpr(e, _, i, _)                => indent(i, e)
       case BindExpr(e, _, _, i)               => indent(i, e)
-      case MultiLineExpr(exprs, result) =>
+      case MultiLineExpr(exprs, result)       =>
         (exprs.filter(b => !b.repr.isBlank) :+ result)
           .map((_: Expr).show)
           .mkString("\n")
@@ -129,7 +129,7 @@ object Grin {
         show"$matchLine\n$caseLines"
       case PureExpr(expr, i) =>
         expr match {
-          case Value(e) => indent(i, s"pure $e")
+          case Value(e)                => indent(i, s"pure $e")
           case MultiLineExpr(exprs, r) =>
             val pureExpr = (PureExpr(r): Expr)
             (MultiLineExpr(exprs, pureExpr): Expr).show
@@ -329,7 +329,7 @@ object Grin {
     case CaseClause(_, e, _)      => extractPartialFun(e)
     case PureExpr(e, _)           => extractPartialFun(e)
     case Abs(_, e)                => extractPartialFun(e)
-    case CaseExpr(e, cases, _) =>
+    case CaseExpr(e, cases, _)    =>
       val casesPartialFunctions = cases.map(extractPartialFun(_)).flatten
       extractPartialFun(e) :++ casesPartialFunctions
     case MultiLineExpr(exprs, r) =>
@@ -344,7 +344,7 @@ object Grin {
     case CaseClause(_, e, _)               => lambdaLift(e)
     case PureExpr(e, _)                    => lambdaLift(e)
     case Abs(_, e)                         => lambdaLift(e)
-    case CaseExpr(e, cases, _) =>
+    case CaseExpr(e, cases, _)             =>
       val casesPartialFunctions = cases.map(lambdaLift(_)).flatten
       lambdaLift(e) :++ casesPartialFunctions
     case MultiLineExpr(exprs, r) =>
@@ -743,7 +743,7 @@ object Grin {
             case (v, VarBind(ty)) =>
               isFunctionType(ty).map {
                 case false => Value(v)
-                case true =>
+                case true  =>
                   val arity = getFunctionArity(ty)
                   val tKey = typeToKey(ty)
                   val inferredPtag =
@@ -986,13 +986,13 @@ object Grin {
   def getResult(
       expr: Expr
   ): ContextState[Tuple2[List[BindExpr], Expr]] = expr match {
-    case l: BindExpr => State.pure(List(l), Value(l.variable))
+    case l: BindExpr             => State.pure(List(l), Value(l.variable))
     case MultiLineExpr(exprs, r) =>
       getResult(r).map { case (prepExprs, v) =>
         (exprs :++ prepExprs, v)
       }
-    case i: Value        => State.pure(List(), i)
-    case c: ClosureValue => State.pure(List(), c)
+    case i: Value                      => State.pure(List(), i)
+    case c: ClosureValue               => State.pure(List(), c)
     case v @ FunctionValue(f, 0, _, _) =>
       addTempVariable().flatMap(p =>
         getResult(BindExpr(s"$p <- $f", p, List(v)))
@@ -1064,7 +1064,7 @@ object Grin {
       case "int_to_str"   => "_prim_int_str"
       case v if v.startsWith(Desugar.RecursiveFunctionParamPrefix) =>
         v.stripPrefix(Desugar.RecursiveFunctionParamPrefix)
-      case v if v.startsWith(Desugar.MethodNamePrefix) => methodToName(v)
+      case v if v.startsWith(Desugar.MethodNamePrefix)   => methodToName(v)
       case v if v.startsWith(Desugar.RecordConstrPrefix) =>
         recordConstrToName(v)
       case s => s

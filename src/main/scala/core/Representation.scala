@@ -29,8 +29,8 @@ object Representation {
       Context.runE(Representation.typeToString(ty, buildContext = true))
     case TypeAbbBind(_, Some(k)) =>
       Representation.kindToString(k).pure[StateEither]
-    case TypeEMarkBind => "[mark]".pure
-    case TypeEFreeBind => s"[free]".pure
+    case TypeEMarkBind            => "[mark]".pure
+    case TypeEFreeBind            => s"[free]".pure
     case TypeESolutionBind(ty, _) =>
       Context
         .runE(Representation.typeToString(ty, buildContext = true))
@@ -57,9 +57,9 @@ object Representation {
           case _   => s": ${cls.map(_.name).mkString(" + ")}"
         }
         s"{unknown}${typeBounds}".pure
-      case TypeId(_, id)   => id.pure
-      case TypeAny(_)      => "any".pure
-      case TypeClass(_, n) => n.pure
+      case TypeId(_, id)           => id.pure
+      case TypeAny(_)              => "any".pure
+      case TypeClass(_, n)         => n.pure
       case TypeAbs(_, typeVar, ty) =>
         for {
           _ <- addNameToContext(typeVar, buildContext)
@@ -92,17 +92,15 @@ object Representation {
       case TypeRecord(_, fields) =>
         fields
           .traverse { case (fieldName, ty) =>
-            typeToString(ty, buildContext).map(typeString =>
-              s"$fieldName: $typeString"
-            )
+            typeToString(ty, buildContext)
+              .map(typeString => s"$fieldName: $typeString")
           }
           .map(fieldTypes => s"{${fieldTypes.mkString(", ")}}")
       case TypeVariant(_, fields) =>
         fields
           .traverse { case (fieldName, ty) =>
-            typeToString(ty, buildContext).map(typeString =>
-              s"$fieldName$typeString"
-            )
+            typeToString(ty, buildContext)
+              .map(typeString => s"$fieldName$typeString")
           }
           .map(fieldTypes => s"${fieldTypes.mkString(" | ")}")
       case TypeRec(_, tyX, _, ty) =>
@@ -124,7 +122,7 @@ object Representation {
     }
 
   def kindToString(k: Kind): String = k match {
-    case KindStar => "*"
+    case KindStar          => "*"
     case KindArrow(k1, k2) =>
       s"${kindToString(k1)} -> ${kindToString(k2)}"
   }

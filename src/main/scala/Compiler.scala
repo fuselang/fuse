@@ -60,7 +60,7 @@ object Compiler {
   def parse(code: String, fileName: String): Either[Error, Seq[FDecl]] = {
     val parser = new FuseParser(code, fileName)
     parser.Module.run() match {
-      case Success(result) => Right(result)
+      case Success(result)        => Right(result)
       case Failure(e: ParseError) =>
         Left(parser.formatError(e, new ParserErrorFormatter(fileName)))
       case Failure(e) => Left(e.toString)

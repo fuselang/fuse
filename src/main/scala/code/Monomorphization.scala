@@ -43,9 +43,14 @@ object Monomorphization {
   def replace(binds: List[Bind]): List[Bind] =
     replaceM(binds).runEmptyA.value
 
-  def replaceM(binds: List[Bind], iterationCount: Int = 0): ContextState[List[Bind]] = {
+  def replaceM(
+      binds: List[Bind],
+      iterationCount: Int = 0
+  ): ContextState[List[Bind]] = {
     if (iterationCount > 20) {
-      throw new RuntimeException(s"Monomorphization infinite loop detected after $iterationCount iterations")
+      throw new RuntimeException(
+        s"Monomorphization infinite loop detected after $iterationCount iterations"
+      )
     }
 
     // Collect instantiations, filtering out closure parameter instantiations (r == Some(-1))
@@ -55,7 +60,7 @@ object Monomorphization {
 
     insts match {
       case Nil => binds.pure[ContextState]
-      case _ =>
+      case _   =>
         for {
           // Create specialilized functions for each bindig that has corresponding
           // instantiation.
@@ -84,34 +89,35 @@ object Monomorphization {
       binds: List[Bind],
       insts: List[Instantiation]
   ): ContextState[List[Bind]] =
-    binds.foldLeftM((List[Bind](), List[Shift]())) {
+    binds
+      .foldLeftM((List[Bind](), List[Shift]())) {
         case ((binds, shifts), bind) =>
           getBindInstantiations(bind, insts).flatMap { bindInsts =>
             bindInsts match {
-            case Nil =>
-              val sbind = shifts.foldLeft(bind) { (b, s) =>
-                bindShift(s.d, b, s.c)
-              }
-              for {
-                _ <- addBinding(sbind.i, sbind.b)
-                sInsts <- sbind.insts
-                  .traverse(instantantionShiftOnContextDiff(_))
-                b = binds :+ Bind(sbind.i, sbind.b, sInsts)
-              } yield (b, incrShifts(shifts))
-            case i =>
-              i.zipWithIndex
-                .traverse((inst, idx) =>
-                  for {
-                    // NOTE: Specialized binding is shifted based on the number of
-                    // bindings built, as they also shift the context.
-                    bind <- buildSpecializedBind(bind, inst, idx)
-                      .map(bindShift(idx, _))
-                    id <- addBinding(bind.i, bind.b)
-                  } yield bind
-                )
-                .map(l =>
-                  (binds ::: l, incrShifts(shifts) :+ Shift(l.length - 1, 0))
-                )
+              case Nil =>
+                val sbind = shifts.foldLeft(bind) { (b, s) =>
+                  bindShift(s.d, b, s.c)
+                }
+                for {
+                  _ <- addBinding(sbind.i, sbind.b)
+                  sInsts <- sbind.insts
+                    .traverse(instantantionShiftOnContextDiff(_))
+                  b = binds :+ Bind(sbind.i, sbind.b, sInsts)
+                } yield (b, incrShifts(shifts))
+              case i =>
+                i.zipWithIndex
+                  .traverse((inst, idx) =>
+                    for {
+                      // NOTE: Specialized binding is shifted based on the number of
+                      // bindings built, as they also shift the context.
+                      bind <- buildSpecializedBind(bind, inst, idx)
+                        .map(bindShift(idx, _))
+                      id <- addBinding(bind.i, bind.b)
+                    } yield bind
+                  )
+                  .map(l =>
+                    (binds ::: l, incrShifts(shifts) :+ Shift(l.length - 1, 0))
+                  )
             }
           }
       }
@@ -139,7 +145,7 @@ object Monomorphization {
     // as we shouldn't build a specialized bind for them.
     genInsts = bind.b match {
       case TermAbbBind(term: TermTAbs, ty) => insts
-      case _ => Nil
+      case _                               => Nil
     }
     bindInsts <- typeNameOption match {
       case None =>
@@ -156,9 +162,11 @@ object Monomorphization {
     }
     // Additional deduplication by generated bind name to catch duplicates that
     // Instantiations.distinct might miss due to Type object reference differences
-    dedupedBindInsts <- bindInsts.traverse(inst =>
-      toContextState(inst.bindName()).map(name => (name, inst))
-    ).map(_.distinctBy(_._1).map(_._2))
+    dedupedBindInsts <- bindInsts
+      .traverse(inst =>
+        toContextState(inst.bindName()).map(name => (name, inst))
+      )
+      .map(_.distinctBy(_._1).map(_._2))
     // Filter out instantiations with unresolved TypeVars that point to type parameters
     // These cannot be monomorphized and will cause errors in later phases
     // However, keep TypeVars that are actually primitive types (will be resolved during specialization)
@@ -205,9 +213,14 @@ object Monomorphization {
             cInst.copy(tys = specializedTys)
           }
           // Apply closure types to term BEFORE term specialization
-          termWithClosureTypes = applyClosureTypes(term, specializedClosureInsts)
+          termWithClosureTypes = applyClosureTypes(
+            term,
+            specializedClosureInsts
+          )
           // Now specialize the term with closure types already applied
-          specializedTerm = shiftedInst.tys.foldLeft(termWithClosureTypes: Term) { case (t, ty) =>
+          specializedTerm = shiftedInst.tys.foldLeft(
+            termWithClosureTypes: Term
+          ) { case (t, ty) =>
             specializeTerm(t, idx, ty)
           }
           binding = TermAbbBind(
@@ -235,8 +248,9 @@ object Monomorphization {
               )
               // Preserve r = Some(-1) for closure instantiations
               val newR = i.r match {
-                case Some(-1) => Some(-1)  // Closure param, keep marker
-                case _ => tIdx.map(_ + 1)   // Regular instantiation, resolve index
+                case Some(-1) => Some(-1) // Closure param, keep marker
+                case _        =>
+                  tIdx.map(_ + 1) // Regular instantiation, resolve index
               }
               val inst = Instantiation(
                 i.i,
@@ -257,18 +271,25 @@ object Monomorphization {
           dedupedInsts = Instantiations.distinct(filteredInsts)
           // Check for self-recursive calls and add self-instantiation if needed
           hasSelfRecursion = containsAssocProjCall(binding, bind.i)
-          selfInstantiation = if (hasSelfRecursion) {
-            // Create instantiation pointing to the specialized bind itself
-            // Use bind.i (original method name) as inst.i, not name (specialized name)
-            // This ensures bindName() generates correct name from base + types
-            List(Instantiation(
-              bind.i,  // Original bind name (e.g., !foldRight#List)
-              TermAssocProj(UnknownInfo, inst.tys.head, bind.i),  // Use first type as placeholder
-              inst.tys,  // Concrete types from THIS specialization
-              List(),
-              Some(0)  // Points to self (index 0 relative to current bind)
-            ))
-          } else List()
+          selfInstantiation =
+            if (hasSelfRecursion) {
+              // Create instantiation pointing to the specialized bind itself
+              // Use bind.i (original method name) as inst.i, not name (specialized name)
+              // This ensures bindName() generates correct name from base + types
+              List(
+                Instantiation(
+                  bind.i, // Original bind name (e.g., !foldRight#List)
+                  TermAssocProj(
+                    UnknownInfo,
+                    inst.tys.head,
+                    bind.i
+                  ), // Use first type as placeholder
+                  inst.tys, // Concrete types from THIS specialization
+                  List(),
+                  Some(0) // Points to self (index 0 relative to current bind)
+                )
+              )
+            } else List()
           // Merge self-instantiation with inherited instantiations
           allInsts = selfInstantiation ::: dedupedInsts
           finalInsts = Instantiations.distinct(allInsts)
@@ -293,7 +314,7 @@ object Monomorphization {
 
   /** Extract context length from a type by finding nested TypeVars */
   def getTypeContextLength(ty: Type): Option[Int] = ty match {
-    case TypeVar(_, _, n) => Some(n)
+    case TypeVar(_, _, n)   => Some(n)
     case TypeApp(_, t1, t2) =>
       getTypeContextLength(t1).orElse(getTypeContextLength(t2))
     case TypeArrow(_, t1, t2) =>
@@ -311,7 +332,7 @@ object Monomorphization {
     case TypeArrow(_, t1, t2) =>
       extractTypeVarIndices(t1) ::: extractTypeVarIndices(t2)
     case TypeAll(_, _, _, _, t) => extractTypeVarIndices(t)
-    case _ => Nil
+    case _                      => Nil
   }
 
   def specializeType(ty: Type, tys: List[Type], ctxLength: Int): Type =
@@ -332,7 +353,7 @@ object Monomorphization {
             val paramIndices = extractTypeVarIndices(param)
             paramIndices.distinct.sorted.reverse.headOption match {
               case Some(c) => TypeApp(info, ctor, typeSubstitute(tyS, c, param))
-              case None => tyT  // No TypeVars in param
+              case None    => tyT // No TypeVars in param
             }
           case _ =>
             // Constructor is not TypeId (shouldn't happen with resolveTypeConstructors)
@@ -340,7 +361,7 @@ object Monomorphization {
             val indices = extractTypeVarIndices(tyT).distinct.sorted.reverse
             indices.headOption match {
               case Some(c) => typeSubstitute(tyS, c, tyT)
-              case None => tyT
+              case None    => tyT
             }
         }
       case (tyT @ TypeArrow(_, _, _), (tyS, idx)) =>
@@ -348,10 +369,10 @@ object Monomorphization {
         val indices = extractTypeVarIndices(tyT).distinct.sorted.reverse
         indices.headOption match {
           case Some(c) => typeSubstitute(tyS, c, tyT)
-          case None => tyT  // No more TypeVars - already fully substituted
+          case None    => tyT // No more TypeVars - already fully substituted
         }
       case (tyT, _) if tyT.isPrimitive => tyT
-      case (tyT, _) =>
+      case (tyT, _)                    =>
         // Other types that don't contain type parameters to substitute
         tyT
     }
@@ -366,7 +387,11 @@ object Monomorphization {
         (specBindIndex, ctxlen) <- State.inspect { (ctx: Context) =>
           (nameToIndex(ctx, specBindName), ctx._1.length)
         }
-        (replacedBinding, insts) = (acc.b, inst.term, inst.r.orElse(specBindIndex)) match {
+        (replacedBinding, insts) = (
+          acc.b,
+          inst.term,
+          inst.r.orElse(specBindIndex)
+        ) match {
           case (TermAbbBind(tT, ty), tC: TermMethodProj, Some(s)) =>
             handleMethodProjReplacement(tT, ty, tC, specBindName, acc, inst)
           case (TermAbbBind(tT, ty), tC: TermAssocProj, Some(s)) =>
@@ -412,7 +437,11 @@ object Monomorphization {
       bind: Bind,
       inst: Instantiation
   ): (Binding, List[Instantiation]) = handleProjReplacement(
-    tT, ty, methodName, bind, inst,
+    tT,
+    ty,
+    methodName,
+    bind,
+    inst,
     methodProj =>
       if (methodProj.i == tC.i && methodProj.t == tC.t) {
         // Found the matching TermMethodProj - update its method name
@@ -432,7 +461,11 @@ object Monomorphization {
       bind: Bind,
       inst: Instantiation
   ): (Binding, List[Instantiation]) = handleProjReplacement(
-    tT, ty, methodName, bind, inst,
+    tT,
+    ty,
+    methodName,
+    bind,
+    inst,
     methodProj => methodProj,
     assocProj => {
       // Strip method prefix from tC.i if present (e.g., !foldRight#List -> foldRight)
@@ -469,43 +502,63 @@ object Monomorphization {
   }
 
   /** Check if a term contains a TermAssocProj call to a specific method */
-  private def containsAssocProjInTerm(term: Term, methodName: String): Boolean = term match {
-    case TermAssocProj(_, _, method) =>
-      // Strip method prefix if present (e.g., !foldRight#List -> foldRight)
-      val cleanMethodName = if (methodName.startsWith(MethodNamePrefix)) {
-        methodName.drop(MethodNamePrefix.length).takeWhile(_ != '#')
-      } else methodName
-      method == cleanMethodName
-    case TermApp(_, t1, t2) => containsAssocProjInTerm(t1, methodName) || containsAssocProjInTerm(t2, methodName)
-    case TermAbs(_, _, _, body, _) => containsAssocProjInTerm(body, methodName)
-    case TermMatch(_, t, cases) => containsAssocProjInTerm(t, methodName) || cases.exists { case (_, e) => containsAssocProjInTerm(e, methodName) }
-    case TermLet(_, _, t1, t2) => containsAssocProjInTerm(t1, methodName) || containsAssocProjInTerm(t2, methodName)
-    case TermTAbs(_, _, _, body) => containsAssocProjInTerm(body, methodName)
-    case TermTApp(_, t, _) => containsAssocProjInTerm(t, methodName)
-    case TermMethodProj(_, t, _) => containsAssocProjInTerm(t, methodName)
-    case TermProj(_, t, _) => containsAssocProjInTerm(t, methodName)
-    case TermRecord(_, fields) => fields.exists { case (_, t) => containsAssocProjInTerm(t, methodName) }
-    case TermTag(_, _, t, _) => containsAssocProjInTerm(t, methodName)
-    case TermAscribe(_, t, _) => containsAssocProjInTerm(t, methodName)
-    case TermFix(_, t) => containsAssocProjInTerm(t, methodName)
-    case _ => false
-  }
+  private def containsAssocProjInTerm(term: Term, methodName: String): Boolean =
+    term match {
+      case TermAssocProj(_, _, method) =>
+        // Strip method prefix if present (e.g., !foldRight#List -> foldRight)
+        val cleanMethodName = if (methodName.startsWith(MethodNamePrefix)) {
+          methodName.drop(MethodNamePrefix.length).takeWhile(_ != '#')
+        } else methodName
+        method == cleanMethodName
+      case TermApp(_, t1, t2) =>
+        containsAssocProjInTerm(t1, methodName) || containsAssocProjInTerm(
+          t2,
+          methodName
+        )
+      case TermAbs(_, _, _, body, _) =>
+        containsAssocProjInTerm(body, methodName)
+      case TermMatch(_, t, cases) =>
+        containsAssocProjInTerm(t, methodName) || cases.exists { case (_, e) =>
+          containsAssocProjInTerm(e, methodName)
+        }
+      case TermLet(_, _, t1, t2) =>
+        containsAssocProjInTerm(t1, methodName) || containsAssocProjInTerm(
+          t2,
+          methodName
+        )
+      case TermTAbs(_, _, _, body) => containsAssocProjInTerm(body, methodName)
+      case TermTApp(_, t, _)       => containsAssocProjInTerm(t, methodName)
+      case TermMethodProj(_, t, _) => containsAssocProjInTerm(t, methodName)
+      case TermProj(_, t, _)       => containsAssocProjInTerm(t, methodName)
+      case TermRecord(_, fields)   =>
+        fields.exists { case (_, t) => containsAssocProjInTerm(t, methodName) }
+      case TermTag(_, _, t, _)  => containsAssocProjInTerm(t, methodName)
+      case TermAscribe(_, t, _) => containsAssocProjInTerm(t, methodName)
+      case TermFix(_, t)        => containsAssocProjInTerm(t, methodName)
+      case _                    => false
+    }
 
   /** Check if a binding contains a TermAssocProj call to a specific method */
-  private def containsAssocProjCall(binding: Binding, methodName: String): Boolean = binding match {
+  private def containsAssocProjCall(
+      binding: Binding,
+      methodName: String
+  ): Boolean = binding match {
     case TermAbbBind(term, _) => containsAssocProjInTerm(term, methodName)
-    case _ => false
+    case _                    => false
   }
 
   /** Apply specialized closure types to closure parameters in a term.
     *
-    * This recursively traverses the term and replaces TermClosure nodes that have
-    * no type annotation (None) with versions that have the specialized type from
-    * the corresponding closure instantiation.
+    * This recursively traverses the term and replaces TermClosure nodes that
+    * have no type annotation (None) with versions that have the specialized
+    * type from the corresponding closure instantiation.
     *
-    * @param term The term to process
-    * @param closureInsts List of closure instantiations with specialized types
-    * @return The term with closure types applied
+    * @param term
+    *   The term to process
+    * @param closureInsts
+    *   List of closure instantiations with specialized types
+    * @return
+    *   The term with closure types applied
     */
   def applyClosureTypes(
       term: Term,
@@ -522,19 +575,44 @@ object Monomorphization {
           TermClosure(info, variable, Some(paramType), bodyWithTypes)
         case _ =>
           // No matching instantiation, recurse into body
-          TermClosure(info, variable, None, applyClosureTypes(body, closureInsts))
+          TermClosure(
+            info,
+            variable,
+            None,
+            applyClosureTypes(body, closureInsts)
+          )
       }
 
     // Recursively traverse term structure
     case TermLet(info, name, t1, t2) =>
-      TermLet(info, name, applyClosureTypes(t1, closureInsts), applyClosureTypes(t2, closureInsts))
+      TermLet(
+        info,
+        name,
+        applyClosureTypes(t1, closureInsts),
+        applyClosureTypes(t2, closureInsts)
+      )
     case TermApp(info, t1, t2) =>
-      TermApp(info, applyClosureTypes(t1, closureInsts), applyClosureTypes(t2, closureInsts))
+      TermApp(
+        info,
+        applyClosureTypes(t1, closureInsts),
+        applyClosureTypes(t2, closureInsts)
+      )
     case TermMatch(info, t, clauses) =>
-      TermMatch(info, applyClosureTypes(t, closureInsts),
-        clauses.map { case (pattern, term) => (pattern, applyClosureTypes(term, closureInsts)) })
+      TermMatch(
+        info,
+        applyClosureTypes(t, closureInsts),
+        clauses.map { case (pattern, term) =>
+          (pattern, applyClosureTypes(term, closureInsts))
+        }
+      )
     case TermAbs(info, variable, variableType, expr, returnType) =>
-      TermAbs(info, variable, variableType, applyClosureTypes(expr, closureInsts), returnType)
+      TermAbs(
+        info,
+        variable,
+        variableType,
+        applyClosureTypes(expr, closureInsts),
+        returnType
+      )
     case TermTAbs(info, variable, kind, body) =>
       TermTAbs(info, variable, kind, applyClosureTypes(body, closureInsts))
     case TermTApp(info, t, ty) =>
@@ -544,7 +622,12 @@ object Monomorphization {
     case TermProj(info, t, label) =>
       TermProj(info, applyClosureTypes(t, closureInsts), label)
     case TermRecord(info, fields) =>
-      TermRecord(info, fields.map { case (label, t) => (label, applyClosureTypes(t, closureInsts)) })
+      TermRecord(
+        info,
+        fields.map { case (label, t) =>
+          (label, applyClosureTypes(t, closureInsts))
+        }
+      )
     case TermTag(info, label, t, ty) =>
       TermTag(info, label, applyClosureTypes(t, closureInsts), ty)
     case TermAscribe(info, t, ty) =>

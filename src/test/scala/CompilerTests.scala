@@ -14,15 +14,15 @@ class CompilerTests extends FunSuite {
   /** Asserts fuse code is type checked. */
   def fuse(code: String, expected: Output = CheckOutput(None)) =
     expected match {
-      case CheckOutput(s) => assertCheck(code, s)
-      case BuildOutput(s) => assertBuild(code, s)
+      case CheckOutput(s)                     => assertCheck(code, s)
+      case BuildOutput(s)                     => assertBuild(code, s)
       case ExecutableOutput(stdout, exitCode) =>
         assertExecutable(code, stdout, exitCode)
     }
 
   def assertCheck(code: String, expectedError: Option[String]) =
     (check(code), expectedError) match {
-      case (t, None) => assert(t.isRight, s"\n${t.merge}")
+      case (t, None)                    => assert(t.isRight, s"\n${t.merge}")
       case (t, Some(error)) if t.isLeft =>
         assert(t.merge.contains(error), s"\n${error} not in:\n${t.merge}")
       case (_, Some(error)) =>

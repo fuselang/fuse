@@ -90,7 +90,10 @@ object Context {
           ((ctx._1, ctx._2 + (ctx1._2 - ctx._2)), t)
         } catch {
           case e: NoSuchElementException =>
-            throw new RuntimeException(s"Context state computation failed - ${e.getMessage} - Context has ${ctx._1.length} bindings", e)
+            throw new RuntimeException(
+              s"Context state computation failed - ${e.getMessage} - Context has ${ctx._1.length} bindings",
+              e
+            )
         }
       }
     }
@@ -102,10 +105,10 @@ object Context {
     getBinding(info, idx).flatMap[Error, Type](_ match {
       case VarBind(ty)              => EitherT.rightT(ty)
       case TermAbbBind(_, Some(ty)) => EitherT.rightT(ty)
-      case TermAbbBind(_, None) =>
+      case TermAbbBind(_, None)     =>
         TypeError.format(NoTypeForVariableTypeError(info, idx))
       case TypeAbbBind(ty, _) => EitherT.rightT(ty)
-      case _ =>
+      case _                  =>
         TypeError.format(WrongBindingForVariableTypeError(info, idx))
     })
 
@@ -126,12 +129,12 @@ object Context {
   /** Check if a variable at the given index is a closure parameter.
     *
     * Closure parameters are:
-    * - Bound with VarBind (not TermAbbBind or other types)
-    * - Not recursive function parameters (which start with "^")
+    *   - Bound with VarBind (not TermAbbBind or other types)
+    *   - Not recursive function parameters (which start with "^")
     *
     * This is used during instantiation collection to skip creating
-    * instantiations for runtime closure parameters, which should not
-    * be monomorphized.
+    * instantiations for runtime closure parameters, which should not be
+    * monomorphized.
     */
   def isClosureParameter(ctx: Context, idx: Int): Boolean = {
     getNotes(ctx, withMarks = false).lift(idx).exists {
@@ -279,7 +282,7 @@ object Context {
     )
     methodType <- methodOptionIdx match {
       case Some(idx) => getType(info, idx)
-      case None =>
+      case None      =>
         for {
           cls <- EitherT.liftF(getTypeInstances(typeName))
           tys <- cls.traverse(
@@ -290,7 +293,7 @@ object Context {
           methodTypes = tys.collect { case Some(v) => v }
           ty <- methodTypes match {
             case h :: Nil => h.pure[StateEither]
-            case Nil =>
+            case Nil      =>
               TypeError.format(
                 MethodNotFoundTypeError(info, ty, method)
               )
@@ -312,7 +315,7 @@ object Context {
     )
     methodType <- methodOptionIdx match {
       case Some(idx) => getType(cls.info, idx)
-      case None =>
+      case None      =>
         TypeError.format(
           MethodNotFoundTypeError(cls.info, cls, method)
         )
@@ -502,7 +505,7 @@ object Context {
         r2 <- isWellFormed(ty2)
       } yield r1 && r2
     case TypeAll(_, _, _, _, ty) => isWellFormed(ty)
-    case TypeRecord(_, l) =>
+    case TypeRecord(_, l)        =>
       l.traverse { case (_, ty) => isWellFormed(ty) }.map(_.reduce(_ && _))
     case TypeVariant(_, l) =>
       l.traverse { case (_, ty) => isWellFormed(ty) }.map(_.reduce(_ && _))

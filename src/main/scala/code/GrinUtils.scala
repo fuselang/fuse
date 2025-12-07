@@ -32,13 +32,14 @@ object GrinUtils {
   } yield value
 
   /** Check if a type requires heap allocation (store/fetch semantics).
-    * User-defined types (records, variants, recursive types) are heap-allocated.
+    * User-defined types (records, variants, recursive types) are
+    * heap-allocated.
     */
   def isHeapAllocatedType(ty: Type): Boolean = ty match {
-    case _: TypeRec => true     // Recursive types
+    case _: TypeRec     => true // Recursive types
     case _: TypeVariant => true // Sum types
-    case _: TypeRecord => true  // Product types
-    case _ => false
+    case _: TypeRecord  => true // Product types
+    case _              => false
   }
 
   def getFunctionArity(ty: Type): Int = ty match {
@@ -48,9 +49,9 @@ object GrinUtils {
     case _                             => 0
   }
 
-  /** Normalize a function type to a string key for closure map lookup.
-    * This allows distinguishing closures with same arity but different types.
-    * e.g., "i32 -> str" vs "i32 -> Option[i32]"
+  /** Normalize a function type to a string key for closure map lookup. This
+    * allows distinguishing closures with same arity but different types. e.g.,
+    * "i32 -> str" vs "i32 -> Option[i32]"
     */
   def typeToKey(ty: Type): String = ty match {
     case TypeArrow(_, param, result) =>
@@ -68,16 +69,20 @@ object GrinUtils {
       s"T$idx"
     case TypeId(_, name) =>
       name
-    case TypeInt(_) => "i32"
-    case TypeFloat(_) => "f32"
-    case TypeString(_) => "str"
-    case TypeBool(_) => "bool"
-    case TypeUnit(_) => "unit"
+    case TypeInt(_)             => "i32"
+    case TypeFloat(_)           => "f32"
+    case TypeString(_)          => "str"
+    case TypeBool(_)            => "bool"
+    case TypeUnit(_)            => "unit"
     case TypeRec(_, name, _, _) => name
-    case TypeRecord(_, fields) =>
-      fields.map { case (n, t) => s"$n:${typeToKey(t)}" }.mkString("{", ",", "}")
+    case TypeRecord(_, fields)  =>
+      fields
+        .map { case (n, t) => s"$n:${typeToKey(t)}" }
+        .mkString("{", ",", "}")
     case TypeVariant(_, variants) =>
-      variants.map { case (n, t) => s"$n:${typeToKey(t)}" }.mkString("[", "|", "]")
+      variants
+        .map { case (n, t) => s"$n:${typeToKey(t)}" }
+        .mkString("[", "|", "]")
     case TypeAll(_, name, _, _, body) =>
       s"forall $name.${typeToKey(body)}"
     case _ => ty.getClass.getSimpleName
@@ -91,13 +96,13 @@ object GrinUtils {
   /** Get closure arity without type-checking (avoids De Bruijn index issues) */
   def getClosureArity(c: Term): Int = c match {
     case TermClosure(_, _, _, body) => 1 + getClosureArity(body)
-    case _                           => 0
+    case _                          => 0
   }
 
-  /** Extract closure type from parameter annotations only.
-    * Returns a type built from parameter type annotations.
-    * Uses Unit as placeholder for return type since we only need parameter types for typeKey.
-    * For closures without annotations, returns None to rely on arity-based fallback.
+  /** Extract closure type from parameter annotations only. Returns a type built
+    * from parameter type annotations. Uses Unit as placeholder for return type
+    * since we only need parameter types for typeKey. For closures without
+    * annotations, returns None to rely on arity-based fallback.
     */
   def getClosureType(c: Term): ContextState[Option[Type]] = c match {
     case TermFix(_, body) =>
@@ -189,15 +194,16 @@ object GrinUtils {
     case TypeId(_, name) => State.pure(name)
     // For other types, try to find root TypeVar
     case _ =>
-      TypeChecker.findRootTypeVar(ty)
+      TypeChecker
+        .findRootTypeVar(ty)
         .map(typeVar => getNameFromIndex(typeVar.index))
         .getOrElse(getTypeFallbackName(ty))
   }
 
   private def getTypeFallbackName(ty: Type): ContextState[String] = ty match {
-    case TypeArrow(_, _, _) => State.pure("Function")
+    case TypeArrow(_, _, _)     => State.pure("Function")
     case TypeAll(_, _, _, _, _) => State.pure("Generic")
-    case TypeId(_, name) => State.pure(name)
+    case TypeId(_, name)        => State.pure(name)
     case _ => State.pure(s"UnknownType_${ty.getClass.getSimpleName}")
   }
 
@@ -213,7 +219,7 @@ object GrinUtils {
     stateEither.value.map(v =>
       v match {
         case Right(v) => v
-        case Left(e) => throw new RuntimeException(e)
+        case Left(e)  => throw new RuntimeException(e)
       }
     )
 
@@ -230,36 +236,41 @@ object GrinUtils {
   case class PrimOp(t: String, op: String)
 
   /** Get type of specialized terms without re-inferring */
-  def getSpecializedTermType(term: Term): ContextState[Option[Type]] = term match {
-    case TermApp(_, fun, _) => getSpecializedTermType(fun).map(_.flatMap {
-      case TypeArrow(_, _, res) => Some(res)
-      case _ => None
-    })
-    case TermMethodProj(_, _, m) if fuse.SpecializedMethodUtils.isSpecializedMethod(m) =>
-      for {
-        idx <- State.inspect[Context, Option[Int]](nameToIndex(_, m))
-        result <- idx.fold(State.pure[Context, Option[Type]](None))(i =>
-          toContextStateOption(getBinding(parser.Info.UnknownInfo, i)).map(_.flatMap {
-            case TermAbbBind(_, Some(ty)) => Some(ty)
-            case _ => None
-          })
-        )
-      } yield result
-    case TermVar(_, idx, _) =>
-      // Handle specialized data constructors (e.g., Cons#i32, Nil#i32)
-      for {
-        nameOpt <- State.inspect[Context, Option[String]](indexToName(_, idx))
-        result <- nameOpt match {
-          case Some(name) if name.contains("#") =>
-            toContextStateOption(getBinding(parser.Info.UnknownInfo, idx)).map(_.flatMap {
-              case TermAbbBind(_, Some(ty)) => Some(ty)
-              case _ => None
-            })
-          case _ => State.pure(None)
-        }
-      } yield result
-    case _ => State.pure(None)
-  }
+  def getSpecializedTermType(term: Term): ContextState[Option[Type]] =
+    term match {
+      case TermApp(_, fun, _) =>
+        getSpecializedTermType(fun).map(_.flatMap {
+          case TypeArrow(_, _, res) => Some(res)
+          case _                    => None
+        })
+      case TermMethodProj(_, _, m)
+          if fuse.SpecializedMethodUtils.isSpecializedMethod(m) =>
+        for {
+          idx <- State.inspect[Context, Option[Int]](nameToIndex(_, m))
+          result <- idx.fold(State.pure[Context, Option[Type]](None))(i =>
+            toContextStateOption(getBinding(parser.Info.UnknownInfo, i))
+              .map(_.flatMap {
+                case TermAbbBind(_, Some(ty)) => Some(ty)
+                case _                        => None
+              })
+          )
+        } yield result
+      case TermVar(_, idx, _) =>
+        // Handle specialized data constructors (e.g., Cons#i32, Nil#i32)
+        for {
+          nameOpt <- State.inspect[Context, Option[String]](indexToName(_, idx))
+          result <- nameOpt match {
+            case Some(name) if name.contains("#") =>
+              toContextStateOption(getBinding(parser.Info.UnknownInfo, idx))
+                .map(_.flatMap {
+                  case TermAbbBind(_, Some(ty)) => Some(ty)
+                  case _                        => None
+                })
+            case _ => State.pure(None)
+          }
+        } yield result
+      case _ => State.pure(None)
+    }
 
   object PrimOp:
     val BuiltInOps = BuiltIn.Ops.map(_.operator)
