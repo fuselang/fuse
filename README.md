@@ -18,7 +18,7 @@
 - [x] Implement Type Inference for higher order types (Bidirectional)
 - [x] Implement Type Classes
 - [x] Implement `do` notation
-- [ ] Code Generation to LLVM with monomorphisation
+- [x] Code Generation to LLVM with monomorphisation
 - [ ] Add modules & imports
 
 # Example with [Tree-Sitter](https://github.com/stevanmilic/tree-sitter-fuse)

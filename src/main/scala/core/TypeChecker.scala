@@ -1258,10 +1258,10 @@ object TypeChecker {
           Context.indexToName(ctx, idx) match {
             case Some(name) =>
               // Check if this is a type constructor (starts with uppercase or is a known type)
-              if (name.headOption.exists(_.isUpper) && !name.contains("#")) {
-                TypeId(info, name)
-              } else {
-                ctor // Keep as TypeVar (it's a type parameter, not constructor)
+              (name.headOption.exists(_.isUpper) && !name.contains("#")) match {
+                case true  => TypeId(info, name)
+                case false =>
+                  ctor // Keep as TypeVar (it's a type parameter, not constructor)
               }
             case None =>
               ctor

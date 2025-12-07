@@ -43,16 +43,7 @@ object Monomorphization {
   def replace(binds: List[Bind]): List[Bind] =
     replaceM(binds).runEmptyA.value
 
-  def replaceM(
-      binds: List[Bind],
-      iterationCount: Int = 0
-  ): ContextState[List[Bind]] = {
-    if (iterationCount > 20) {
-      throw new RuntimeException(
-        s"Monomorphization infinite loop detected after $iterationCount iterations"
-      )
-    }
-
+  def replaceM(binds: List[Bind]): ContextState[List[Bind]] = {
     // Collect instantiations, filtering out closure parameter instantiations (r == Some(-1))
     // These are only used during specialization in buildSpecializedBind, not for creating new binds
     val allInsts = Instantiations.distinct(binds.map(_.insts).flatten)
@@ -68,7 +59,7 @@ object Monomorphization {
           // Replace each generic function invocation with a specialized function.
           modifiedBinds <- specializedBinds.traverse(replaceInstantiations(_))
           // Do a recursive replace until no generic instantiations are found.
-          ibinds <- replaceM(modifiedBinds, iterationCount + 1)
+          ibinds <- replaceM(modifiedBinds)
         } yield ibinds
     }
   }
@@ -271,8 +262,8 @@ object Monomorphization {
           dedupedInsts = Instantiations.distinct(filteredInsts)
           // Check for self-recursive calls and add self-instantiation if needed
           hasSelfRecursion = containsAssocProjCall(binding, bind.i)
-          selfInstantiation =
-            if (hasSelfRecursion) {
+          selfInstantiation = hasSelfRecursion match {
+            case true =>
               // Create instantiation pointing to the specialized bind itself
               // Use bind.i (original method name) as inst.i, not name (specialized name)
               // This ensures bindName() generates correct name from base + types
@@ -289,7 +280,8 @@ object Monomorphization {
                   Some(0) // Points to self (index 0 relative to current bind)
                 )
               )
-            } else List()
+            case false => List()
+          }
           // Merge self-instantiation with inherited instantiations
           allInsts = selfInstantiation ::: dedupedInsts
           finalInsts = Instantiations.distinct(allInsts)
@@ -405,7 +397,7 @@ object Monomorphization {
     )
 
   /** Generic handler for term projection replacement */
-  private def handleProjReplacement(
+  def handleProjReplacement(
       tT: Term,
       ty: Option[Type],
       methodName: String,
@@ -429,7 +421,7 @@ object Monomorphization {
   }
 
   /** Handle TermMethodProj instantiation replacement */
-  private def handleMethodProjReplacement(
+  def handleMethodProjReplacement(
       tT: Term,
       ty: Option[Type],
       tC: TermMethodProj,
@@ -443,17 +435,18 @@ object Monomorphization {
     bind,
     inst,
     methodProj =>
-      if (methodProj.i == tC.i && methodProj.t == tC.t) {
-        // Found the matching TermMethodProj - update its method name
-        TermMethodProj(methodProj.info, methodProj.t, methodName)
-      } else {
-        methodProj
+      (methodProj.i == tC.i && methodProj.t == tC.t) match {
+        case true =>
+          // Found the matching TermMethodProj - update its method name
+          TermMethodProj(methodProj.info, methodProj.t, methodName)
+        case false =>
+          methodProj
       },
     assocProj => assocProj
   )
 
   /** Handle TermAssocProj instantiation replacement */
-  private def handleAssocProjReplacement(
+  def handleAssocProjReplacement(
       tT: Term,
       ty: Option[Type],
       tC: TermAssocProj,
@@ -469,23 +462,23 @@ object Monomorphization {
     methodProj => methodProj,
     assocProj => {
       // Strip method prefix from tC.i if present (e.g., !foldRight#List -> foldRight)
-      val cleanTCI = if (tC.i.startsWith(MethodNamePrefix)) {
-        tC.i.drop(MethodNamePrefix.length).takeWhile(_ != '#')
-      } else tC.i
+      val cleanTCI = tC.i.startsWith(MethodNamePrefix) match {
+        case true  => tC.i.drop(MethodNamePrefix.length).takeWhile(_ != '#')
+        case false => tC.i
+      }
       val methodMatch = assocProj.i == cleanTCI
       val alreadySpecialized = assocProj.i.startsWith(Desugar.MethodNamePrefix)
       // Match on method name only - type equality fails after extractTypeArgs + type substitution
       // Don't replace if already specialized (handles multiple instantiations for same call site)
-      if (methodMatch && !alreadySpecialized) {
-        TermAssocProj(assocProj.info, assocProj.t, methodName)
-      } else {
-        assocProj
+      (methodMatch && !alreadySpecialized) match {
+        case true  => TermAssocProj(assocProj.info, assocProj.t, methodName)
+        case false => assocProj
       }
     }
   )
 
   /** Handle TermVar instantiation replacement */
-  private def handleVarReplacement(
+  def handleVarReplacement(
       tT: Term,
       ty: Option[Type],
       tC: TermVar,
@@ -494,7 +487,10 @@ object Monomorphization {
       bind: Bind,
       inst: Instantiation
   ): (Binding, List[Instantiation]) = {
-    val d = if (inst.r.isDefined) None else Some(ctxlen)
+    val d = inst.r.isDefined match {
+      case true  => None
+      case false => Some(ctxlen)
+    }
     (
       TermAbbBind(termVarSubstitute(s, d, tC, tT), ty),
       bind.insts.filterNot(_ == inst)
@@ -502,13 +498,15 @@ object Monomorphization {
   }
 
   /** Check if a term contains a TermAssocProj call to a specific method */
-  private def containsAssocProjInTerm(term: Term, methodName: String): Boolean =
+  def containsAssocProjInTerm(term: Term, methodName: String): Boolean =
     term match {
       case TermAssocProj(_, _, method) =>
         // Strip method prefix if present (e.g., !foldRight#List -> foldRight)
-        val cleanMethodName = if (methodName.startsWith(MethodNamePrefix)) {
-          methodName.drop(MethodNamePrefix.length).takeWhile(_ != '#')
-        } else methodName
+        val cleanMethodName = methodName.startsWith(MethodNamePrefix) match {
+          case true =>
+            methodName.drop(MethodNamePrefix.length).takeWhile(_ != '#')
+          case false => methodName
+        }
         method == cleanMethodName
       case TermApp(_, t1, t2) =>
         containsAssocProjInTerm(t1, methodName) || containsAssocProjInTerm(
@@ -539,7 +537,7 @@ object Monomorphization {
     }
 
   /** Check if a binding contains a TermAssocProj call to a specific method */
-  private def containsAssocProjCall(
+  def containsAssocProjCall(
       binding: Binding,
       methodName: String
   ): Boolean = binding match {

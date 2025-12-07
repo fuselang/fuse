@@ -1,8 +1,10 @@
+import scala.scalanative.build._
+
 // Define common settings for all platforms
 val sharedSettings = Seq(
   scalaVersion := "3.6.4",
   name := "fuse",
-  version := "0.1",
+  version := "0.1.0", // x-release-please-version
   scalacOptions ++= Seq(
     "-feature",
     "-rewrite",
@@ -22,14 +24,25 @@ val sharedSettings = Seq(
   testFrameworks += new TestFramework("munit.Framework")
 )
 
+// Scala Native release configuration
+val nativeSettings = Seq(
+  nativeConfig ~= {
+    _.withLTO(LTO.thin)
+      .withMode(Mode.releaseFast)
+      .withGC(GC.immix)
+  }
+)
+
 // Define a cross project for JVM and Native platforms
 lazy val fuse = crossProject(JVMPlatform, NativePlatform)
   .withoutSuffixFor(JVMPlatform)
   .crossType(CrossType.Pure)
   .in(file("."))
   .settings(sharedSettings)
+  .nativeSettings(nativeSettings)
 
 lazy val fuseJVM = fuse.jvm
+lazy val fuseNative = fuse.native
 
 lazy val root =
-  (project in file(".")).aggregate(fuseJVM).settings(sharedSettings)
+  (project in file(".")).aggregate(fuseJVM, fuseNative).settings(sharedSettings)

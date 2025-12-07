@@ -544,7 +544,10 @@ object Context {
             ctx._2
           )
         case None =>
-          if (emptyOnNotFound) emptyContext else ctx
+          emptyOnNotFound match {
+            case true  => emptyContext
+            case false => ctx
+          }
       }
     }
 

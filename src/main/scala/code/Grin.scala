@@ -149,8 +149,10 @@ object Grin {
               .filter(!_.repr.isBlank)
               .map(indentExpr(1, _).show)
               .mkString("\n")
-            if (preps.isEmpty) show"$variable =\n${indent(1, expr)}"
-            else show"$variable =\n$preps\n${indent(1, expr)}"
+            preps.isEmpty match {
+              case true  => show"$variable =\n${indent(1, expr)}"
+              case false => show"$variable =\n$preps\n${indent(1, expr)}"
+            }
           case _ =>
             show"$variable =\n${PureExpr(e)}"
         }
@@ -174,10 +176,11 @@ object Grin {
       grinCode.contains(opName)
     }
 
-    if (usedOps.isEmpty) ""
-    else {
-      val declarations = usedOps.map(_._2).mkString("\n  ")
-      s"ffi pure\n  $declarations"
+    usedOps.isEmpty match {
+      case true  => ""
+      case false =>
+        val declarations = usedOps.map(_._2).mkString("\n  ")
+        s"ffi pure\n  $declarations"
     }
   }
 
@@ -237,7 +240,10 @@ object Grin {
           "$1'"
         ) // Replace # with ' in type specializations only
       val ffi = generateMissingFFI(grinCode)
-      if (ffi.isEmpty) grinCode else s"$ffi\n\n$grinCode"
+      ffi.isEmpty match {
+        case true  => grinCode
+        case false => s"$ffi\n\n$grinCode"
+      }
     }
     // Use empty context - both passes should generate same variable names when starting fresh
     s.runEmptyA.value
@@ -368,22 +374,22 @@ object Grin {
       prepExprs: List[BindExpr],
       result: String,
       isHeapAllocated: Boolean
-  ): ContextState[(List[BindExpr], String)] = {
-    if (isHeapAllocated) {
-      addTempVariable().map(fetchVar =>
-        (
-          prepExprs :+ BindExpr(
-            show"$fetchVar <- fetch $result",
-            fetchVar,
-            List(Value(result))
-          ),
-          fetchVar
+  ): ContextState[(List[BindExpr], String)] =
+    isHeapAllocated match {
+      case true =>
+        addTempVariable().map(fetchVar =>
+          (
+            prepExprs :+ BindExpr(
+              show"$fetchVar <- fetch $result",
+              fetchVar,
+              List(Value(result))
+            ),
+            fetchVar
+          )
         )
-      )
-    } else {
-      State.pure((prepExprs, result))
+      case false =>
+        State.pure((prepExprs, result))
     }
-  }
 
   def pureToExpr(expr: Term)(implicit
       substFunc: String => String = identity,
@@ -756,16 +762,17 @@ object Grin {
               GrinUtils.freeVars(c).map { fvs =>
                 val freeVars = fvs.filter(_._1 != v).map(_._1)
                 val arity = GrinUtils.getClosureArity(c)
-                if (freeVars.isEmpty) {
-                  FunctionValue(v, arity)
-                } else {
-                  // Dummy lambda is safe: ClosureValue only used to extract name/freeVars in TermApp (not lifted)
-                  ClosureValue(
-                    v,
-                    arity,
-                    freeVars,
-                    LambdaBinding(v, DoExpr(Value(""), 0))
-                  )
+                freeVars match {
+                  case Nil =>
+                    FunctionValue(v, arity)
+                  case _ =>
+                    // Dummy lambda is safe: ClosureValue only used to extract name/freeVars in TermApp (not lifted)
+                    ClosureValue(
+                      v,
+                      arity,
+                      freeVars,
+                      LambdaBinding(v, DoExpr(Value(""), 0))
+                    )
                 }
               }
             case (v, TermAbbBind(t, Some(ty))) =>
