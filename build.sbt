@@ -4,7 +4,7 @@ import scala.scalanative.build._
 val sharedSettings = Seq(
   scalaVersion := "3.6.4",
   name := "fuse",
-  version := "0.1.0", // x-release-please-version
+  version := "0.2.0", // x-release-please-version
   scalacOptions ++= Seq(
     "-feature",
     "-rewrite",
