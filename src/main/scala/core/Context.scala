@@ -14,6 +14,8 @@ import scala.annotation.tailrec
 import scala.util.*
 
 import Shifting.*
+import core.Instantiations.Instantiation
+import core.Desugar.RecordConstrPrefix
 
 object Context {
   type Note = (String, Binding)
@@ -83,8 +85,16 @@ object Context {
   def run[T](state: ContextState[T]): ContextState[T] =
     State { ctx =>
       {
-        val (ctx1, t) = state.run(ctx).value
-        ((ctx._1, ctx._2 + (ctx1._2 - ctx._2)), t)
+        try {
+          val (ctx1, t) = state.run(ctx).value
+          ((ctx._1, ctx._2 + (ctx1._2 - ctx._2)), t)
+        } catch {
+          case e: NoSuchElementException =>
+            throw new RuntimeException(
+              s"Context state computation failed - ${e.getMessage} - Context has ${ctx._1.length} bindings",
+              e
+            )
+        }
       }
     }
 
@@ -95,10 +105,10 @@ object Context {
     getBinding(info, idx).flatMap[Error, Type](_ match {
       case VarBind(ty)              => EitherT.rightT(ty)
       case TermAbbBind(_, Some(ty)) => EitherT.rightT(ty)
-      case TermAbbBind(_, None) =>
+      case TermAbbBind(_, None)     =>
         TypeError.format(NoTypeForVariableTypeError(info, idx))
       case TypeAbbBind(ty, _) => EitherT.rightT(ty)
-      case _ =>
+      case _                  =>
         TypeError.format(WrongBindingForVariableTypeError(info, idx))
     })
 
@@ -116,19 +126,72 @@ object Context {
         case _            => TypeError.format(BindingNotFoundTypeError(info))
       })
 
+  /** Check if a variable at the given index is a closure parameter.
+    *
+    * Closure parameters are:
+    *   - Bound with VarBind (not TermAbbBind or other types)
+    *   - Not recursive function parameters (which start with "^")
+    *
+    * This is used during instantiation collection to skip creating
+    * instantiations for runtime closure parameters, which should not be
+    * monomorphized.
+    */
+  def isClosureParameter(ctx: Context, idx: Int): Boolean = {
+    getNotes(ctx, withMarks = false).lift(idx).exists {
+      case (name, VarBind(_)) =>
+        // VarBind indicates a variable binding (like closure parameters)
+        // Exclude recursive function parameters (start with "^")
+        !name.startsWith(Desugar.RecursiveFunctionParamPrefix)
+      case _ => false
+    }
+  }
+
   def getAlgebraicDataTypeVar(
       info: Info,
       node: String
   ): ContextState[Option[TypeVar]] =
+    findAlgebraicDataType(info, node).map(
+      _.map(v => TypeVar(info, v._2, v._3))
+    )
+
+  def getAlgebraicDataTypeName(
+      info: Info,
+      node: String
+  ): ContextState[Option[String]] =
+    findAlgebraicDataType(info, node.stripPrefix(RecordConstrPrefix))
+      .map(_.map(_._1._1))
+
+  /** Finds algebraic data type name using the name from one of its nodes.
+    *
+    * For a record type the node name will be equal to ADT name, while for sum
+    * type the node name will be equal to of its enumarations.
+    */
+  def findAlgebraicDataType(
+      info: Info,
+      node: String
+  ): ContextState[Option[(Note, Int, Int)]] =
     State.inspect { (ctx: Context) =>
       val notes = getNotes(ctx).toList
-      notes.zipWithIndex.collectFirst {
-        case ((i, TypeAbbBind(_, _)), idx) if i == node =>
-          TypeVar(info, idx, notes.length)
-        case ((_, TypeAbbBind(ty, _)), idx) if isSumType(ty, node) =>
-          TypeVar(info, idx, notes.length)
-      }
+      notes.zipWithIndex
+        .find {
+          case ((i, TypeAbbBind(_, _)), idx) if i == node =>
+            true
+          case ((_, TypeAbbBind(ty, _)), idx) if isSumType(ty, node) =>
+            true
+          case _ =>
+            false
+        }
+        .map((n, idx) => (n, idx, notes.length))
     }
+
+  def instantantionShiftOnContextDiff(
+      inst: Instantiation
+  ): ContextState[Instantiation] =
+    inst.tys
+      .traverse(typeShiftOnContextDiff(_))
+      .map(
+        Instantiation(inst.i, inst.term, _, inst.cls, inst.r)
+      )
 
   /** Shifts type based on the difference between TypeVar length and current
     * length of the context.
@@ -178,17 +241,11 @@ object Context {
       .flatMap(_.traverse(typeShiftOnContextDiff(_)))
 
   /** Retrieves type classes that implement given type. */
-  def getTypeInstances(t: TypeVar): ContextState[List[TypeClass]] =
+  def getTypeInstances(typeName: String): ContextState[List[TypeClass]] =
     State.inspect { (ctx: Context) =>
       getNotes(ctx).foldLeft(List[TypeClass]()) {
-        case (acc, (_, TypeClassInstanceBind(cls, tc: TypeVar, _)))
-            // NOTE: Because the type class instance bind type var isn't
-            // shifted we can instead calculate if its equal to the _current_
-            // type var by including the context length into the calculation
-            // i.e. by taking the difference between the context length and
-            // adding it up to the current index type var (the diff would
-            // usually be negative).
-            if tc.index == (t.index + tc.length - t.length) =>
+        case (acc, (binding, TypeClassInstanceBind(cls, tc: TypeVar, _)))
+            if Desugar.toTypeInstanceBindID(cls, typeName) == binding =>
           TypeClass(tc.info, cls) :: acc
         case (acc, _) => acc
       }
@@ -212,7 +269,7 @@ object Context {
     methodOptionIdx <- EitherT.liftF(
       State.inspect { (ctx: Context) =>
         {
-          val methodID = Desugar.toMethodId(method, typeName)
+          val methodID = Desugar.toMethodID(method, typeName)
           val recAbsID = Desugar.toRecAbsId(methodID)
           getNotes(ctx).indexWhere { case ((i, _)) =>
             i.startsWith(methodID) || i == recAbsID
@@ -225,9 +282,9 @@ object Context {
     )
     methodType <- methodOptionIdx match {
       case Some(idx) => getType(info, idx)
-      case None =>
+      case None      =>
         for {
-          cls <- EitherT.liftF(getTypeInstances(rootTypeVar))
+          cls <- EitherT.liftF(getTypeInstances(typeName))
           tys <- cls.traverse(
             getTypeClassMethodType(_, method)
               .map(Some(_))
@@ -236,7 +293,7 @@ object Context {
           methodTypes = tys.collect { case Some(v) => v }
           ty <- methodTypes match {
             case h :: Nil => h.pure[StateEither]
-            case Nil =>
+            case Nil      =>
               TypeError.format(
                 MethodNotFoundTypeError(info, ty, method)
               )
@@ -253,12 +310,12 @@ object Context {
   ): StateEither[Type] = for {
     methodOptionIdx <- EitherT.liftF(
       State.inspect { (ctx: Context) =>
-        nameToIndex(ctx, Desugar.toMethodId(method, cls.name))
+        nameToIndex(ctx, Desugar.toMethodID(method, cls.name))
       }
     )
     methodType <- methodOptionIdx match {
       case Some(idx) => getType(cls.info, idx)
-      case None =>
+      case None      =>
         TypeError.format(
           MethodNotFoundTypeError(cls.info, cls, method)
         )
@@ -310,13 +367,13 @@ object Context {
 
   def insertEArrow(
       eA: TypeEVar
-  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeArrow]] = for {
+  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeESolutionBind]] = for {
     (idx, cls) <- getFreeEVarIndex(eA)
     ty1 <- EitherT.liftF(freshEVar("a1", eA.info, cls))
     ty2 <- EitherT.liftF(freshEVar("a2", eA.info, cls))
-    ty = TypeArrow(eA.info, ty1, ty2)
+    sol = TypeESolutionBind(TypeArrow(eA.info, ty1, ty2))
     notes = List(
-      (eA.name, TypeESolutionBind(ty)),
+      (eA.name, sol),
       (ty1.name, TypeEFreeBind),
       (ty2.name, TypeEFreeBind)
     )
@@ -327,17 +384,17 @@ object Context {
         (postNotes ::: notes ::: preNotes.tail, ctx._2)
       }
     })
-  } yield (ty1, ty2, ty)
+  } yield (ty1, ty2, sol)
 
   def insertEApp(
       eA: TypeEVar
-  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeApp]] = for {
+  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeESolutionBind]] = for {
     (idx, cls) <- getFreeEVarIndex(eA)
     ty1 <- EitherT.liftF(freshEVar("a1", eA.info, cls))
     ty2 <- EitherT.liftF(freshEVar("a2", eA.info, cls))
-    ty = TypeApp(eA.info, ty1, ty2)
+    sol = TypeESolutionBind(TypeApp(eA.info, ty1, ty2))
     notes = List(
-      (eA.name, TypeESolutionBind(ty)),
+      (eA.name, sol),
       (ty1.name, TypeEFreeBind),
       (ty2.name, TypeEFreeBind)
     )
@@ -348,19 +405,28 @@ object Context {
         (postNotes ::: notes ::: preNotes.tail, ctx._2)
       }
     })
-  } yield (ty1, ty2, ty)
+  } yield (ty1, ty2, sol)
 
+  /** Replaces existential variable at specified index with existential type
+    * solution binding.
+    *
+    * @return
+    *   modifies the input state and returns the existential type binding
+    *   passed.
+    */
   def replaceEVar(
       idx: Integer,
       eA: TypeEVar,
       m: TypeESolutionBind
-  ): ContextState[Unit] =
-    State.modify { (ctx: Context) =>
-      (
-        getNotes(ctx, withMarks = true).toList.updated(idx, (eA.name, m)),
-        ctx._2
-      )
-    }
+  ): ContextState[TypeESolutionBind] =
+    State
+      .modify { (ctx: Context) =>
+        (
+          getNotes(ctx, withMarks = true).toList.updated(idx, (eA.name, m)),
+          ctx._2
+        )
+      }
+      .map(_ => m)
 
   def getFreeEVarIndex(
       eA: TypeEVar
@@ -376,7 +442,7 @@ object Context {
     })
     r <- idx match {
       case Some(v) => v.pure[StateEither]
-      case None    => TypeError.format(ExistentialVariableNotFoundTypeError(eA))
+      case None    => TypeError.format(VariableRequiresTypeAnnotationError(eA))
     }
   } yield (r, eA.cls)
 
@@ -384,11 +450,11 @@ object Context {
   def solution(
       eV: TypeEVar,
       shift: Boolean = true
-  ): ContextState[Option[Type]] =
+  ): ContextState[Option[(Type, List[TypeClass])]] =
     State.inspect { ctx =>
       val notes = getNotes(ctx, withMarks = true)
-      val t = notes.collectFirst {
-        case (v, TypeESolutionBind(ty)) if v == eV.name => ty
+      val sol = notes.collectFirst {
+        case (v, TypeESolutionBind(ty, cls)) if v == eV.name => (ty, cls)
       }
       // NOTE: We are shifting the existential variable solution by the number
       // of "regular" (non-mark) bindings untill its place in the context. This
@@ -396,9 +462,10 @@ object Context {
       // if any regular binding is inserted afterwards the index in the
       // solution type is incorrect – cause we haven't shifted it. So we
       // "manually" gotta do that, count the bindings and shift.
-      t.map(ty =>
-        if (shift) typeShift(countBindingsTillEVar(notes, eV), ty) else ty
-      )
+      sol.map { case (ty, c) =>
+        if (shift) (typeShift(countBindingsTillEVar(notes, eV), ty), c)
+        else (ty, c)
+      }
     }
 
   def countBindingsTillEVar(notes: LazyList[Note], eV: TypeEVar): Int =
@@ -438,7 +505,7 @@ object Context {
         r2 <- isWellFormed(ty2)
       } yield r1 && r2
     case TypeAll(_, _, _, _, ty) => isWellFormed(ty)
-    case TypeRecord(_, l) =>
+    case TypeRecord(_, l)        =>
       l.traverse { case (_, ty) => isWellFormed(ty) }.map(_.reduce(_ && _))
     case TypeVariant(_, l) =>
       l.traverse { case (_, ty) => isWellFormed(ty) }.map(_.reduce(_ && _))
@@ -464,7 +531,7 @@ object Context {
   def peel(name: String, emptyOnNotFound: Boolean = false): ContextState[Unit] =
     State.modify { (ctx: Context) =>
       nameToIndex(ctx, name, withMarks = true) match {
-        case Some(_) =>
+        case Some(idx) =>
           val notes = getNotes(ctx, withMarks = true).dropWhile {
             case (v, _) if v == name => false
             case _                   => true
@@ -476,7 +543,11 @@ object Context {
             },
             ctx._2
           )
-        case None => if (emptyOnNotFound) emptyContext else ctx
+        case None =>
+          emptyOnNotFound match {
+            case true  => emptyContext
+            case false => ctx
+          }
       }
     }
 

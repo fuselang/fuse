@@ -292,7 +292,6 @@ abstract class Expressions(fileName: String) extends Types(fileName) {
         `>=` ~ AdditiveExpr ~> FGreaterThanEqual.apply |
         `<` ~ AdditiveExpr ~> FLessThan.apply |
         `>` ~ AdditiveExpr ~> FGreaterThan.apply).*
-
     }
     def EqualityExpr = rule {
       RelationExpr ~ (`==` ~ RelationExpr ~> FEquality.apply |

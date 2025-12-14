@@ -2,6 +2,10 @@ package fuse
 
 import munit.*
 import scala.concurrent.duration.Duration
+import cats.effect.{IO, Resource}
+import java.nio.file.{Files, Path, Paths}
+import scala.sys.process.*
+import cats.effect.ExitCode
 
 class CompilerTests extends FunSuite {
   import CompilerTests.*
@@ -10,13 +14,15 @@ class CompilerTests extends FunSuite {
   /** Asserts fuse code is type checked. */
   def fuse(code: String, expected: Output = CheckOutput(None)) =
     expected match {
-      case CheckOutput(s) => assertCheck(code, s)
-      case BuildOutput(s) => assertBuild(code, s)
+      case CheckOutput(s)                     => assertCheck(code, s)
+      case BuildOutput(s)                     => assertBuild(code, s)
+      case ExecutableOutput(stdout, exitCode) =>
+        assertExecutable(code, stdout, exitCode)
     }
 
   def assertCheck(code: String, expectedError: Option[String]) =
     (check(code), expectedError) match {
-      case (t, None) => assert(t.isRight, s"\n${t.merge}")
+      case (t, None)                    => assert(t.isRight, s"\n${t.merge}")
       case (t, Some(error)) if t.isLeft =>
         assert(t.merge.contains(error), s"\n${error} not in:\n${t.merge}")
       case (_, Some(error)) =>
@@ -34,6 +40,26 @@ class CompilerTests extends FunSuite {
       case Left(error) =>
         assert(false, s"\nfailed to compile due to error: '${error}'")
     }
+
+  def assertExecutable(
+      code: String,
+      expectedStdout: String,
+      expectedExitCode: Int = 0
+  ) = {
+    import cats.effect.unsafe.implicits.global
+
+    execute(code).unsafeRunSync() match {
+      case Right(result) =>
+        assertEquals(
+          result.exitCode,
+          expectedExitCode,
+          s"Exit code mismatch. stderr: ${result.stderr}"
+        )
+        assertEquals(result.stdout, expectedStdout, "Output mismatch")
+      case Left(error) =>
+        fail(s"Execution failed: $error")
+    }
+  }
 
 }
 
@@ -127,8 +153,9 @@ impl Option[A]:
             None => default
 
     fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
-        let v = self.map(f)
-        v.get_or_else(None)
+        match self:
+            Some(a) => f(a)
+            None => None
 
     fun filter(self, f: A -> bool) -> Option[A]
         match self:
@@ -153,7 +180,8 @@ fun main() -> i32
         """)
   }
   test("check generic list") {
-    fuse("""
+    fuse(
+      """
 type List[A]:
     Cons(h: A, t: List[A])
     Nil
@@ -168,18 +196,63 @@ impl List[A]:
         List::foldRight(self, Nil[B], (h, t) => Cons(f(h), t))
 
     fun map_2[B](self, f: A -> B) -> List[B]
-        let iter = (acc, l) => {
+        let iter = (l: List[A], acc: List[B]) => {
             match l:
-                Cons(h, t) => Cons(f(h), iter(acc, t))
+                Cons(h, t) => iter(t, Cons(f(h), acc))
                 Nil => acc
         }
-        iter(Nil[B], self)
+        iter(self, Nil[B])
 
 fun main() -> Unit
     let l = Cons(2, Cons(3, Nil))
     let l1 = l.map_2(v => v + 1)
     ()
+        """
+    )
+  }
+  test("check generic list with map_2 non-recursive") {
+    fuse("""
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun simple_map[B](self, f: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(f(h), Nil[B])
+            Nil => Nil[B]
+
+fun main() -> Unit
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.simple_map(v => v + 1)
+    ()
         """)
+  }
+  test("check generic list with unannotated iter map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun map_2[B](self, f: A -> B) -> List[B]
+        let iter = (l, acc) => {
+            match l:
+                Cons(h, t) => iter(t, Cons(f(h), acc))
+                Nil => acc
+        }
+        iter(self, Nil[B])
+
+fun main() -> Unit
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map_2(v => v + 1)
+    ()
+        """,
+      CheckOutput(
+        Some("explicit type annotation required for variable")
+      )
+    )
   }
   test("check lambda calc") {
     fuse("""
@@ -425,7 +498,7 @@ fun main() -> i32
     value(Dog)
         """)
   }
-  test("check clsoure inference with match statement for product type") {
+  test("check closure inference with match statement for product type") {
     fuse("""
 type Point:
   x: i32
@@ -870,7 +943,6 @@ fun main() -> i32
     o.map(a => a + 1)
     0
         """)
-
   }
   test("check generic trait monad implementation") {
     fuse("""
@@ -1462,6 +1534,56 @@ fun main() -> Unit
 class CompilerBuildTests extends CompilerTests {
   import CompilerTests.*
 
+  test("build unit function") {
+    fuse(
+      """
+fun greetings() -> Unit
+  print("Hello World")
+
+fun main() -> Unit
+  greetings()
+    """,
+      BuildOutput("""
+greetings _0 =
+ _prim_string_print #"Hello World"
+
+grinMain _1 =
+ greetings 0""")
+    )
+  }
+  test("build simple sum type") {
+    fuse(
+      """
+type Animal:
+  Dog
+  Cat
+
+fun value(a: Animal) -> i32
+  match a:
+      Dog => 0
+      Cat => 1
+
+fun main() -> i32
+    value(Dog)
+        """,
+      BuildOutput("""
+Dog =  store (CDog)
+
+Cat =  store (CCat)
+
+value a0 =
+ p3 <- fetch a0
+ case p3 of
+  (CDog ) ->
+   pure 0
+  #default ->
+   pure 1
+
+grinMain _3 =
+ p5 <- Dog
+ value p5""")
+    )
+  }
   test("build integer addition") {
     fuse(
       """
@@ -1473,16 +1595,2112 @@ grinMain _0 =
  _prim_int_add 2 2""")
     )
   }
+  test("build float addition") {
+    fuse(
+      """
+fun main() -> f32
+    2.0 + 2.0
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_float_add 2.0 2.0""")
+    )
+  }
+  test("build string addition") {
+    fuse(
+      """
+fun main() -> str
+    "Hello" + "World"
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_string_concat #"Hello" #"World"""")
+    )
+  }
+  test("build integer subtraction") {
+    fuse(
+      """
+fun main() -> i32
+    2 - 2
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_int_sub 2 2""")
+    )
+  }
+  test("build float multiplication") {
+    fuse(
+      """
+fun main() -> f32
+    2.0 * 2.0
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_float_mul 2.0 2.0""")
+    )
+  }
+  test("build float division") {
+    fuse(
+      """
+fun main() -> f32
+    2.0 / 2.0
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_float_div 2.0 2.0""")
+    )
+  }
+  test("build int modulo") {
+    fuse(
+      """
+fun main() -> i32
+    10 % 2
+    """,
+      BuildOutput("""
+ffi pure
+  _prim_int_mod :: T_Int64 -> T_Int64 -> T_Int64
+
+grinMain _0 =
+ _prim_int_mod 10 2""")
+    )
+  }
+  test("build arithmetic expression") {
+    fuse(
+      """
+fun main() -> i32
+    2 + 3 * 6
+    """,
+      BuildOutput("""
+grinMain _0 =
+ p2 <- _prim_int_mul 3 6
+ _prim_int_add 2 p2""")
+    )
+  }
+  test("build int equal") {
+    fuse(
+      """
+fun main() -> bool
+    10 == 10
+    """,
+      BuildOutput("""
+grinMain _0 =
+ _prim_int_eq 10 10""")
+    )
+  }
+  test("build str not equal") {
+    fuse(
+      """
+fun main() -> bool
+    "Hello" != "World"
+    """,
+      BuildOutput("""
+ffi pure
+  _prim_string_ne :: T_String -> T_String -> T_Int64
+
+grinMain _0 =
+ _prim_string_ne #"Hello" #"World"""")
+    )
+  }
+  test("build and") {
+    fuse(
+      """
+fun main() -> bool
+    1 != 2 && 3 == 4
+    """,
+      BuildOutput("""
+ffi pure
+  _prim_bool_and :: T_Bool -> T_Bool -> T_Bool
+
+grinMain _0 =
+ p2 <- _prim_int_ne 1 2
+ p3 <- _prim_int_eq 3 4
+ _prim_bool_and p2 p3""")
+    )
+  }
+  test("build or") {
+    fuse(
+      """
+fun main() -> bool
+    1 != 2 || 3 == 4
+    """,
+      BuildOutput("""
+ffi pure
+  _prim_bool_or :: T_Bool -> T_Bool -> T_Bool
+
+grinMain _0 =
+ p2 <- _prim_int_ne 1 2
+ p3 <- _prim_int_eq 3 4
+ _prim_bool_or p2 p3""")
+    )
+  }
+  test("build inline lambda with type annotation") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a: i32) => a + 1
+    value(1)
+        """,
+      BuildOutput("""
+grinMain _0 =
+ value2 1
+
+value2 a2 =
+ _prim_int_add a2 1
+        """)
+    )
+  }
+  test("build inline lambda with two variables with type annotations") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a: i32, b: i32) => a + b + 2
+    value(1, 2)
+        """,
+      BuildOutput("""
+grinMain _0 =
+ value2 1 2
+
+value2 a2 b3 =
+ p5 <- _prim_int_add a2 b3
+ _prim_int_add p5 2
+        """)
+    )
+  }
+  test("build inline lambda") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a) => a + 1
+    value(1)
+        """,
+      BuildOutput("""
+grinMain _0 =
+ value2 1
+
+value2 a2 =
+ _prim_int_add a2 1
+        """)
+    )
+  }
+  test("build inline lambda with two variables") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a, b) => a + b + 2
+    value(1, 2)
+        """,
+      BuildOutput("""
+grinMain _0 =
+ value2 1 2
+
+value2 a2 b3 =
+ p5 <- _prim_int_add a2 b3
+ _prim_int_add p5 2
+        """)
+    )
+  }
+  test("build generic function") {
+    fuse(
+      """
+fun identity[T](v: T) -> T
+    v
+
+fun main() -> Unit
+    let s = identity("Hello World")
+    print(s)
+        """,
+      BuildOutput("""
+identity'str v0 =
+ pure v0
+
+grinMain _1 =
+ s2 <-  identity'str #"Hello World"
+ _prim_string_print s2
+        """)
+    )
+  }
+  test("build generic function with multiple instantiations") {
+    fuse(
+      """
+fun identity[T](v: T) -> T
+    v
+
+fun main() -> i32
+    let s = identity("Hello World")
+    let i = identity(1)
+    print(s)
+    i
+        """,
+      BuildOutput("""
+identity'str v0 =
+ pure v0
+
+identity'i32 v1 =
+ pure v1
+
+grinMain _2 =
+ s3 <-  identity'str #"Hello World"
+ i4 <-  identity'i32 1
+ _6 <-  _prim_string_print s3
+ pure i4
+        """)
+    )
+  }
+  test("build generic function that calls different generic function") {
+    fuse(
+      """
+fun identity[T](v: T) -> T
+    v
+
+fun id[A](a: A) -> A
+  identity(a)
+
+fun main() -> i32
+    let s = id("Hello World")
+    let i = id(5)
+    let f = id(99.9)
+    print(s)
+    i
+        """,
+      BuildOutput("""
+identity'str v0 =
+ pure v0
+
+identity'i32 v1 =
+ pure v1
+
+identity'f32 v2 =
+ pure v2
+
+id'str a3 =
+ identity'str a3
+
+id'i32 a4 =
+ identity'str a4
+
+id'f32 a5 =
+ identity'str a5
+
+grinMain _6 =
+ s7 <-  id'str #"Hello World"
+ i8 <-  id'i32 5
+ f9 <-  id'f32 99.9
+ _11 <-  _prim_string_print s7
+ pure i8
+        """)
+    )
+  }
+  test("build function with params using generics") {
+    fuse(
+      """
+fun summarize(a: str, b: str) -> str
+  a + b
+
+fun main() -> i32
+    let s = summarize("Hello", "World")
+    print(s)
+    0
+        """,
+      BuildOutput("""
+summarize a0 b1 =
+ _prim_string_concat a0 b1
+
+grinMain _2 =
+ s4 <-  summarize #"Hello" #"World"
+ _6 <-  _prim_string_print s4
+ pure 0
+        """)
+    )
+  }
+  test("build multiple functions using generics") {
+    fuse(
+      """
+fun summarize(a: str, b: str) -> str
+  a + ": " + b
+
+fun addition[T: Add](a: T, b: T) -> T
+  a + b
+  
+fun main() -> i32
+    let s = summarize("Hello", "World")
+    let a = addition(2, 3)
+    print(s)
+    a
+        """,
+      BuildOutput("""
+summarize a0 b1 =
+ p3 <- _prim_string_concat a0 #": "
+ _prim_string_concat p3 b1
+
+additioni32Add' a3 b4 =
+ _prim_int_add a3 b4
+
+grinMain _5 =
+ s7 <-  summarize #"Hello" #"World"
+ a8 <-  additioni32Add' 2 3
+ _10 <-  _prim_string_print s7
+ pure a8
+        """)
+    )
+  }
+  test("build simple trait") {
+    fuse(
+      """
+trait Summary:
+  fun summarize(self) -> str;
+
+type Tweet:
+  username: str
+  content: str
+
+impl Summary for Tweet:
+  fun summarize(self) -> str
+    self.username + ": " + self.content
+
+fun notify[T: Summary](s: T) -> Unit
+  print("Breaking news! " + s.summarize())
+
+fun main() -> i32
+    let tweet = Tweet("elon", "work!")
+    print(tweet.summarize())
+    notify(tweet)
+    0
+        """,
+      BuildOutput("""
+Tweet username0 content1 =
+ store (CTweet username0 content1)
+
+summarizeTweetSummary' self4 =
+ p7 <- fetch self4
+ p10 <- do
+   case p7 of
+    (CTweet p8 p9) ->
+     pure p8
+ p11 <- _prim_string_concat p10 #": "
+ p13 <- fetch self4
+ p16 <- do
+   case p13 of
+    (CTweet p14 p15) ->
+     pure p15
+ _prim_string_concat p11 p16
+
+notifyTweetSummary' s16 =
+ p19 <- summarizeTweetSummary' s16
+ p20 <- _prim_string_concat #"Breaking news! " p19
+ _prim_string_print p20
+
+grinMain _20 =
+ tweet22 <-  Tweet #"elon" #"work!"
+ p25 <- summarizeTweetSummary' tweet22
+ _27 <-  _prim_string_print p25
+ _28 <-  notifyTweetSummary' tweet22
+ pure 0
+        """)
+    )
+  }
+  test("build simple trait with no-op generic func") {
+    fuse(
+      """
+trait Summary:
+  fun summarize(self) -> str;
+
+type Tweet:
+  username: str
+  content: str
+
+impl Summary for Tweet:
+  fun summarize(self) -> str
+    self.username + ": " + self.content
+
+fun notify[T: Summary](s: T) -> str
+  "no news!"
+
+fun main() -> i32
+    let tweet = Tweet("elon", "work!")
+    print(tweet.summarize())
+    notify(tweet)
+    0
+        """,
+      BuildOutput("""
+Tweet username0 content1 =
+ store (CTweet username0 content1)
+
+summarizeTweetSummary' self4 =
+ p7 <- fetch self4
+ p10 <- do
+   case p7 of
+    (CTweet p8 p9) ->
+     pure p8
+ p11 <- _prim_string_concat p10 #": "
+ p13 <- fetch self4
+ p16 <- do
+   case p13 of
+    (CTweet p14 p15) ->
+     pure p15
+ _prim_string_concat p11 p16
+
+notifyTweetSummary' s16 =
+ pure #"no news!"
+
+grinMain _17 =
+ tweet19 <-  Tweet #"elon" #"work!"
+ p22 <- summarizeTweetSummary' tweet19
+ _24 <-  _prim_string_print p22
+ _25 <-  notifyTweetSummary' tweet19
+ pure 0
+        """)
+    )
+  }
+  test("build addition type bounds") {
+    fuse(
+      """
+fun plus[T: Add](a: T, b: T) -> T
+  a + b
+
+fun main() -> i32
+  plus(2, 3)
+        """,
+      BuildOutput("""
+plusi32Add' a0 b1 =
+ _prim_int_add a0 b1
+
+grinMain _2 =
+ plusi32Add' 2 3
+       """)
+    )
+  }
+  test("build generic record type") {
+    fuse(
+      """
+type X[T]:
+  v: T
+
+fun main() -> i32
+  let x = X(1)
+  x.v
+        """,
+      BuildOutput("""
+X'i32 v0 =
+ store (CX v0)
+
+grinMain _2 =
+ x3 <-  X'i32 1
+ p6 <- fetch x3
+ p8 <- do
+   case p6 of
+    (CX p7) ->
+     pure p7
+ pure p8""")
+    )
+  }
+  test("build generic point type") {
+    fuse(
+      """
+type Point[T, V]:
+  x: T
+  y: V
+
+fun main() -> i32
+  let p = Point(1, "2")
+  p.x
+        """,
+      BuildOutput("""
+Point'i32'str x0 y1 =
+ store (CPoint x0 y1)
+
+grinMain _4 =
+ p5 <-  Point'i32'str 1 #"2"
+ p8 <- fetch p5
+ p11 <- do
+   case p8 of
+    (CPoint p9 p10) ->
+     pure p9
+ pure p11
+    """)
+    )
+  }
+  test("build generic tuple type") {
+    fuse(
+      """
+type Tuple[A, B](A, B)
+
+fun main() -> i32
+  let t = Tuple(1, "2")
+  t.1
+        """,
+      BuildOutput("""
+Tuple'i32'str t10 t21 =
+ store (CTuple t10 t21)
+
+grinMain _4 =
+ t5 <-  Tuple'i32'str 1 #"2"
+ p8 <- fetch t5
+ p11 <- do
+   case p8 of
+    (CTuple p9 p10) ->
+     pure p9
+ pure p11
+        """)
+    )
+  }
+  test("build sum type") {
+    fuse(
+      """
+type OptionI32:
+    None
+    Some(i32)
+
+fun main() -> i32
+    let o = Some(5)
+    match o:
+        Some(v) => v
+        None => 1
+        """,
+      BuildOutput("""
+None =  store (CNone)
+
+Some t10 =
+ store (CSome t10)
+
+grinMain _2 =
+ o4 <-  Some 5
+ p7 <- fetch o4
+ case p7 of
+  (CSome v7) ->
+   pure v7
+  #default ->
+   pure 1""")
+    )
+  }
+  test("build generic sum type") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+fun main() -> i32
+    let o = Some(5)
+    match o:
+        Some(v) => v
+        None => 1
+        """,
+      BuildOutput("""
+None'i32 =  store (CNone)
+
+Some'i32 t10 =
+ store (CSome t10)
+
+grinMain _2 =
+ o3 <-  Some'i32 5
+ p6 <- fetch o3
+ case p6 of
+  (CSome v6) ->
+   pure v6
+  #default ->
+   pure 1
+        """)
+    )
+  }
+  test("build generic sum type with map function") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+  fun map[B](self, f: A -> B) -> Option[B]
+    match self:
+      Some(v) => Some(f(v))
+      _ => None
+
+fun main() -> i32
+    let o = Some(5)
+    o.map(a => a + 1)
+    0
+        """,
+      BuildOutput("""None'i32 =  store (CNone)
+
+Some'i32 t10 =
+ store (CSome t10)
+
+mapOptioni32i32' self2 f''3 =
+ p6 <- fetch self2
+ case p6 of
+  (CSome v6) ->
+   p8 <- apply_P1c13 f''3 v6
+   p9 <- Some'i32 p8
+   pure p9
+  #default ->
+   p10 <- None'i32
+   pure p10
+
+grinMain _10 =
+ o11 <-  Some'i32 5
+ p15 <- pure (P1c13 )
+ _15 <-  mapOptioni32i32' o11 p15
+ pure 0
+
+c13 a13 =
+ _prim_int_add a13 1
+
+apply_P1c13 p17 p18 =
+ case p17 of
+  (P1c13 ) ->
+   c13  p18
+""")
+    )
+  }
+  test("build generic trait functor implementation") {
+    fuse(
+      """
+trait Functor[A]:
+  fun map[B](self, f: A -> B) -> Self[B];
+
+type Option[T]:
+  Some(T)
+  None
+
+impl Functor for Option[A]:
+  fun map[B](self, f: A -> B) -> Option[B]
+    match self:
+      Some(v) => Some(f(v))
+      _ => None
+
+fun main() -> i32
+    let o = Some(5)
+    o.map(a => a + 1)
+    0
+        """,
+      BuildOutput("""
+Some'i32 t10 =
+ store (CSome t10)
+
+None'i32 =  store (CNone)
+
+mapOptionFunctori32i32' self2 f''3 =
+ p6 <- fetch self2
+ case p6 of
+  (CSome v6) ->
+   p8 <- apply_P1c13 f''3 v6
+   p9 <- Some'i32 p8
+   pure p9
+  #default ->
+   p10 <- None'i32
+   pure p10
+
+grinMain _10 =
+ o11 <-  Some'i32 5
+ p15 <- pure (P1c13 )
+ _15 <-  mapOptionFunctori32i32' o11 p15
+ pure 0
+
+c13 a13 =
+ _prim_int_add a13 1
+
+apply_P1c13 p17 p18 =
+ case p17 of
+  (P1c13 ) ->
+   c13  p18
+        """)
+    )
+  }
+  test("build minimal generic option") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+    fun map[B](self, f: A -> B) -> Option[B]
+        match self:
+            Some(v) => Some(f(v))
+            _ => None
+
+    fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
+        match self:
+            Some(a) => f(a)
+            None => None
+
+fun main() -> i32
+    0
+        """,
+      BuildOutput("""grinMain _0 =
+ pure 0
+""")
+    )
+  }
+  test("build generic option with map") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+    fun map[B](self, f: A -> B) -> Option[B]
+        match self:
+            Some(v) => Some(f(v))
+            _ => None
+
+fun main() -> i32
+    let o = Some(5)
+    let o1 = o.map(a => a + 1)
+    match o1:
+        Some(v) => v
+        None => 0
+        """,
+      BuildOutput("""None'i32 =  store (CNone)
+
+Some'i32 t10 =
+ store (CSome t10)
+
+mapOptioni32i32' self2 f''3 =
+ p6 <- fetch self2
+ case p6 of
+  (CSome v6) ->
+   p8 <- apply_P1c13 f''3 v6
+   p9 <- Some'i32 p8
+   pure p9
+  #default ->
+   p10 <- None'i32
+   pure p10
+
+grinMain _10 =
+ o11 <-  Some'i32 5
+ p15 <- pure (P1c13 )
+ o115 <-  mapOptioni32i32' o11 p15
+ p18 <- fetch o115
+ case p18 of
+  (CSome v18) ->
+   pure v18
+  #default ->
+   pure 0
+
+c13 a13 =
+ _prim_int_add a13 1
+
+apply_P1c13 p20 p21 =
+ case p20 of
+  (P1c13 ) ->
+   c13  p21
+""")
+    )
+  }
+  test("build generic option") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+    fun is_some(self) -> bool
+        match self:
+            Some(v) => true
+            _ => false
+
+    fun is_none(self) -> bool
+        match self:
+            Some(v) => false
+            _ => true
+
+    fun map[B](self, f: A -> B) -> Option[B]
+        match self:
+            Some(v) => Some(f(v))
+            _ => None
+
+    fun get_or_else(self, default: A) -> A
+        match self:
+            Some(a) => a
+            None => default
+
+    fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
+        match self:
+            Some(a) => f(a)
+            None => None
+
+    fun filter(self, f: A -> bool) -> Option[A]
+        match self:
+            Some(a) => {
+                match f(a):
+                    true => self
+                    _ => None
+            }
+            _ => None
+
+    fun to_str(v: i32) -> Option[str]
+        let s = Some(v)
+        s.map(a => int_to_str(a))
+
+fun main() -> i32
+    let o = Some(5)
+    let o1 = o.flat_map(t => Some(t + 1))
+    let l = Option::to_str(5)
+    match l:
+        Some(v) => 0
+        None => 1
+        """,
+      BuildOutput("""None'i32 =  store (CNone)
+
+Some'i32 t10 =
+ store (CSome t10)
+
+mapOptionstri32' self2 f''3 =
+ p6 <- fetch self2
+ case p6 of
+  (CSome v6) ->
+   p8 <- do
+     case f''3 of
+      (P1c20) ->
+       c20 v6
+      (P1c25) ->
+       c25 v6
+   p9 <- Some'i32 p8
+   pure p9
+  #default ->
+   p10 <- None'i32
+   pure p10
+
+flatmapOptioni32i32' self10 f''11 =
+ p14 <- fetch self10
+ case p14 of
+  (CSome a14) ->
+   p16 <- do
+     case f''11 of
+      (P1c20) ->
+       c20 a14
+      (P1c25) ->
+       c25 a14
+   pure p16
+  #default ->
+   p17 <- None'i32
+   pure p17
+
+tostrOption' v17 =
+ s18 <-  Some'i32 v17
+ p22 <- pure (P1c20 )
+ mapOptionstri32' s18 p22
+
+c20 a20 =
+ _prim_int_str a20
+
+grinMain _22 =
+ o23 <-  Some'i32 5
+ p28 <- pure (P1c25 )
+ o128 <-  flatmapOptioni32i32' o23 p28
+ l30 <-  tostrOption' 5
+ p33 <- fetch l30
+ case p33 of
+  (CSome v33) ->
+   pure 0
+  #default ->
+   pure 1
+
+c25 t25 =
+ p27 <- _prim_int_add t25 1
+ Some'i32 p27
+
+apply_P1c20 p35 p36 =
+ case p35 of
+  (P1c20 ) ->
+   c20  p36
+
+apply_P1c25 p37 p38 =
+ case p37 of
+  (P1c25 ) ->
+   c25  p38
+""")
+    )
+  }
+  test("build function on record with tuple type") {
+    fuse(
+      """
+type Tuple[A, B](A, B)
+
+type State[S, A]:
+  run: S -> Tuple[A, S]
+
+fun value(a: State[i32, i32]) -> i32
+  let t = (a.run)(1)
+  t.1 + t.2
+  
+fun main() -> i32
+  value(State(a => Tuple(a + 1, a + 2)))
+        """,
+      BuildOutput("""
+Tuple'i32'i32 t10 t21 =
+ store (CTuple t10 t21)
+
+State'i32'i32 run''4 =
+ store (CState run''4)
+
+value a6 =
+ p9 <- fetch a6
+ p11'' <- do
+   case p9 of
+    (CState p10) ->
+     pure p10
+ t13 <-  apply_P1c26 p11'' 1
+ p16 <- fetch t13
+ p19 <- do
+   case p16 of
+    (CTuple p17 p18) ->
+     pure p17
+ p21 <- fetch t13
+ p24 <- do
+   case p21 of
+    (CTuple p22 p23) ->
+     pure p23
+ _prim_int_add p19 p24
+
+grinMain _24 =
+ p30 <- pure (P1c26 )
+ p31 <- State'i32'i32 p30
+ value p31
+
+c26 a26 =
+ p28 <- _prim_int_add a26 1
+ p29 <- _prim_int_add a26 2
+ Tuple'i32'i32 p28 p29
+
+apply_P1c26 p32 p33 =
+ case p32 of
+  (P1c26 ) ->
+   c26  p33""")
+    )
+  }
+  test("build generic list with fold right") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun foldRight[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::foldRight(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::foldRight(self, Nil[B], (h, t) => Cons(f(h), t))
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    match l1:
+        Cons(h, t) => {
+            print(int_to_str(h))
+            0
+        }
+        Nil => 1
+        """,
+      BuildOutput("""Cons'i32 h0 t1 =
+ store (CCons h0 t1)
+
+Nil'i32 =  store (CNil)
+
+foldRightListi32i32' as4 z5 f''6 =
+ p9 <- fetch as4
+ case p9 of
+  (CCons x9 xs'10) ->
+   p12'' <- apply_P2c18 f''6 x9
+   p13 <- foldRightListi32i32' xs'10 z5 f''6
+   p14 <- apply_P1c18 p12'' p13
+   pure p14
+  #default ->
+   pure z5
+
+mapListi32i32' self14 f''15 =
+ p17 <- Nil'i32
+ p23 <- pure (P2c18 f''15)
+ foldRightListi32i32' self14 p17 p23
+
+c18 f''1519 h19 t20 =
+ p22 <- apply_P1c28 f''1519 h19
+ Cons'i32 p22 t20
+
+grinMain _23 =
+ p25 <- Nil'i32
+ p26 <- Cons'i32 3 p25
+ l26 <-  Cons'i32 2 p26
+ p30 <- pure (P1c28 )
+ l130 <-  mapListi32i32' l26 p30
+ p33 <- fetch l130
+ case p33 of
+  (CCons h33 t'34) ->
+   p36 <- _prim_int_str h33
+   _37 <-  _prim_string_print p36
+   pure 0
+  #default ->
+   pure 1
+
+c28 v28 =
+ _prim_int_add v28 1
+
+apply_P1c18 p39 p40 =
+ case p39 of
+  (P1c18 p41 p42) ->
+   c18 p41 p42 p40
+
+apply_P2c18 p43 p44 =
+ case p43 of
+  (P2c18 p45) ->
+   pure (P1c18 p45 p44)
+
+apply_P1c28 p46 p47 =
+ case p46 of
+  (P1c28 ) ->
+   c28  p47
+""")
+    )
+  }
+  test("build generic list with simple map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun simple_map[B](self, f: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(f(h), Nil[B])
+            Nil => Nil[B]
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.simple_map(v => v + 1)
+    0
+        """,
+      BuildOutput("""Cons'i32 h0 t1 =
+ store (CCons h0 t1)
+
+Nil'i32 =  store (CNil)
+
+simplemapListi32i32' self4 f''5 =
+ p8 <- fetch self4
+ case p8 of
+  (CCons h8 t'9) ->
+   p11 <- apply_P1c19 f''5 h8
+   p12 <- Nil'i32
+   p13 <- Cons'i32 p11 p12
+   pure p13
+  #default ->
+   p14 <- Nil'i32
+   pure p14
+
+grinMain _14 =
+ p16 <- Nil'i32
+ p17 <- Cons'i32 3 p16
+ l17 <-  Cons'i32 2 p17
+ p21 <- pure (P1c19 )
+ l121 <-  simplemapListi32i32' l17 p21
+ pure 0
+
+c19 v19 =
+ _prim_int_add v19 1
+
+apply_P1c19 p23 p24 =
+ case p23 of
+  (P1c19 ) ->
+   c19  p24
+""")
+    )
+  }
+
+  test("build generic list with varied parameter names") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun map_with_mapper[B](self, mapper: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(mapper(h), Nil[B])
+            Nil => Nil[B]
+
+    fun map_with_transform[B](self, transform: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(transform(h), Nil[B])
+            Nil => Nil[B]
+
+    fun map_with_callback[B](self, callback: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(callback(h), Nil[B])
+            Nil => Nil[B]
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map_with_mapper(x => x + 1)
+    let l2 = l.map_with_transform(y => y * 2)
+    let l3 = l.map_with_callback(z => z + 3)
+    0
+        """,
+      BuildOutput("""Cons'i32 h0 t1 =
+ store (CCons h0 t1)
+
+Nil'i32 =  store (CNil)
+
+mapwithmapperListi32i32' self4 mapper''5 =
+ p8 <- fetch self4
+ case p8 of
+  (CCons h8 t'9) ->
+   p11 <- do
+     case mapper''5 of
+      (P1c39) ->
+       c39 h8
+      (P1c43) ->
+       c43 h8
+      (P1c47) ->
+       c47 h8
+   p12 <- Nil'i32
+   p13 <- Cons'i32 p11 p12
+   pure p13
+  #default ->
+   p14 <- Nil'i32
+   pure p14
+
+mapwithtransformListi32i32' self14 transform''15 =
+ p18 <- fetch self14
+ case p18 of
+  (CCons h18 t'19) ->
+   p21 <- do
+     case transform''15 of
+      (P1c39) ->
+       c39 h18
+      (P1c43) ->
+       c43 h18
+      (P1c47) ->
+       c47 h18
+   p22 <- Nil'i32
+   p23 <- Cons'i32 p21 p22
+   pure p23
+  #default ->
+   p24 <- Nil'i32
+   pure p24
+
+mapwithcallbackListi32i32' self24 callback''25 =
+ p28 <- fetch self24
+ case p28 of
+  (CCons h28 t'29) ->
+   p31 <- do
+     case callback''25 of
+      (P1c39) ->
+       c39 h28
+      (P1c43) ->
+       c43 h28
+      (P1c47) ->
+       c47 h28
+   p32 <- Nil'i32
+   p33 <- Cons'i32 p31 p32
+   pure p33
+  #default ->
+   p34 <- Nil'i32
+   pure p34
+
+grinMain _34 =
+ p36 <- Nil'i32
+ p37 <- Cons'i32 3 p36
+ l37 <-  Cons'i32 2 p37
+ p41 <- pure (P1c39 )
+ l141 <-  mapwithmapperListi32i32' l37 p41
+ p45 <- pure (P1c43 )
+ l245 <-  mapwithtransformListi32i32' l37 p45
+ p49 <- pure (P1c47 )
+ l349 <-  mapwithcallbackListi32i32' l37 p49
+ pure 0
+
+c39 x39 =
+ _prim_int_add x39 1
+
+c43 y43 =
+ _prim_int_mul y43 2
+
+c47 z47 =
+ _prim_int_add z47 3
+
+apply_P1c39 p51 p52 =
+ case p51 of
+  (P1c39 ) ->
+   c39  p52
+
+apply_P1c43 p53 p54 =
+ case p53 of
+  (P1c43 ) ->
+   c43  p54
+
+apply_P1c47 p55 p56 =
+ case p55 of
+  (P1c47 ) ->
+   c47  p56
+""")
+    )
+  }
+  test("build generic list with iter map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun map_2[B](self, f: A -> B) -> List[B]
+        let iter = (l: List[A], acc: List[B]) => {
+            match l:
+                Cons(h, t) => iter(t, Cons(f(h), acc))
+                Nil => acc
+        }
+        iter(self, Nil[B])
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map_2(v => v + 1)
+    match l1:
+        Cons(h, t) => {
+            print(int_to_str(h))
+            0
+        }
+        Nil => 1
+        """,
+      BuildOutput("""Cons'i32 h0 t1 =
+ store (CCons h0 t1)
+
+Nil'i32 =  store (CNil)
+
+map2Listi32i32' self4 f''5 =
+ p19 <- Nil'i32
+ iter7 f''5 self4 p19
+
+iter7 f''58 l8 acc9 =
+ p12 <- fetch l8
+ case p12 of
+  (CCons h12 t'13) ->
+   p15 <- apply_P1c24 f''58 h12
+   p16 <- Cons'i32 p15 acc9
+   p17 <- iter7 f''58 t'13 p16
+   pure p17
+  #default ->
+   pure acc9
+
+grinMain _19 =
+ p21 <- Nil'i32
+ p22 <- Cons'i32 3 p21
+ l22 <-  Cons'i32 2 p22
+ p26 <- pure (P1c24 )
+ l126 <-  map2Listi32i32' l22 p26
+ p29 <- fetch l126
+ case p29 of
+  (CCons h29 t'30) ->
+   p32 <- _prim_int_str h29
+   _33 <-  _prim_string_print p32
+   pure 0
+  #default ->
+   pure 1
+
+c24 v24 =
+ _prim_int_add v24 1
+
+apply_P1c24 p35 p36 =
+ case p35 of
+  (P1c24 ) ->
+   c24  p36
+""")
+    )
+  }
+}
+
+class CompilerExecTests extends CompilerTests {
+  import CompilerTests.*
+
+  test("execute generic list with simple map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun simple_map[B](self, f: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(f(h), Nil[B])
+            Nil => Nil[B]
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.simple_map(v => v + 1)
+    match l1:
+        Cons(h, t) => {
+            print(int_to_str(h))
+            0
+        }
+        Nil => 1
+      """,
+      ExecutableOutput("3")
+    )
+  }
+  test("execute generic option with map") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+    fun map[B](self, f: A -> B) -> Option[B]
+        match self:
+            Some(v) => Some(f(v))
+            _ => None
+
+fun main() -> i32
+    let o = Some(5)
+    let o1 = o.map(a => a + 1)
+    match o1:
+        Some(v) => {
+            print(int_to_str(v))
+            0
+        }
+        None => 1
+      """,
+      ExecutableOutput("6")
+    )
+  }
+  test("execute generic list with iter map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun map_2[B](self, f: A -> B) -> List[B]
+        let iter = (l: List[A], acc: List[B]) => {
+            match l:
+                Cons(h, t) => iter(t, Cons(f(h), acc))
+                Nil => acc
+        }
+        iter(self, Nil[B])
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map_2(v => v + 1)
+    match l1:
+        Cons(h, t) => {
+            print(int_to_str(h))
+            0
+        }
+        Nil => 1
+      """,
+      ExecutableOutput("4")
+    )
+  }
+  test("execute integer addition") {
+    fuse(
+      """
+fun main() -> i32
+    let result = 2 + 2
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("4")
+    )
+  }
+  test("execute string addition") {
+    fuse(
+      """
+fun main() -> i32
+    let result = "Hello" + "World"
+    print(result)
+    0
+        """,
+      ExecutableOutput("HelloWorld")
+    )
+  }
+  test("execute integer subtraction") {
+    fuse(
+      """
+fun main() -> i32
+    let result = 2 - 2
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("0")
+    )
+  }
+  test("execute int modulo") {
+    fuse(
+      """
+fun main() -> i32
+    let result = 10 % 2
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("0")
+    )
+  }
+  test("execute arithmetic expression") {
+    fuse(
+      """
+fun main() -> i32
+    let result = 2 + 3 * 6
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("20")
+    )
+  }
+  test("execute int equal") {
+    fuse(
+      """
+fun main() -> i32
+    let result = 10 == 10
+    let output = {
+        match result:
+            true => 1
+            false => 0
+    }
+    print(int_to_str(output))
+    0
+        """,
+      ExecutableOutput("1")
+    )
+  }
+  test("execute str not equal") {
+    fuse(
+      """
+fun main() -> i32
+    let result = "Hello" != "World"
+    let output = {
+        match result:
+            true => 1
+            false => 0
+    }
+    print(int_to_str(output))
+    0
+        """,
+      ExecutableOutput("1")
+    )
+  }
+  test("execute and") {
+    fuse(
+      """
+fun main() -> i32
+    let result = 1 != 2 && 3 == 4
+    let output = {
+        match result:
+            true => 1
+            false => 0
+    }
+    print(int_to_str(output))
+    0
+        """,
+      ExecutableOutput("0")
+    )
+  }
+  test("execute or") {
+    fuse(
+      """
+fun main() -> i32
+    let result = 1 != 2 || 3 == 4
+    let output = {
+        match result:
+            true => 1
+            false => 0
+    }
+    print(int_to_str(output))
+    0
+        """,
+      ExecutableOutput("1")
+    )
+  }
+  test("execute unit function") {
+    fuse(
+      """
+fun greetings() -> Unit
+  print("Hello World")
+
+fun main() -> i32
+  greetings()
+  0
+        """,
+      ExecutableOutput("Hello World")
+    )
+  }
+  test("execute inline lambda with type annotation") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a: i32) => a + 1
+    let result = value(1)
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("2")
+    )
+  }
+  test("execute inline lambda with two variables with type annotations") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a: i32, b: i32) => a + b + 2
+    let result = value(1, 2)
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("5")
+    )
+  }
+  test("execute inline lambda") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a) => a + 1
+    let result = value(1)
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("2")
+    )
+  }
+  test("execute inline lambda with two variables") {
+    fuse(
+      """
+fun main() -> i32
+    let value = (a, b) => a + b + 2
+    let result = value(1, 2)
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("5")
+    )
+  }
+  test("execute generic function") {
+    fuse(
+      """
+fun identity[T](v: T) -> T
+    v
+
+fun main() -> i32
+    let s = identity("Hello World")
+    print(s)
+    0
+        """,
+      ExecutableOutput("Hello World")
+    )
+  }
+  test("execute generic function with multiple instantiations") {
+    fuse(
+      """
+fun identity[T](v: T) -> T
+    v
+
+fun main() -> i32
+    let s = identity("Hello World")
+    let i = identity(1)
+    print(s + "\n" + int_to_str(i))
+    0
+        """,
+      ExecutableOutput("Hello World\n1")
+    )
+  }
+  test("execute generic function that calls different generic function") {
+    fuse(
+      """
+fun identity[T](v: T) -> T
+    v
+
+fun id[A](a: A) -> A
+  identity(a)
+
+fun main() -> i32
+    let s = id("Hello World")
+    let i = id(5)
+    print(s + "\n" + int_to_str(i))
+    0
+        """,
+      ExecutableOutput("Hello World\n5")
+    )
+  }
+  test("execute function with params using generics") {
+    fuse(
+      """
+fun summarize(a: str, b: str) -> str
+  a + b
+
+fun main() -> i32
+    let s = summarize("Hello", "World")
+    print(s)
+    0
+        """,
+      ExecutableOutput("HelloWorld")
+    )
+  }
+  test("execute multiple functions using generics") {
+    fuse(
+      """
+fun summarize(a: str, b: str) -> str
+  a + ": " + b
+
+fun addition[T: Add](a: T, b: T) -> T
+  a + b
+
+fun main() -> i32
+    let s = summarize("Hello", "World")
+    let a = addition(2, 3)
+    print(s + "\n" + int_to_str(a))
+    0
+        """,
+      ExecutableOutput("Hello: World\n5")
+    )
+  }
+  test("execute addition type bounds") {
+    fuse(
+      """
+fun plus[T: Add](a: T, b: T) -> T
+  a + b
+
+fun main() -> i32
+  let result = plus(2, 3)
+  print(int_to_str(result))
+  0
+        """,
+      ExecutableOutput("5")
+    )
+  }
+  test("execute simple trait") {
+    fuse(
+      """
+trait Summary:
+  fun summarize(self) -> str;
+
+type Tweet:
+  username: str
+  content: str
+
+impl Summary for Tweet:
+  fun summarize(self) -> str
+    self.username + ": " + self.content
+
+fun notify[T: Summary](s: T) -> Unit
+  print("Breaking news! " + s.summarize())
+
+fun main() -> i32
+    let tweet = Tweet("elon", "work!")
+    print(tweet.summarize() + "\n")
+    notify(tweet)
+    0
+        """,
+      ExecutableOutput("elon: work!\nBreaking news! elon: work!")
+    )
+  }
+  test("execute simple trait with no-op generic func") {
+    fuse(
+      """
+trait Summary:
+  fun summarize(self) -> str;
+
+type Tweet:
+  username: str
+  content: str
+
+impl Summary for Tweet:
+  fun summarize(self) -> str
+    self.username + ": " + self.content
+
+fun notify[T: Summary](s: T) -> str
+  "no news!"
+
+fun main() -> i32
+    let tweet = Tweet("elon", "work!")
+    print(tweet.summarize())
+    notify(tweet)
+    0
+        """,
+      ExecutableOutput("elon: work!")
+    )
+  }
+  test("execute generic record type") {
+    fuse(
+      """
+type X[T]:
+  v: T
+
+fun main() -> i32
+  let x = X(1)
+  print(int_to_str(x.v))
+  0
+        """,
+      ExecutableOutput("1")
+    )
+  }
+  test("execute generic point type") {
+    fuse(
+      """
+type Point[T, V]:
+  x: T
+  y: V
+
+fun main() -> i32
+  let p = Point(1, "2")
+  print(int_to_str(p.x))
+  0
+        """,
+      ExecutableOutput("1")
+    )
+  }
+  test("execute generic tuple type") {
+    fuse(
+      """
+type Tuple[A, B](A, B)
+
+fun main() -> i32
+  let t = Tuple(1, "2")
+  print(int_to_str(t.1))
+  0
+        """,
+      ExecutableOutput("1")
+    )
+  }
+  test("execute simple sum type") {
+    fuse(
+      """
+type Animal:
+  Dog
+  Cat
+
+fun value(a: Animal) -> i32
+  match a:
+      Dog => 0
+      Cat => 1
+
+fun main() -> i32
+    let result = value(Dog)
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("0")
+    )
+  }
+  test("execute sum type") {
+    fuse(
+      """
+type OptionI32:
+    None
+    Some(i32)
+
+fun main() -> i32
+    let o = Some(5)
+    let result = {
+        match o:
+            Some(v) => v
+            None => 1
+    }
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("5")
+    )
+  }
+  test("execute generic sum type") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+fun main() -> i32
+    let o = Some(5)
+    let result = {
+        match o:
+            Some(v) => v
+            None => 1
+    }
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("5")
+    )
+  }
+  test("execute generic sum type with map function") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+  fun map[B](self, f: A -> B) -> Option[B]
+    match self:
+      Some(v) => Some(f(v))
+      _ => None
+
+fun main() -> i32
+    let o = Some(5)
+    let o1 = o.map(a => a + 1)
+    print("0")
+    0
+        """,
+      ExecutableOutput("0")
+    )
+  }
+  test("execute generic trait functor implementation") {
+    fuse(
+      """
+trait Functor[A]:
+  fun map[B](self, f: A -> B) -> Self[B];
+
+type Option[T]:
+  Some(T)
+  None
+
+impl Functor for Option[A]:
+  fun map[B](self, f: A -> B) -> Option[B]
+    match self:
+      Some(v) => Some(f(v))
+      _ => None
+
+fun main() -> i32
+    let o = Some(5)
+    let o1 = o.map(a => a + 1)
+    print("0")
+    0
+        """,
+      ExecutableOutput("0")
+    )
+  }
+  test("execute minimal generic option") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+    fun map[B](self, f: A -> B) -> Option[B]
+        match self:
+            Some(v) => Some(f(v))
+            _ => None
+
+    fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
+        match self:
+            Some(a) => f(a)
+            None => None
+
+fun main() -> i32
+    print("0")
+    0
+        """,
+      ExecutableOutput("0")
+    )
+  }
+  test("execute generic option") {
+    fuse(
+      """
+type Option[A]:
+    None
+    Some(A)
+
+impl Option[A]:
+    fun map[B](self, f: A -> B) -> Option[B]
+        match self:
+            Some(v) => Some(f(v))
+            _ => None
+
+    fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
+        match self:
+            Some(a) => f(a)
+            None => None
+
+    fun to_str(v: i32) -> Option[str]
+        let s = Some(v)
+        s.map(a => int_to_str(a))
+
+fun main() -> i32
+    let o = Some(5)
+    let o1 = o.flat_map(t => Some(t + 1))
+    let l = Option::to_str(5)
+    let result = {
+        match l:
+            Some(v) => 0
+            None => 1
+    }
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("0")
+    )
+  }
+  test("execute function on record with tuple type") {
+    fuse(
+      """
+type Tuple[A, B](A, B)
+
+type State[S, A]:
+  run: S -> Tuple[A, S]
+
+fun value(a: State[i32, i32]) -> i32
+  let t = (a.run)(1)
+  t.1 + t.2
+
+fun main() -> i32
+  let result = value(State(a => Tuple(a + 1, a + 2)))
+  print(int_to_str(result))
+  0
+        """,
+      ExecutableOutput("5")
+    )
+  }
+  // This test verifies that specialized apply functions (apply_P1c18, apply_P2c18, apply_P1c28)
+  // properly handle higher-order functions with different return types.
+  // The solution: generate specialized apply functions for each P-tag instead of a generic apply.
+  test("execute generic list with fold right") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun foldRight[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::foldRight(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::foldRight(self, Nil[B], (h, t) => Cons(f(h), t))
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    let result = {
+        match l1:
+            Cons(h, t) => h
+            Nil => 0
+    }
+    print(int_to_str(result))
+    0
+        """,
+      ExecutableOutput("3")
+    )
+  }
+  test("execute generic list with varied parameter names") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun map_with_mapper[B](self, mapper: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(mapper(h), Nil[B])
+            Nil => Nil[B]
+
+    fun map_with_transform[B](self, transform: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(transform(h), Nil[B])
+            Nil => Nil[B]
+
+    fun map_with_callback[B](self, callback: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(callback(h), Nil[B])
+            Nil => Nil[B]
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map_with_mapper(x => x + 1)
+    let l2 = l.map_with_transform(y => y * 2)
+    let l3 = l.map_with_callback(z => z + 3)
+    print("0")
+    0
+        """,
+      ExecutableOutput("0")
+    )
+  }
 }
 
 object CompilerTests {
+  import Fuse.*
+
   sealed trait Output
   case class CheckOutput(s: Option[String]) extends Output
   case class BuildOutput(s: String) extends Output
+  case class ExecutableOutput(expectedStdout: String, expectedExitCode: Int = 0)
+      extends Output
 
-  def check(code: String, fileName: String = "test.fuse") =
+  case class ExecutionResult(stdout: String, stderr: String, exitCode: Int)
+
+  private val testTempDir: Path = {
+    val dir = Paths.get("target/test-temp")
+    if (!Files.exists(dir)) Files.createDirectories(dir)
+    dir
+  }
+
+  private def createTempFuseFile(code: String): Resource[IO, Path] = {
+    val acquire = IO {
+      val tempFile =
+        Files.createTempFile(testTempDir, "test-", s".$FuseFileExtension")
+      Files.write(tempFile, code.trim.getBytes)
+      tempFile
+    }
+    val release = (path: Path) =>
+      IO {
+        val baseName = path.toString.stripSuffix(s".$FuseFileExtension")
+        Files.deleteIfExists(path)
+        Files.deleteIfExists(Paths.get(baseName + s".$FuseGrinExtension"))
+        Files.deleteIfExists(Paths.get(baseName + s".$FuseOutputExtension"))
+      }.void
+    Resource.make(acquire)(release)
+  }
+
+  private def executeProcess(exePath: Path): IO[ExecutionResult] = {
+    IO.blocking {
+      val stdout = new StringBuilder
+      val stderr = new StringBuilder
+
+      val logger = ProcessLogger(
+        out => stdout.append(out).append("\n"),
+        err => stderr.append(err).append("\n")
+      )
+
+      val exitCode = Process(exePath.toString).!(logger)
+
+      ExecutionResult(
+        stdout.toString.trim,
+        stderr.toString.trim,
+        exitCode
+      )
+    }
+  }
+
+  def execute(code: String): IO[Either[String, ExecutionResult]] = {
+    createTempFuseFile(code).use { fusePath =>
+      for {
+        buildExitCode <- Fuse.build(BuildFile(fusePath.toString))
+        result <- buildExitCode match {
+          case ExitCode.Success =>
+            val outPath =
+              Paths.get(
+                fusePath.toString.stripSuffix(
+                  s".$FuseFileExtension"
+                ) + s".$FuseOutputExtension"
+              )
+            executeProcess(outPath).map(Right(_))
+          case _ =>
+            IO.pure(Left("compilation failed: fuse or grin error"))
+        }
+      } yield result
+    }
+  }
+
+  def check(code: String, fileName: String = s"test.$FuseFileExtension") =
     Compiler.compile(CheckFile(fileName), code.trim, fileName)
 
-  def build(code: String, fileName: String = "test.fuse") =
+  def build(code: String, fileName: String = s"test.$FuseFileExtension") =
     Compiler.compile(BuildFile(fileName), code.trim, fileName)
 }

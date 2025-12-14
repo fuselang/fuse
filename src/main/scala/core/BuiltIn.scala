@@ -4,90 +4,109 @@ import core.Bindings.*
 import core.Terms.*
 import core.Types.*
 import parser.Info.*
+import core.Context.emptyContext
+import cats.instances.boolean
 
 object BuiltIn {
   def buildFunc(args: List[Type], r: Type): Type =
     (args :+ r).reduceRight(TypeArrow(UnknownInfo, _, _))
 
-  def buildBind(name: String, binding: Binding): Bind =
-    Bind(name, binding)
+  def buildBind(name: String, binding: Binding): List[Bind] =
+    List(Bind(name, binding))
 
-  def buildClassMethodBind(name: String, ty: Type): Bind =
-    buildBind(name, TermAbbBind(TermClassMethod(i, ty)))
+  def buildClassMethodBind(name: String, ty: Type, cls: TypeClass): List[Bind] =
+    buildBind(name, TermAbbBind(TermClassMethod(i, ty, cls)))
 
-  def buildClassBind(name: String): Bind =
-    buildBind("Add", TypeClassBind(KindStar))
+  def buildClassBind(name: String): List[Bind] =
+    buildBind(name, TypeClassBind(KindStar))
 
   def buildClassInstanceBind(
-      name: String,
       typeClass: String,
+      typeName: String,
       ty: Type,
-      method: Tuple2[String, Term]
-  ): Bind =
-    buildBind(name, TypeClassInstanceBind(typeClass, ty, List(method._1)))
+      method: String,
+      body: Term
+  ): List[Bind] =
+    val typeClassInstance = buildBind(
+      Desugar.toTypeInstanceBindID(typeName, typeClass),
+      TypeClassInstanceBind(typeClass, ty, List(method))
+    )
+    val methodBind = buildBind(
+      Desugar.toTypeInstanceMethodID(method, typeName, typeClass),
+      TermAbbBind(body)
+    )
+    typeClassInstance ++ methodBind
 
   val i = UnknownInfo
 
-  // TODO: Add built-ins for the rest of the prim ops.
-  val Binds = List(
-    buildClassBind("Add"),
+  case class Op(
+      cls: String,
+      operator: String,
+      tys: List[Type] = List(TypeInt(i), TypeFloat(i), TypeString(i)),
+      compareOp: Boolean = false
+  )
+
+  def buildOperator(op: Op): List[Bind] = List(
+    buildClassBind(op.cls),
     buildClassMethodBind(
-      "+",
+      op.operator,
       TypeAll(
         i,
         "T",
         KindStar,
-        List(TypeClass(i, "Add")),
+        List(TypeClass(i, op.cls)),
         buildFunc(
           List(TypeVar(i, 0, 1), TypeVar(i, 0, 1)),
-          TypeVar(i, 0, 1)
+          if (op.compareOp) TypeBool(i) else TypeVar(i, 0, 1)
+        )
+      ),
+      TypeClass(i, op.cls)
+    ),
+    op.tys
+      .map(ty =>
+        buildClassInstanceBind(
+          op.cls,
+          Representation.typeToString(ty).value.runA(emptyContext).value.merge,
+          ty,
+          op.operator,
+          TermBuiltin(buildFunc(List(ty, ty), ty))
         )
       )
-    ),
-    buildClassInstanceBind(
-      "#Add#int",
-      "Add",
-      TypeInt(i),
-      ("+", TermBuiltin(buildFunc(List(TypeInt(i), TypeInt(i)), TypeInt(i))))
-    ),
-    buildClassInstanceBind(
-      "#Add#float",
-      "Add",
-      TypeFloat(i),
-      (
-        "+",
-        TermBuiltin(buildFunc(List(TypeFloat(i), TypeFloat(i)), TypeFloat(i)))
-      )
-    ),
-    buildClassInstanceBind(
-      "#Add#string",
-      "Add",
-      TypeString(i),
-      (
-        "+",
-        TermBuiltin(
-          buildFunc(List(TypeString(i), TypeString(i)), TypeString(i))
-        )
-      )
-    ),
-    buildBind(
-      "&sub",
-      TermAbbBind(
-        TermBuiltin(buildFunc(List(TypeInt(i), TypeInt(i)), TypeInt(i)))
-      )
-    ),
-    buildBind(
-      "&multiply",
-      TermAbbBind(
-        TermBuiltin(buildFunc(List(TypeInt(i), TypeInt(i)), TypeInt(i)))
-      )
-    ),
-    buildBind(
-      "&eq",
-      TermAbbBind(
-        TermBuiltin(buildFunc(List(TypeInt(i), TypeInt(i)), TypeInt(i)))
-      )
-    ),
+      .flatten
+  ).flatten
+
+  val AddOp = Op("Add", "+")
+  val SubOp = Op("Sub", "-")
+  val MulOp = Op("Mul", "*", tys = List(TypeInt(i), TypeFloat(i)))
+  val DivOp = Op("Div", "/", tys = List(TypeInt(i), TypeFloat(i)))
+  val ModOp = Op("Mod", "%", tys = List(TypeInt(i), TypeFloat(i)))
+  val EqOp = Op("Eq", "==", compareOp = true)
+  val NotEqOp = Op("NotEq", "!=", compareOp = true)
+  val LessThanOp = Op("LessThan", "<", compareOp = true)
+  val LessThanEqOp = Op("LessThanEq", "<=", compareOp = true)
+  val GreaterThanOp = Op("GreaterThan", ">", compareOp = true)
+  val GreaterThanEqOp = Op("GreaterThanEq", ">=", compareOp = true)
+  val AndOp = Op("And", "&&", tys = List(TypeBool(i)))
+  val OrOp = Op("Or", "||", tys = List(TypeBool(i)))
+
+  val Ops = List(
+    AddOp,
+    SubOp,
+    MulOp,
+    DivOp,
+    ModOp,
+    EqOp,
+    NotEqOp,
+    LessThanOp,
+    LessThanEqOp,
+    GreaterThanOp,
+    GreaterThanEqOp,
+    AndOp,
+    OrOp
+  )
+
+  val Binds: List[Bind] = List(
+    Ops.map(buildOperator(_)).flatten,
     buildBind(
       "print",
       TermAbbBind(TermBuiltin(buildFunc(List(TypeString(i)), TypeUnit(i))))
@@ -96,5 +115,5 @@ object BuiltIn {
       "int_to_str",
       TermAbbBind(TermBuiltin(buildFunc(List(TypeInt(i)), TypeString(i))))
     )
-  )
+  ).flatten
 }

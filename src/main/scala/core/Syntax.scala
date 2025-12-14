@@ -1,6 +1,7 @@
 package core
 
 import parser.Info.*
+import core.Instantiations.Instantiation
 
 object Types {
   sealed trait Kind
@@ -9,6 +10,7 @@ object Types {
 
   sealed abstract trait Type {
     def isMono: Boolean = true
+    def isPrimitive: Boolean = false
 
     /** Returns whether `eV` is in the free variables of this type. */
     def containsEVar(eV: TypeEVar): Boolean
@@ -16,6 +18,7 @@ object Types {
 
   case class TypeVar(info: Info, index: Integer, length: Integer) extends Type {
     def containsEVar(eV: TypeEVar): Boolean = false
+    override def isPrimitive: Boolean = true
   }
   case class TypeEVar(info: Info, name: String, cls: List[TypeClass] = List())
       extends Type {
@@ -29,21 +32,26 @@ object Types {
   }
   case class TypeArrow(info: Info, t1: Type, t2: Type) extends Type {
     override def isMono: Boolean = t1.isMono && t2.isMono
+    override def isPrimitive: Boolean = t1.isPrimitive && t2.isPrimitive
     def containsEVar(eV: TypeEVar): Boolean =
       t1.containsEVar(eV) || t2.containsEVar(eV)
   }
   case class TypeUnit(info: Info) extends Type {
+    override def isPrimitive: Boolean = true
     def containsEVar(eV: TypeEVar): Boolean = false
   }
   case class TypeRecord(info: Info, f: List[(String, Type)]) extends Type {
     def containsEVar(eV: TypeEVar): Boolean =
       f.unzip._2.exists(_.containsEVar(eV))
+    override def isPrimitive: Boolean = f.unzip._2.forall(_.isPrimitive)
   }
   case class TypeVariant(info: Info, v: List[(String, Type)]) extends Type {
     def containsEVar(eV: TypeEVar): Boolean =
       v.unzip._2.exists(_.containsEVar(eV))
+    override def isPrimitive: Boolean = v.unzip._2.forall(_.isPrimitive)
   }
   case class TypeRec(info: Info, v: String, k: Kind, t: Type) extends Type {
+    override def isPrimitive: Boolean = t.isPrimitive
     def containsEVar(eV: TypeEVar): Boolean = t.containsEVar(eV)
   }
   case class TypeAll(
@@ -65,15 +73,19 @@ object Types {
       t1.containsEVar(eV) || t2.containsEVar(eV)
   }
   case class TypeBool(info: Info) extends Type {
+    override def isPrimitive: Boolean = true
     def containsEVar(eV: TypeEVar): Boolean = false
   }
   case class TypeString(info: Info) extends Type {
+    override def isPrimitive: Boolean = true
     def containsEVar(eV: TypeEVar): Boolean = false
   }
   case class TypeFloat(info: Info) extends Type {
+    override def isPrimitive: Boolean = true
     def containsEVar(eV: TypeEVar): Boolean = false
   }
   case class TypeInt(info: Info) extends Type {
+    override def isPrimitive: Boolean = true
     def containsEVar(eV: TypeEVar): Boolean = false
   }
   case class TypeAny(info: Info) extends Type {
@@ -138,7 +150,7 @@ object Terms {
   // Built-in functions with pre-defined type
   case class TermBuiltin(typ: Type) extends Term
   // Type classes
-  case class TermClassMethod(info: Info, ty: Type) extends Term
+  case class TermClassMethod(info: Info, ty: Type, cls: TypeClass) extends Term
 
   sealed trait Pattern
 
@@ -155,30 +167,30 @@ object Terms {
   case class PatternDefault(info: Info) extends Pattern
 
   implicit val showTermInfo: ShowInfo[Term] = ShowInfo.info(_ match {
-    case TermFloat(info, _)         => info
-    case TermInt(info, _)           => info
-    case TermString(info, _)        => info
-    case TermTrue(info)             => info
-    case TermFalse(info)            => info
-    case TermUnit(info)             => info
-    case TermBuiltin(_)             => UnknownInfo
-    case TermFold(info, _)          => info
-    case TermTApp(info, _, _)       => info
-    case TermTAbs(info, _, _, _)    => info
-    case TermAscribe(info, _, _)    => info
-    case TermTag(info, _, _, _)     => info
-    case TermRecord(info, _)        => info
-    case TermMethodProj(info, _, _) => info
-    case TermAssocProj(info, _, _)  => info
-    case TermFix(info, _)           => info
-    case TermAbs(info, _, _, _, _)  => info
-    case TermClosure(info, _, _, _) => info
-    case TermVar(info, _, _)        => info
-    case TermApp(info, _, _)        => info
-    case TermMatch(info, _, _)      => info
-    case TermLet(info, _, _, _)     => info
-    case TermProj(info, _, _)       => info
-    case TermClassMethod(info, _)   => info
+    case TermFloat(info, _)          => info
+    case TermInt(info, _)            => info
+    case TermString(info, _)         => info
+    case TermTrue(info)              => info
+    case TermFalse(info)             => info
+    case TermUnit(info)              => info
+    case TermBuiltin(_)              => UnknownInfo
+    case TermFold(info, _)           => info
+    case TermTApp(info, _, _)        => info
+    case TermTAbs(info, _, _, _)     => info
+    case TermAscribe(info, _, _)     => info
+    case TermTag(info, _, _, _)      => info
+    case TermRecord(info, _)         => info
+    case TermMethodProj(info, _, _)  => info
+    case TermAssocProj(info, _, _)   => info
+    case TermFix(info, _)            => info
+    case TermAbs(info, _, _, _, _)   => info
+    case TermClosure(info, _, _, _)  => info
+    case TermVar(info, _, _)         => info
+    case TermApp(info, _, _)         => info
+    case TermMatch(info, _, _)       => info
+    case TermLet(info, _, _, _)      => info
+    case TermProj(info, _, _)        => info
+    case TermClassMethod(info, _, _) => info
   })
 
   implicit val showPatternInfo: ShowInfo[Pattern] = ShowInfo.info(_ match {
@@ -213,7 +225,8 @@ object Bindings {
   // contexts (Γ,∆,Θ): · | Γ,α | Γ,x:A | Γ,â | Γ,â = τ | Γ,▶â
   case class VarBind(t: Type) extends Binding
   sealed trait Mark extends Binding
-  case class TypeESolutionBind(t: Type) extends Mark
+  case class TypeESolutionBind(t: Type, cls: List[TypeClass] = List())
+      extends Mark
   case object TypeEFreeBind extends Mark
   case object TypeEMarkBind extends Mark
 
@@ -221,5 +234,5 @@ object Bindings {
   case object TempVarBind extends Binding
 
 // Global bindings.
-  case class Bind(i: String, b: Binding)
+  case class Bind(i: String, b: Binding, insts: List[Instantiation] = List())
 }

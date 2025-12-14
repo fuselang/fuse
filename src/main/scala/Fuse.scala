@@ -1,16 +1,13 @@
 package fuse
 
-import cats.effect.*
-import cats.effect.*
+import cats.effect.{IO, IOApp, ExitCode}
 import cats.implicits.*
-import com.monovore.decline.*
-import com.monovore.decline.effect.*
+import com.monovore.decline.Opts
+import com.monovore.decline.effect.CommandIOApp
 import core.Context.Error
 
 import java.io.File
 import java.io.*
-
-import sys.process.*
 
 sealed trait Command
 case class BuildFile(file: String) extends Command
@@ -53,6 +50,20 @@ object Fuse
     val fileName = command.file.stripSuffix(FuseFileExtension)
     val grinFileName = fileName + FuseGrinExtension
     val outputFileName = fileName + FuseOutputExtension
+    val grinCommandParts = Seq(
+      "grin",
+      grinFileName,
+      "--optimize",
+      "-o",
+      outputFileName,
+      "-q",
+      "-C",
+      GrinRuntimeFile,
+      "-C",
+      GrinPrimOpsFile
+    )
+    // IMPORTANT: GRIN must always be invoked through nix-shell to ensure proper environment
+    val grinCommand = s"""nix-shell --run "${grinCommandParts.mkString(" ")}""""
     for {
       result <- compileFile(
         command,
@@ -65,9 +76,7 @@ object Fuse
       }
       grinExitCode <- fuseExitCode match {
         case ExitCode.Success =>
-          IO.blocking(
-            s"grin $grinFileName --optimize -o $outputFileName -q -C $GrinRuntimeFile -C $GrinPrimOpsFile" !
-          ).map(_ match {
+          executeCommandIO(grinCommand).map(_ match {
             case 0 => ExitCode.Success
             case _ => ExitCode.Error
           })
@@ -107,5 +116,14 @@ object Fuse
           .handleErrorWith(_ => IO.unit)
           .void
       }
+  }
+
+  /** Execute a command using IO. */
+  def executeCommandIO(command: String): IO[Int] = IO.blocking {
+    // Use sh -c to handle shell commands like nix-shell properly
+    val pb = new ProcessBuilder("sh", "-c", command)
+    val process = pb.start()
+    val exitValue = process.waitFor()
+    exitValue
   }
 }

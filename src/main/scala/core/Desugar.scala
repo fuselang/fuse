@@ -14,6 +14,7 @@ import parser.Identifiers.*
 import parser.Info.ShowInfo.*
 import parser.Info.*
 import parser.Types.*
+import core.BuiltIn.*
 
 // TODO: Add constants for prefixes for specific names in the context.
 
@@ -70,7 +71,7 @@ object Desugar {
         constructor <- Context.runE(
           buildRecordConstructor(info, i, typ, Left(fields.map(_.p)))
         )
-        constructorBind <- bindTermAbb(toRecordConstructorId(i), constructor)
+        constructorBind <- bindTermAbb(toRecordConstructorID(i), constructor)
       } yield typeBind :: List(constructorBind)
     case FTupleTypeDecl(info, FIdentifier(i), typ, types) =>
       val tuple = toTupleTypeRecord(info, types)
@@ -81,7 +82,7 @@ object Desugar {
         constructor <- Context.runE(
           buildRecordConstructor(info, i, typ, Right(types))
         )
-        constructorBind <- bindTermAbb(toRecordConstructorId(i), constructor)
+        constructorBind <- bindTermAbb(toRecordConstructorID(i), constructor)
       } yield typeBind :: List(constructorBind)
     case FTypeAlias(_, FIdentifier(i), typ, t) =>
       val alias = toType(t)
@@ -101,7 +102,7 @@ object Desugar {
           toParamsWithSelf(sig.p, typeIdentifier, typeParams, sig.tp)
         FFuncSig(
           sig.info,
-          FIdentifier(toMethodId(sig.i.value, typeIdentifier.value)),
+          FIdentifier(toMethodID(sig.i.value, typeIdentifier.value)),
           typ,
           p,
           sig.r
@@ -121,20 +122,21 @@ object Desugar {
           toParamsWithSelf(sig.p, FIdentifier(SelfTypeName), typeParams, sig.tp)
         FFuncSig(
           sig.info,
-          FIdentifier(toMethodId(sig.i.value, traitIdentifier.value)),
+          FIdentifier(toMethodID(sig.i.value, traitIdentifier.value)),
           Some(selfTypeParam +: typ.toSeq.flatten),
           p,
           sig.r
         )
+      val typeClass = TypeClass(info, traitIdentifier.value)
       for {
         bt <- bindTypeClass(traitIdentifier.value, typeParams)
         bf <- functions.toList
           .traverse {
-            case Left(f) => bind(FFuncDecl(modifySignature(f.sig), f.exprs))
+            case Left(f)  => bind(FFuncDecl(modifySignature(f.sig), f.exprs))
             case Right(s) =>
               val ms = modifySignature(s)
               for {
-                m <- Context.runE(toClassMethod(ms, typeParams))
+                m <- Context.runE(toClassMethod(ms, typeParams, typeClass))
                 ta <- bindTermAbb(ms.i.value, m)
               } yield List(ta)
           }
@@ -154,7 +156,7 @@ object Desugar {
         FFuncSig(
           sig.info,
           FIdentifier(
-            toTypeInstanceMethodId(
+            toTypeInstanceMethodID(
               sig.i.value,
               typeIdentifier.value,
               traitIdentifier.value
@@ -197,7 +199,7 @@ object Desugar {
   ): StateEither[Bind] =
     EitherT.liftF(
       Context
-        .addName(s"#${typeClass}#${typeName}")
+        .addName(toTypeInstanceBindID(typeClass, typeName))
         .map(Bind(_, TypeClassInstanceBind(typeClass, ty, methods)))
     )
 
@@ -324,22 +326,39 @@ object Desugar {
           typedTerm <- toTermTApp(assocProj, typeArgs)
           computedTerm <- toTermApp(typedTerm, args)
         } yield computedTerm
-      case a: FAbs => toClosure(a, letVariable)
-      case FMultiplication(i1, i2) =>
-        toTermOperator("&multiply", i1, i2)
-      // TODO: Add other operators.
+      case a: FAbs           => toClosure(a, letVariable)
       case FAddition(i1, i2) =>
-        toTermOperator("+", i1, i2)
+        toTermOperator(AddOp.operator, i1, i2)
       case FSubtraction(i1, i2) =>
-        toTermOperator("&sub", i1, i2)
+        toTermOperator(SubOp.operator, i1, i2)
+      case FMultiplication(i1, i2) =>
+        toTermOperator(MulOp.operator, i1, i2)
+      case FDivision(i1, i2) =>
+        toTermOperator(DivOp.operator, i1, i2)
+      case FModulo(i1, i2) =>
+        toTermOperator(ModOp.operator, i1, i2)
       case FEquality(i1, i2) =>
-        toTermOperator("&eq", i1, i2)
+        toTermOperator(EqOp.operator, i1, i2)
+      case FNotEquality(i1, i2) =>
+        toTermOperator(NotEqOp.operator, i1, i2)
+      case FLessThan(i1, i2) =>
+        toTermOperator(LessThanOp.operator, i1, i2)
+      case FLessThanEqual(i1, i2) =>
+        toTermOperator(LessThanEqOp.operator, i1, i2)
+      case FGreaterThan(i1, i2) =>
+        toTermOperator(GreaterThanOp.operator, i1, i2)
+      case FGreaterThanEqual(i1, i2) =>
+        toTermOperator(GreaterThanEqOp.operator, i1, i2)
+      case FAnd(i1, i2) =>
+        toTermOperator(AndOp.operator, i1, i2)
+      case FOr(i1, i2) =>
+        toTermOperator(OrOp.operator, i1, i2)
       case FVar(info, i) =>
         EitherT
           .liftF(toTermVar(info, i))
           .flatMap(_ match {
             case Some(v) => v.pure[StateEither]
-            case None =>
+            case None    =>
               DesugarError.format(VariableNotFoundDesugarError(info, i))
           })
       case FBool(info, true)  => EitherT.rightT(TermTrue(info))
@@ -348,7 +367,7 @@ object Desugar {
       case FFloat(info, f)    => EitherT.rightT(TermFloat(info, f))
       case FString(info, s)   => EitherT.rightT(TermString(info, s))
       case FUnit(info)        => EitherT.rightT(TermUnit(info))
-      case _ =>
+      case _                  =>
         DesugarError.format(ExpressionNotSupportedDesugarError(e.info))
     }
 
@@ -455,7 +474,7 @@ object Desugar {
     optionFuncVar <- EitherT.liftF(toTermVar(e1.info, func))
     funcVar <- optionFuncVar match {
       case Some(v) => v.pure[StateEither]
-      case None =>
+      case None    =>
         DesugarError.format(
           FunctionOperatorNotFoundDesugarError(e1.info, func)
         )
@@ -503,7 +522,7 @@ object Desugar {
 
   def toFlatExpr(actions: List[FDoAction], body: FExpr): StateEither[Term] =
     actions match {
-      case (h: FAssign) :: Nil => toMap(h, body)
+      case (h: FAssign) :: Nil      => toMap(h, body)
       case (a: FAssign) :: lactions =>
         for {
           ft <- withFlatMap(a)
@@ -541,7 +560,8 @@ object Desugar {
 
   def toClassMethod(
       sig: FFuncSig,
-      traitTypeParams: Option[Seq[FTypeParam]]
+      traitTypeParams: Option[Seq[FTypeParam]],
+      cls: TypeClass
   ): StateEither[Term] = for {
     typeParams <- sig.tp.getOrElse(Seq()).traverse { v =>
       for {
@@ -566,7 +586,7 @@ object Desugar {
       }
       TypeAll(p._1, p._2, kind, p._3, acc)
     )
-  } yield TermClassMethod(sig.info, methodType)
+  } yield TermClassMethod(sig.info, methodType, cls)
 
   def toParamsWithSelf(
       params: Option[FParamsWithSelf],
@@ -602,7 +622,7 @@ object Desugar {
   def toTermVar(info: Info, i: String): ContextState[Option[Term]] =
     State { ctx =>
       Context
-        .nameToIndex(ctx, toRecordConstructorId(i))
+        .nameToIndex(ctx, toRecordConstructorID(i))
         .orElse(Context.nameToIndex(ctx, i))
         .orElse(Context.nameToIndex(ctx, toRecAbsId(i))) match {
         case Some(index) => (ctx, Some(TermVar(info, index, ctx._1.length)))
@@ -714,7 +734,7 @@ object Desugar {
   ): ContextState[Term] =
     values
       .traverse { case (n, t) =>
-        toTermVar(info, withTupleParamId(n)).map(term => (n, term.get))
+        toTermVar(info, withTupleParamID(n)).map(term => (n, term.get))
       }
       .map(TermRecord(info, _))
 
@@ -763,7 +783,7 @@ object Desugar {
       body: StateEither[Term]
   ): StateEither[Term] =
     values
-      .map { case (i, t) => (withTupleParamId(i), t) }
+      .map { case (i, t) => (withTupleParamID(i), t) }
       .foldRight(body)((p, acc) =>
         for {
           typ <- toType(p._2)
@@ -789,7 +809,7 @@ object Desugar {
       tp: FTypeParamClause
   ): StateEither[Type] =
     tp match {
-      case None => toTypeVar(info, name)
+      case None      => toTypeVar(info, name)
       case Some(tys) =>
         tys
           .foldLeft(toTypeVar(info, name))((acc, tp) =>
@@ -800,32 +820,37 @@ object Desugar {
           )
     }
 
-  // Prepends the identifier with "#" if it's an integer – depicting it's used
+  // Prepends the identifier with "t" if it's an integer – depicting it's used
   // for the tuple records. If not, the identifier is returned unchanged.
-  def withTupleParamId(i: String) = i.toIntOption match {
+  def withTupleParamID(i: String) = i.toIntOption match {
     case Some(v) => s"t$i"
     case None    => i
   }
 
   // The record constructor has a prefix "%" that should be searched during
   // type checking when the record type is found in the application.
-  def toRecordConstructorId(i: String) = s"$RecordConstrPrefix$i"
+  def toRecordConstructorID(i: String) = s"$RecordConstrPrefix$i"
 
   // The method type has a prefix "!" that should be searched during type
   // checking when the projection is found for a variable. There's also a "#"
   // separator that depicts the type name for the method.
-  def toMethodId(methodName: String, typeName: String) =
+  def toMethodID(methodName: String, typeName: String) =
     s"$MethodNamePrefix$methodName#$typeName"
 
   // The method type has a prefix "!" that should be searched during type
   // checking when the projection is found for a variable. There's also a "#"
   // separator that depicts the type name and the type class for the method.
-  def toTypeInstanceMethodId(
+  def toTypeInstanceMethodID(
       methodName: String,
       typeName: String,
       typeClass: String
   ) =
     s"$MethodNamePrefix$methodName#$typeName#$typeClass"
+
+  // The type instance bind has a prefix "#" that should be searched during type
+  // checking; constisting of type name and type class name.
+  def toTypeInstanceBindID(typeClass: String, typeName: String) =
+    s"#$typeClass#$typeName"
 
   // # Constructors # region_end
 

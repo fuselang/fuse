@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+
+  build-release:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: fuse-linux-x86_64
+          - os: macos-13
+            artifact_name: fuse-macos-x86_64
+          - os: macos-14
+            artifact_name: fuse-macos-arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      JAVA_OPTS: -Xms2048M -Xmx2048M -Xss6M -XX:ReservedCodeCacheSize=256M
+    steps:
+      - uses: actions/checkout@v6
+      - uses: coursier/cache-action@v6
+      - uses: coursier/setup-action@v2
+        with:
+          jvm: temurin:17
+          apps: sbt
+      - name: Install LLVM/Clang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm
+      - name: Build native executable
+        run: sbt fuseNative/nativeLink
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifacts
+          cp $(find . -path "*native*" -name "fuse-out" -type f | head -1) artifacts/${{ matrix.artifact_name }}
+          chmod +x artifacts/${{ matrix.artifact_name }}
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ needs.release-please.outputs.tag_name }} artifacts/${{ matrix.artifact_name }}
+
+  upload-runtime:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Package runtime files
+        run: |
+          mkdir -p runtime-pkg
+          cp grin/runtime.c grin/prim_ops.c grin/prim_ops.h runtime-pkg/
+          tar -czvf fuse-runtime.tar.gz -C runtime-pkg .
+      - name: Upload runtime to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ needs.release-please.outputs.tag_name }} fuse-runtime.tar.gz
