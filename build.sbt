@@ -26,8 +26,12 @@ val sharedSettings = Seq(
 
 // Scala Native release configuration
 val nativeSettings = Seq(
-  nativeConfig ~= {
-    _.withLTO(LTO.thin)
+  nativeConfig ~= { config =>
+    val ltoMode =
+      if (System.getProperty("os.name").toLowerCase.contains("mac")) LTO.none
+      else LTO.thin
+    config
+      .withLTO(ltoMode)
       .withMode(Mode.releaseFast)
       .withGC(GC.immix)
   }

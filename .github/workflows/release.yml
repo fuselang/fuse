@@ -27,9 +27,7 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_name: fuse-linux-x86_64
-          - os: macos-13
-            artifact_name: fuse-macos-x86_64
-          - os: macos-14
+          - os: macos-latest
             artifact_name: fuse-macos-arm64
     runs-on: ${{ matrix.os }}
     env:
