@@ -1,0 +1,8 @@
+{
+  "release-type": "simple",
+  "packages": {
+    ".": {
+      "extra-files": ["build.sbt"]
+    }
+  }
+}
