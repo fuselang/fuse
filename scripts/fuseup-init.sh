@@ -1,0 +1,293 @@
+#!/bin/sh
+# fuseup-init.sh - Fuse toolchain installer
+#
+# Downloads and installs the complete Fuse toolchain:
+# - Fuse compiler
+# - GRIN compiler
+# - LLVM 7 (clang, opt, llc)
+# - Boehm GC
+# - Runtime files
+#
+# Usage:
+#   curl -sSf https://fuselang.github.io/fuseup | sh
+#   curl -sSf https://fuselang.github.io/fuseup | sh -s -- -y
+
+set -u
+
+FUSE_HOME="${HOME}/.local/share/fuse"
+FUSE_BIN="${HOME}/.local/bin"
+TOOLCHAIN_URL="https://github.com/fuselang/fuse/releases/latest/download"
+
+# -----------------------------------------------------------------------------
+# Utility functions
+# -----------------------------------------------------------------------------
+
+say() {
+    printf 'fuseup: %s\n' "$1"
+}
+
+err() {
+    say "$1" >&2
+    exit 1
+}
+
+need_cmd() {
+    if ! command -v "$1" > /dev/null 2>&1; then
+        err "need '$1' (command not found)"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Platform detection
+# -----------------------------------------------------------------------------
+
+get_platform() {
+    local _os _arch
+
+    _os="$(uname -s)"
+    _arch="$(uname -m)"
+
+    case "$_os" in
+        Linux)
+            case "$_arch" in
+                x86_64) echo "linux-x86_64" ;;
+                *) err "unsupported architecture: $_arch" ;;
+            esac
+            ;;
+        Darwin)
+            case "$_arch" in
+                arm64)  echo "macos-arm64" ;;
+                x86_64) echo "macos-x86_64" ;;
+                *) err "unsupported architecture: $_arch" ;;
+            esac
+            ;;
+        *)
+            err "unsupported OS: $_os"
+            ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
+# Installation
+# -----------------------------------------------------------------------------
+
+install_toolchain() {
+    local _platform _url _archive _local_path
+
+    _platform="$1"
+    _local_path="${2:-}"
+
+    if [ -n "$_local_path" ]; then
+        say "Installing from local file: $_local_path"
+        _archive="$_local_path"
+    else
+        _url="${TOOLCHAIN_URL}/fuse-toolchain-${_platform}.tar.gz"
+        _archive="/tmp/fuse-toolchain.tar.gz"
+
+        say "Downloading toolchain for ${_platform}..."
+
+        if command -v curl > /dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -SfL "$_url" -o "$_archive" --progress-bar
+        elif command -v wget > /dev/null 2>&1; then
+            wget --https-only "$_url" -O "$_archive" --show-progress
+        else
+            err "need 'curl' or 'wget' to download"
+        fi
+    fi
+
+    say "Extracting toolchain..."
+    mkdir -p "$FUSE_HOME"
+    tar -xzf "$_archive" -C "$FUSE_HOME" --strip-components=1
+
+    # Only remove if we downloaded it
+    [ -z "$_local_path" ] && rm -f "$_archive"
+
+    say "Toolchain installed to $FUSE_HOME"
+}
+
+setup_symlinks() {
+    say "Creating symlinks..."
+    mkdir -p "$FUSE_BIN"
+    ln -sf "${FUSE_HOME}/bin/fuse" "$FUSE_BIN/fuse"
+    ln -sf "${FUSE_HOME}/bin/grin" "$FUSE_BIN/grin"
+}
+
+setup_env() {
+    local _env_file
+
+    _env_file="${FUSE_HOME}/env"
+
+    say "Generating environment script..."
+
+    cat > "$_env_file" << 'EOF'
+#!/bin/sh
+# Fuse toolchain environment
+export FUSE_TOOLCHAIN="$HOME/.local/share/fuse"
+
+export PATH="$HOME/.local/bin:$PATH"
+export GRIN_CC="$FUSE_TOOLCHAIN/bin/clang"
+export GRIN_OPT="$FUSE_TOOLCHAIN/bin/opt"
+export GRIN_LLC="$FUSE_TOOLCHAIN/bin/llc"
+export GC_INCLUDE="$FUSE_TOOLCHAIN/include"
+export GC_LIB="$FUSE_TOOLCHAIN/lib"
+export FUSE_RUNTIME="$FUSE_TOOLCHAIN/runtime"
+EOF
+
+    chmod +x "$_env_file"
+}
+
+# -----------------------------------------------------------------------------
+# Shell integration
+# -----------------------------------------------------------------------------
+
+get_profile() {
+    case "$SHELL" in
+        */bash)
+            if [ -f "$HOME/.bash_profile" ]; then
+                echo "$HOME/.bash_profile"
+            else
+                echo "$HOME/.bashrc"
+            fi
+            ;;
+        */zsh)  echo "$HOME/.zshrc" ;;
+        */fish) echo "$HOME/.config/fish/config.fish" ;;
+        *)      echo "$HOME/.profile" ;;
+    esac
+}
+
+modify_profile() {
+    local _profile _source_line
+
+    _profile="$(get_profile)"
+
+    # Fish shell needs different syntax
+    if echo "$SHELL" | grep -q fish; then
+        _source_line='source "$HOME/.local/share/fuse/env.fish"'
+        cat > "${FUSE_HOME}/env.fish" << 'EOF'
+# Fuse toolchain environment for fish
+set -gx FUSE_TOOLCHAIN "$HOME/.local/share/fuse"
+set -gx PATH "$HOME/.local/bin" $PATH
+set -gx GRIN_CC "$FUSE_TOOLCHAIN/bin/clang"
+set -gx GRIN_OPT "$FUSE_TOOLCHAIN/bin/opt"
+set -gx GRIN_LLC "$FUSE_TOOLCHAIN/bin/llc"
+set -gx GC_INCLUDE "$FUSE_TOOLCHAIN/include"
+set -gx GC_LIB "$FUSE_TOOLCHAIN/lib"
+set -gx FUSE_RUNTIME "$FUSE_TOOLCHAIN/runtime"
+EOF
+    else
+        _source_line='. "$HOME/.local/share/fuse/env"'
+    fi
+
+    # Check if already configured
+    if [ -f "$_profile" ] && grep -q "fuse/env" "$_profile" 2>/dev/null; then
+        say "Shell profile already configured"
+        return 0
+    fi
+
+    say "Adding Fuse to $_profile"
+
+    # Backup and modify
+    [ -f "$_profile" ] && cp "$_profile" "${_profile}.backup.$(date +%s)"
+    echo "" >> "$_profile"
+    echo "# Fuse toolchain" >> "$_profile"
+    echo "$_source_line" >> "$_profile"
+}
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
+
+usage() {
+    cat << EOF
+fuseup - Fuse toolchain installer
+
+USAGE:
+    curl -sSf https://fuselang.github.io/fuseup | sh
+    curl -sSf https://fuselang.github.io/fuseup | sh -s -- -y
+
+OPTIONS:
+    -y                  Accept defaults, don't prompt
+    -h, --help          Print help
+    --local <path>      Install from local tarball (for testing)
+    --no-modify-path    Don't modify shell profile
+EOF
+}
+
+main() {
+    local _yes=false
+    local _no_modify_path=false
+    local _local_path=""
+    local _platform
+
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -y) _yes=true ;;
+            --no-modify-path) _no_modify_path=true ;;
+            --local)
+                shift
+                _local_path="$1"
+                [ ! -f "$_local_path" ] && err "file not found: $_local_path"
+                ;;
+            -h|--help) usage; exit 0 ;;
+            *) say "unknown option: $1" ;;
+        esac
+        shift
+    done
+
+    # Check prerequisites
+    need_cmd uname
+    need_cmd tar
+    need_cmd mkdir
+
+    # Detect platform
+    _platform="$(get_platform)"
+    say "Detected platform: $_platform"
+
+    # Confirmation
+    if [ "$_yes" = false ]; then
+        cat << EOF
+
+Welcome to Fuse!
+
+This will install the complete toolchain (~370MB):
+  - Fuse compiler
+  - GRIN compiler
+  - LLVM 7 (clang, opt, llc)
+  - Boehm GC
+  - Runtime files
+
+Location: $FUSE_HOME
+
+EOF
+        printf "Proceed? [Y/n] "
+        read -r _confirm
+        case "$_confirm" in
+            n|N|no|No|NO) say "Cancelled"; exit 0 ;;
+        esac
+    fi
+
+    # Install
+    install_toolchain "$_platform" "$_local_path"
+    setup_symlinks
+    setup_env
+
+    # Shell integration
+    if [ "$_no_modify_path" = false ]; then
+        modify_profile
+    fi
+
+    cat << EOF
+
+Fuse is installed!
+
+To get started:
+    source ~/.local/share/fuse/env
+
+Then try:
+    fuse --version
+
+EOF
+}
+
+main "$@"

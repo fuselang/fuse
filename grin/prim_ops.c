@@ -7,6 +7,15 @@
 #include <math.h>
 #include "prim_ops.h"
 
+#ifdef USE_BOEHM_GC
+#include <gc.h>
+#define ALLOC(size) GC_malloc(size)
+#define ALLOC_ATOMIC(size) GC_malloc_atomic(size)
+#else
+#define ALLOC(size) malloc(size)
+#define ALLOC_ATOMIC(size) calloc(1, size)
+#endif
+
 #define BUFFER_SIZE 256
 
 /*
@@ -19,8 +28,8 @@ NOTES:
 
 
 struct string* create_string_len(int64_t l) {
-    struct string* r = (struct string*)malloc(sizeof(struct string));
-    r->data = (char*)calloc(sizeof(char), l * sizeof(char));
+    struct string* r = (struct string*)ALLOC(sizeof(struct string));
+    r->data = (char*)ALLOC_ATOMIC(l * sizeof(char));
     r->length = l;
 #ifdef DEBUG
     printf("create_string_len(%ld) = %d\n", l, (int)r);
@@ -29,9 +38,9 @@ struct string* create_string_len(int64_t l) {
 }
 
 struct string* create_string_copy(char* str) {
-    struct string* r = (struct string*)malloc(sizeof(struct string));
+    struct string* r = (struct string*)ALLOC(sizeof(struct string));
     int64_t l = strlen(str);
-    r->data = (char*)malloc(l * sizeof(char));
+    r->data = (char*)ALLOC_ATOMIC(l * sizeof(char));
     strncpy(r->data, str, l);
     r->length = l;
 #ifdef DEBUG
