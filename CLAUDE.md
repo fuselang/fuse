@@ -180,3 +180,4 @@ De Bruijn index bugs often manifest as type errors in later phases (like Grin ge
 - add to memory; don't use /tmp folder for grin compilation for simpler execution
 - add to memory; always add `-C grin/prim_ops.c` and `-C grin/runtime.c` when using `grin` cli command to ensure proper compilation
 - add to memory. when invoking grin programmatically (e.g., in Fuse.scala), wrap the command with `nix-shell --run "..."` to ensure proper environment setup
+- add to memory. do not use `private` modifier on functions or vals in scala codebase; keep all members public for easier testing and extensibility

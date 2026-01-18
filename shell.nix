@@ -1,27 +1,29 @@
 let
-  # Allow overriding GRIN path via environment variable for CI
-  grinPathEnv = builtins.getEnv "GRIN_PATH";
-  grinPath = if grinPathEnv != "" then grinPathEnv else "/root/grin";
+  pkgs = import <nixpkgs> {};
 
-  # Import grin's nixpkgs sources which have LLVM 7
-  grinSources = import (grinPath + "/nix/sources.nix") {};
-  pkgs = import grinSources.nixpkgs {};
+  # Fetch GRIN from fuselang/grin flake with Boehm GC support
+  grinFlake = builtins.getFlake "github:fuselang/grin/boehm-gc";
+  grin = grinFlake.packages.${builtins.currentSystem}.default;
+
+  # Import LLVM 15 from nixos-23.11 (same as grin flake)
+  pkgs-23-11 = import (builtins.fetchTarball {
+    url = "https://github.com/NixOS/nixpkgs/archive/nixos-23.11.tar.gz";
+  }) {};
+  llvm15 = pkgs-23-11.llvmPackages_15;
 in
 pkgs.mkShell {
   buildInputs = [
-    pkgs.sbt
-    pkgs.llvm_7
-    pkgs.clang_7
+    grin
+    pkgs.boehmgc
+    llvm15.clang
+    llvm15.llvm
   ];
 
-  # Add pre-built grin to PATH and set LLVM environment variables
   shellHook = ''
-    export PATH="${grinPath}/result/bin:$PATH"
-    export GRIN_CC="${pkgs.clang_7}/bin/clang"
-    export GRIN_OPT="${pkgs.llvm_7}/bin/opt"
-    export GRIN_LLC="${pkgs.llvm_7}/bin/llc"
-    echo "Fuse development environment"
-    echo "grin: $(which grin 2>/dev/null || echo 'not found')"
-    echo "clang: $GRIN_CC"
+    export GC_INCLUDE="${pkgs.boehmgc}/include"
+    export GC_LIB="${pkgs.boehmgc}/lib"
+    export GRIN_CC="${llvm15.clang}/bin/clang"
+    export GRIN_OPT="${llvm15.llvm}/bin/opt"
+    export GRIN_LLC="${llvm15.llvm}/bin/llc"
   '';
 }

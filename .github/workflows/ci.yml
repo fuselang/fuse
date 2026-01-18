@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [master, main]
 
+# Cancel in-progress runs when a new commit is pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   format:
     name: Check Formatting
@@ -42,29 +47,24 @@ jobs:
     needs: format
     steps:
       - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-      - name: Cache Nix store
-        uses: actions/cache@v4
+
+      # Install Nix with haskell.nix binary cache for pre-built GHC
+      - uses: DeterminateSystems/nix-installer-action@main
         with:
-          path: /nix/store
-          key: nix-${{ runner.os }}-${{ hashFiles('shell.nix') }}
-          restore-keys: nix-${{ runner.os }}-
-      - name: Clone GRIN compiler
-        run: git clone --depth 1 https://github.com/grin-compiler/grin.git grin-compiler
-      - name: Cache GRIN build
-        uses: actions/cache@v4
+          extra-conf: |
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - uses: coursier/cache-action@v6
+      - uses: coursier/setup-action@v2
         with:
-          path: grin-compiler/result
-          key: grin-${{ runner.os }}-${{ hashFiles('grin-compiler/default.nix') }}
-      - name: Build GRIN
-        run: |
-          cd grin-compiler
-          nix build
+          jvm: temurin:17
+          apps: sbt bloop
+
       - name: Setup Bloop
-        env:
-          GRIN_PATH: ${{ github.workspace }}/grin-compiler
-        run: nix-shell --run "sbt bloopInstall"
+        run: sbt bloopInstall
+
       - name: Run exec tests
-        env:
-          GRIN_PATH: ${{ github.workspace }}/grin-compiler
         run: nix-shell --run "bloop test fuse-test -- 'fuse.CompilerExecTests.*'"

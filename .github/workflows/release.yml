@@ -4,10 +4,25 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:
+    inputs:
+      grin_ref:
+        description: 'GRIN git ref (branch/tag/commit)'
+        default: 'boehm-gc'
+        required: false
+
+# Cancel in-progress runs when a new commit is pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
   pull-requests: write
+
+env:
+  GRIN_REF: ${{ inputs.grin_ref || 'boehm-gc' }}
+  JAVA_OPTS: -Xms2048M -Xmx2048M -Xss6M -XX:ReservedCodeCacheSize=256M
 
 jobs:
   release-please:
@@ -19,55 +34,93 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
 
-  build-release:
+  build-linux:
+    name: Build Linux x86_64
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact_name: fuse-linux-x86_64
-          - os: macos-latest
-            artifact_name: fuse-macos-arm64
-    runs-on: ${{ matrix.os }}
-    env:
-      JAVA_OPTS: -Xms2048M -Xmx2048M -Xss6M -XX:ReservedCodeCacheSize=256M
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
+
+      # JVM/SBT for Fuse compiler
       - uses: coursier/cache-action@v6
       - uses: coursier/setup-action@v2
         with:
           jvm: temurin:17
           apps: sbt
-      - name: Install LLVM/Clang (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang llvm
-      - name: Build native executable
-        run: sbt fuseNative/nativeLink
-      - name: Prepare artifact
-        run: |
-          mkdir -p artifacts
-          cp $(find . -path "*native*" -name "fuse-out" -type f | head -1) artifacts/${{ matrix.artifact_name }}
-          chmod +x artifacts/${{ matrix.artifact_name }}
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ needs.release-please.outputs.tag_name }} artifacts/${{ matrix.artifact_name }}
 
-  upload-runtime:
+      # Nix for GRIN (with haskell.nix cache)
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build toolchain
+        run: ./scripts/build-toolchain.sh --grin-ref "${{ env.GRIN_REF }}"
+
+      - name: Free disk space
+        run: sudo rm -rf /nix && df -h
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: toolchain-linux-x86_64
+          path: output/fuse-toolchain-linux-x86_64.tar.gz
+
+  build-macos:
+    name: Build macOS ARM64
     needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: brew install autoconf automake libtool
+
+      # JVM/SBT for Fuse compiler
+      - uses: coursier/cache-action@v6
+      - uses: coursier/setup-action@v2
+        with:
+          jvm: temurin:17
+          apps: sbt
+
+      # Nix for GRIN
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Build toolchain
+        run: ./scripts/build-toolchain.sh --grin-ref "${{ env.GRIN_REF }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: toolchain-macos-arm64
+          path: output/fuse-toolchain-macos-arm64.tar.gz
+
+  upload-release:
+    name: Upload to Release
+    needs: [release-please, build-linux, build-macos]
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - name: Package runtime files
-        run: |
-          mkdir -p runtime-pkg
-          cp grin/runtime.c grin/prim_ops.c grin/prim_ops.h runtime-pkg/
-          tar -czvf fuse-runtime.tar.gz -C runtime-pkg .
-      - name: Upload runtime to release
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: cd artifacts && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ needs.release-please.outputs.tag_name }} fuse-runtime.tar.gz
+        run: |
+          gh release upload ${{ needs.release-please.outputs.tag_name }} \
+            artifacts/*.tar.gz artifacts/SHA256SUMS \
+            --repo ${{ github.repository }}
