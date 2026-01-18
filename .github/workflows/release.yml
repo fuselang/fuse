@@ -19,6 +19,7 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
+  actions: write  # Required for cache purging
 
 env:
   GRIN_REF: ${{ inputs.grin_ref || 'boehm-gc' }}
@@ -50,13 +51,17 @@ jobs:
           apps: sbt
 
       # Nix for GRIN (with haskell.nix cache)
-      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/install-nix-action@v31
         with:
-          extra-conf: |
+          extra_nix_config: |
             extra-substituters = https://cache.iog.io
             extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
 
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 2G
 
       - name: Build toolchain
         run: ./scripts/build-toolchain.sh --grin-ref "${{ env.GRIN_REF }}"
@@ -87,13 +92,17 @@ jobs:
           apps: sbt
 
       # Nix for GRIN
-      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/install-nix-action@v31
         with:
-          extra-conf: |
+          extra_nix_config: |
             extra-substituters = https://cache.iog.io
             extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
 
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-macos: 3G
 
       - name: Build toolchain
         run: ./scripts/build-toolchain.sh --grin-ref "${{ env.GRIN_REF }}"
