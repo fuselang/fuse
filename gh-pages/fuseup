@@ -9,8 +9,8 @@
 # - Runtime files
 #
 # Usage:
-#   curl -sSf https://fuselang.github.io/fuseup | sh
-#   curl -sSf https://fuselang.github.io/fuseup | sh -s -- -y
+#   curl -fsSL https://fuselang.github.io/fuse/fuseup | sh
+#   curl -fsSL https://fuselang.github.io/fuse/fuseup | sh -s -- -y
 
 set -u
 
@@ -202,8 +202,8 @@ usage() {
 fuseup - Fuse toolchain installer
 
 USAGE:
-    curl -sSf https://fuselang.github.io/fuseup | sh
-    curl -sSf https://fuselang.github.io/fuseup | sh -s -- -y
+    curl -fsSL https://fuselang.github.io/fuse/fuseup | sh
+    curl -fsSL https://fuselang.github.io/fuse/fuseup | sh -s -- -y
 
 OPTIONS:
     -y                  Accept defaults, don't prompt
@@ -253,7 +253,7 @@ Welcome to Fuse!
 This will install the complete toolchain (~370MB):
   - Fuse compiler
   - GRIN compiler
-  - LLVM 7 (clang, opt, llc)
+  - LLVM 15 (clang, opt, llc)
   - Boehm GC
   - Runtime files
 

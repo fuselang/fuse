@@ -9,6 +9,12 @@
 - Pattern Matching
 - Uses [Grin](https://github.com/grin-compiler/grin) as compiler backend
 
+# Installation
+
+```bash
+curl -fsSL https://fuselang.github.io/fuse/fuseup | sh
+```
+
 # Road-map
 
 - [x] Parser
