@@ -3,45 +3,17 @@ type Option[A]:
     Some(A)
 
 impl Option[A]:
-    fun is_some(self) -> bool
-        match self:
-            Some(v) => true
-            _ => false
-
-    fun is_none(self) -> bool
-        match self:
-            Some(v) => false
-            _ => true
-
     fun map[B](self, f: A -> B) -> Option[B]
         match self:
             Some(v) => Some(f(v))
             _ => None
 
-    fun get_or_else(self, default: A) -> A
-        match self:
-            Some(a) => a
-            None => default
-
-    fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
-        let v = self.map(f)
-        v.get_or_else(None)
-
-    fun filter(self, f: A -> bool) -> Option[A]
-        match self:
-            Some(a) => {
-                match f(a):
-                    true => self
-                    _ => None
-            }
-            _ => None
-
-    fun to_str(v: i32) -> Option[str]
-        let s = Some(v)
-        s.map(a => int_to_str(a))
-
 fun main() -> i32
-    let l = Option::to_str(5)
-    match l:
-        Some(v) => 0
+    let o = Some(5)
+    let o1 = o.map(a => a + 1)
+    match o1:
+        Some(v) => {
+            print(int_to_str(v))
+            0
+        }
         None => 1

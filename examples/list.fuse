@@ -3,23 +3,22 @@ type List[A]:
     Nil
 
 impl List[A]:
-    fun foldRight[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
         match as:
-            Cons(x, xs) => f(x, List::foldRight(xs, z, f))
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
             Nil => z
 
     fun map[B](self, f: A -> B) -> List[B]
-        List::foldRight(self, Nil[B], (h, t) => Cons(f(h), t))
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
 
-    fun map_2[B](self, f: A -> B) -> List[B]
-        let iter = (acc, l) => {
-            match l:
-                Cons(h, t) => Cons(f(h), iter(acc, t))
-                Nil => acc
-        }
-        iter(Nil[B], self)
-
-fun main() -> Unit
+fun main() -> i32
     let l = Cons(2, Cons(3, Nil))
-    let l1 = l.map_2(v => v + 1)
-    ()
+    let l1 = l.map(v => v + 1)
+    let result = {
+        match l1:
+            Cons(h, t) => h
+            Nil => 0
+    }
+    print(int_to_str(result))
+    0
+       
