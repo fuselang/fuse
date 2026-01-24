@@ -102,7 +102,32 @@ install_toolchain() {
     # Only remove if we downloaded it
     [ -z "$_local_path" ] && rm -f "$_archive"
 
+    # Fix library paths on macOS
+    fix_macos_library_paths
+
     say "Toolchain installed to $FUSE_HOME"
+}
+
+fix_macos_library_paths() {
+    case "$(uname -s)" in
+        Darwin)
+            say "Fixing macOS library paths..."
+
+            # Fix GC library install_name to use actual installed path
+            _gc_lib="${FUSE_HOME}/lib/libgc.1.dylib"
+            if [ -f "$_gc_lib" ]; then
+                chmod +w "$_gc_lib"
+                install_name_tool -id "${FUSE_HOME}/lib/libgc.1.dylib" "$_gc_lib"
+            fi
+
+            # Verify no remaining Nix store references (sanity check)
+            _grin_bin="${FUSE_HOME}/bin/grin"
+            if [ -f "$_grin_bin" ] && otool -L "$_grin_bin" 2>/dev/null | grep -q '/nix/store'; then
+                say "WARNING: grin binary has unresolved Nix store dependencies"
+                say "The toolchain may not work correctly on this system"
+            fi
+            ;;
+    esac
 }
 
 setup_symlinks() {
@@ -131,6 +156,11 @@ export GRIN_LLC="$FUSE_TOOLCHAIN/bin/llc"
 export GC_INCLUDE="$FUSE_TOOLCHAIN/include"
 export GC_LIB="$FUSE_TOOLCHAIN/lib"
 export FUSE_RUNTIME="$FUSE_TOOLCHAIN/runtime"
+
+# On macOS, set SDKROOT so bundled clang can find system headers
+if [ "$(uname -s)" = "Darwin" ] && command -v xcrun >/dev/null 2>&1; then
+    export SDKROOT="$(xcrun --show-sdk-path)"
+fi
 EOF
 
     chmod +x "$_env_file"
@@ -261,9 +291,19 @@ Location: $FUSE_HOME
 
 EOF
         printf "Proceed? [Y/n] "
-        read -r _confirm
-        case "$_confirm" in
-            n|N|no|No|NO) say "Cancelled"; exit 0 ;;
+        # Read from /dev/tty to handle curl | sh usage where stdin is the script
+        if [ -t 0 ]; then
+            read -r _confirm
+        elif [ -e /dev/tty ]; then
+            read -r _confirm < /dev/tty
+        else
+            # Non-interactive, no tty - default to yes
+            _confirm="y"
+        fi
+        # Convert to lowercase for case-insensitive matching
+        _confirm_lower=$(echo "$_confirm" | tr '[:upper:]' '[:lower:]')
+        case "$_confirm_lower" in
+            n|no) say "Cancelled"; exit 0 ;;
         esac
     fi
 

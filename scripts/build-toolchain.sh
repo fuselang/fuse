@@ -89,6 +89,7 @@ detect_platform() {
 build_grin() {
     local grin_ref="$1"
     local output_bin="$2"
+    local toolchain_dir="$(dirname "$(dirname "$output_bin")")"
 
     say "Building GRIN from github:fuselang/grin/${grin_ref}..."
     need_cmd nix
@@ -107,8 +108,136 @@ build_grin() {
     cp "$grin_path" "$output_bin"
     chmod +x "$output_bin"
 
+    # Fix library paths - copy Nix store dependencies and rewrite references
+    fix_nix_binary_paths "$output_bin" "$toolchain_dir"
+
     say "GRIN built successfully: $output_bin"
     "$output_bin" --help | head -3
+}
+
+fix_nix_binary_paths() {
+    local binary="$1"
+    local toolchain_dir="$2"
+    local lib_dir="${toolchain_dir}/lib"
+
+    mkdir -p "$lib_dir"
+
+    case "$(uname -s)" in
+        Darwin)
+            # Bundle Nix store dependencies recursively
+            bundle_nix_libs_darwin "$binary" "$lib_dir"
+
+            # Also check bundled libraries for transitive Nix dependencies
+            for bundled_lib in "$lib_dir"/*.dylib; do
+                [ -f "$bundled_lib" ] || continue
+                bundle_nix_libs_darwin "$bundled_lib" "$lib_dir"
+            done
+
+            # Add rpath for good measure
+            install_name_tool -add_rpath @loader_path/../lib "$binary" 2>/dev/null || true
+
+            # Re-sign binary after modifications (required on macOS)
+            codesign --force --sign - "$binary" 2>/dev/null || true
+            ;;
+        Linux)
+            need_cmd patchelf
+            # Bundle Nix store dependencies recursively (excludes glibc)
+            bundle_nix_libs_linux "$binary" "$lib_dir"
+
+            # Also check bundled libraries for transitive Nix dependencies
+            for bundled_lib in "$lib_dir"/*.so*; do
+                [ -f "$bundled_lib" ] || continue
+                bundle_nix_libs_linux "$bundled_lib" "$lib_dir"
+            done
+
+            # Remove any glibc libraries that may have been accidentally bundled
+            # These MUST use the system versions to match the system dynamic linker
+            say "Removing any accidentally bundled glibc libraries..."
+            for glibc_lib in libc.so* libm.so* libdl.so* librt.so* libpthread.so* ld-linux*.so* libgcc_s.so*; do
+                rm -f "$lib_dir"/$glibc_lib 2>/dev/null || true
+            done
+
+            # Fix bundled libraries to use relative rpath
+            for bundled_lib in "$lib_dir"/*.so*; do
+                [ -f "$bundled_lib" ] || continue
+                [ -L "$bundled_lib" ] && continue  # Skip symlinks
+                chmod +w "$bundled_lib" 2>/dev/null || true
+                patchelf --set-rpath '$ORIGIN' "$bundled_lib" 2>/dev/null || true
+            done
+
+            # Make binary writable and fix paths
+            chmod +w "$binary"
+            # Set interpreter to system ld-linux (Nix binary has Nix store interpreter)
+            patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 "$binary"
+            # Set rpath to look relative to binary for bundled libs
+            patchelf --set-rpath '$ORIGIN/../lib' "$binary"
+
+            # Verify the fix worked
+            local actual_interp
+            actual_interp="$(patchelf --print-interpreter "$binary")"
+            if [ "$actual_interp" != "/lib64/ld-linux-x86-64.so.2" ]; then
+                err "Failed to set interpreter. Got: $actual_interp"
+            fi
+            say "Interpreter set to: $actual_interp"
+
+            # Verify no Nix store references remain
+            local nix_refs
+            nix_refs="$(ldd "$binary" 2>/dev/null | grep -c '/nix/store' || true)"
+            if [ "$nix_refs" -gt 0 ]; then
+                say "WARNING: $nix_refs Nix store references still present in binary"
+                ldd "$binary" 2>/dev/null | grep '/nix/store' || true
+            else
+                say "OK: No Nix store references in binary"
+            fi
+            ;;
+    esac
+}
+
+bundle_nix_libs_darwin() {
+    local target="$1"
+    local lib_dir="$2"
+
+    otool -L "$target" 2>/dev/null | grep '/nix/store' | awk '{print $1}' | while read -r lib; do
+        if [ -f "$lib" ]; then
+            local lib_name="$(basename "$lib")"
+            # Skip if already bundled
+            [ -f "$lib_dir/$lib_name" ] && continue
+            say "  Bundling: $lib_name"
+            cp "$lib" "$lib_dir/"
+            chmod +w "$lib_dir/$lib_name"
+        fi
+    done
+
+    # Rewrite all Nix store references to use @loader_path
+    otool -L "$target" 2>/dev/null | grep '/nix/store' | awk '{print $1}' | while read -r lib; do
+        local lib_name="$(basename "$lib")"
+        install_name_tool -change "$lib" "@loader_path/../lib/$lib_name" "$target" 2>/dev/null || true
+    done
+}
+
+bundle_nix_libs_linux() {
+    local target="$1"
+    local lib_dir="$2"
+
+    # Note: grep may return 1 if no matches, so use || true to avoid pipefail errors
+    # Use process substitution to avoid subshell issues with continue
+    while read -r lib; do
+        [ -z "$lib" ] && continue
+        if [ -f "$lib" ]; then
+            local lib_name="$(basename "$lib")"
+            # Skip if already bundled
+            [ -f "$lib_dir/$lib_name" ] && continue
+            # Skip glibc libraries - they must match the system dynamic linker
+            # Bundling glibc causes symbol mismatch errors with the system ld-linux
+            case "$lib_name" in
+                libc.so*|libm.so*|libdl.so*|librt.so*|libpthread.so*|ld-linux*.so*|libgcc_s.so*)
+                    continue
+                    ;;
+            esac
+            say "  Bundling: $lib_name"
+            cp "$lib" "$lib_dir/"
+        fi
+    done < <(ldd "$target" 2>/dev/null | { grep '/nix/store' || true; } | awk '{print $3}')
 }
 
 build_fuse() {
@@ -264,12 +393,21 @@ fix_macos_paths() {
 
     say "Fixing macOS library paths..."
 
+    # Fix binary rpaths
     cd "${toolchain_dir}/bin"
     for bin in clang grin opt llc fuse; do
         if [ -f "$bin" ]; then
             install_name_tool -add_rpath @loader_path/../lib "$bin" 2>/dev/null || true
         fi
     done
+
+    # Fix GC library install_name to use @rpath (fuseup will set actual path at install time)
+    local gc_lib="${toolchain_dir}/lib/libgc.1.dylib"
+    if [ -f "$gc_lib" ]; then
+        chmod +w "$gc_lib"
+        install_name_tool -id "@rpath/libgc.1.dylib" "$gc_lib"
+        say "Fixed libgc install_name to @rpath/libgc.1.dylib"
+    fi
 
     say "macOS library paths fixed"
 }
