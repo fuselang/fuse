@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/fuselang/fuse/compare/v0.3.0...v0.3.1) (2026-01-25)
+
+
+### Bug Fixes
+
+* mac os release build ([83ceb8a](https://github.com/fuselang/fuse/commit/83ceb8a47eed1783453660baf5f876141b9829e6))
+
 ## [0.3.0](https://github.com/fuselang/fuse/compare/v0.2.0...v0.3.0) (2026-01-18)
 
 
