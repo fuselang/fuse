@@ -234,5 +234,10 @@ object Bindings {
   case object TempVarBind extends Binding
 
 // Global bindings.
-  case class Bind(i: String, b: Binding, insts: List[Instantiation] = List())
+  case class Bind(
+      i: String,
+      b: Binding,
+      insts: List[Instantiation] = List(),
+      closureTypes: Map[String, Type] = Map.empty  // Closure name -> resolved type for GRIN generation
+  )
 }

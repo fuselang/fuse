@@ -14,6 +14,7 @@ import core.Types.*
 import parser.Info.UnknownInfo
 
 import GrinUtils.*
+import Syntax.*
 import core.TypeChecker.findRootTypeVar
 import fuse.SpecializedMethodUtils
 
@@ -21,215 +22,13 @@ object Grin {
   val MainFunction = "grinMain"
   val PartialFunSuffix = "''"
 
-  // Move the Grin AST into a separate object.
-  sealed trait Expr
-
-  case class Value(e: String) extends Expr
-  case class ClosureValue(
-      f: String,
-      arity: Int,
-      freeVarParameters: List[String],
-      binding: LambdaBinding,
-      typeKey: String = "" // Type signature for closureMap lookup
-  ) extends Expr
-  case class FunctionValue(
-      f: String,
-      arity: Int,
-      ptag: Option[String] =
-        None, // Track which P-tag this variable holds (e.g., "P2c18")
-      typeKey: String = "" // Type signature for closureMap lookup
-  ) extends Expr
-  case class PartialFunValue(
-      f: String,
-      arity: Int,
-      numOfAppliedVars: Int = 0,
-      typeKey: String = ""
-  ) extends Expr
-  case class AppExpr(
-      e: String,
-      resultArity: Int = 0,
-      indent: Int = 1,
-      resultPtag: Option[String] = None
-  ) extends Expr
-  case class BindExpr(
-      repr: String,
-      variable: String,
-      values: List[Expr],
-      indent: Int = 1
-  ) extends Expr
-  case class MultiLineExpr(exprs: List[BindExpr], result: Expr) extends Expr
-  case class CaseClause(pattern: String, expr: Expr, indent: Int = 2)
-      extends Expr
-  case class CaseExpr(expr: Expr, cases: List[CaseClause], indent: Int = 1)
-      extends Expr
-  case class PureExpr(expr: Expr, indent: Int = 1) extends Expr
-  case class DoExpr(expr: Expr, indent: Int = 1) extends Expr
-  case class Abs(variable: String, expr: Expr) extends Expr
-
-  case class LambdaBinding(name: String, expr: Expr)
-
-  def indent(indent: Int, instr: String) = {
-    val space = List.fill(indent)(" ").mkString
-    val indentedInstr = instr.split("\n").map(i => s"$space$i").mkString("\n")
-    instr.endsWith("\n") match {
-      case true => s"$indentedInstr\n"
-      case _    => indentedInstr
-    }
-  }
-
-  def indentExpr(indent: Int, e: Expr): Expr = e match {
-    case BindExpr(expr, variable, value, _) =>
-      BindExpr(expr, variable, value, indent)
-    case AppExpr(expr, arity, _, ptag) => AppExpr(expr, arity, indent, ptag)
-    case CaseExpr(expr, cases, _)      =>
-      val t = cases.map(c => indentExpr(indent + 1, c)).map {
-        case c: CaseClause => c
-      }
-      CaseExpr(indentExpr(indent, expr), t, indent)
-    case CaseClause(pattern, expr, _) =>
-      CaseClause(pattern, expr, indent)
-    case MultiLineExpr(exprs, expr) =>
-      MultiLineExpr(
-        exprs.map(l => BindExpr(l.repr, l.variable, l.values, indent)),
-        indentExpr(indent, expr)
-      )
-    case PureExpr(expr, _) => PureExpr(indentExpr(indent, expr), indent)
-    case DoExpr(expr, _)   => DoExpr(expr, indent)
-    case _                 => e
-  }
-
-  implicit val showExpr: Show[Expr] =
-    Show.show(_ match {
-      case Value(e)                           => e
-      case FunctionValue(f, _, _, _)          => f
-      case ClosureValue(f, _, freeVars, _, _) => s"$f ${freeVars.mkString(" ")}"
-      case PartialFunValue(f, _, _, _)        => f
-      case AppExpr(e, _, i, _)                => indent(i, e)
-      case BindExpr(e, _, _, i)               => indent(i, e)
-      case MultiLineExpr(exprs, result)       =>
-        (exprs.filter(b => !b.repr.isBlank) :+ result)
-          .map((_: Expr).show)
-          .mkString("\n")
-      case CaseClause(pattern, e, i) =>
-        val patternLine = indent(i, s"$pattern ->\n")
-        val indentedExpr = indentExpr(i + 1, e)
-        show"$patternLine$indentedExpr"
-      case CaseExpr(expr, cases, i) =>
-        val matchLine = expr match {
-          case MultiLineExpr(exprs, result) =>
-            val prepExpr = exprs
-              .filter(!_.repr.isBlank)
-              .map(e => indentExpr(i, e).show)
-              .mkString("\n")
-            val caseOf = indent(i, show"case $result of")
-            if (prepExpr.isEmpty) caseOf else s"$prepExpr\n$caseOf"
-          case _ => indent(i, show"case $expr of")
-        }
-        val caseLines = cases.map((_: Expr).show).mkString("\n")
-        show"$matchLine\n$caseLines"
-      case PureExpr(expr, i) =>
-        expr match {
-          case Value(e)                => indent(i, s"pure $e")
-          case MultiLineExpr(exprs, r) =>
-            val pureExpr = (PureExpr(r): Expr)
-            (MultiLineExpr(exprs, pureExpr): Expr).show
-          case _ => expr.show
-        }
-      case DoExpr(expr, i) =>
-        val doLine = "do\n"
-        val iExpr = indentExpr(i + 1, expr)
-        show"$doLine$iExpr"
-      case Abs(variable, e: Abs) => show"$variable $e".strip()
-      case Abs(variable, e)      =>
-        // Don't wrap store operations in PureExpr (they're already effects)
-        e match {
-          case MultiLineExpr(prepExprs, AppExpr(expr, _, _, _))
-              if expr.trim.startsWith("store ") =>
-            val preps = prepExprs
-              .filter(!_.repr.isBlank)
-              .map(indentExpr(1, _).show)
-              .mkString("\n")
-            preps.isEmpty match {
-              case true  => show"$variable =\n${indent(1, expr)}"
-              case false => show"$variable =\n$preps\n${indent(1, expr)}"
-            }
-          case _ =>
-            show"$variable =\n${PureExpr(e)}"
-        }
-    })
-
-  implicit val showLambdaBinding: Show[LambdaBinding] = Show.show(_ match {
-    case LambdaBinding(name, a: Abs) => show"$name $a"
-    case LambdaBinding(name, e)      => show"$name = $e"
-  })
-
-  def generateMissingFFI(grinCode: String): String = {
-    val missingOps = List(
-      ("_prim_int_mod", "_prim_int_mod :: T_Int64 -> T_Int64 -> T_Int64"),
-      ("_prim_float_mod", "_prim_float_mod :: T_Float -> T_Float -> T_Float"),
-      ("_prim_bool_and", "_prim_bool_and :: T_Bool -> T_Bool -> T_Bool"),
-      ("_prim_bool_or", "_prim_bool_or :: T_Bool -> T_Bool -> T_Bool"),
-      ("_prim_string_ne", "_prim_string_ne :: T_String -> T_String -> T_Int64")
-    )
-
-    val usedOps = missingOps.filter { case (opName, _) =>
-      grinCode.contains(opName)
-    }
-
-    usedOps.isEmpty match {
-      case true  => ""
-      case false =>
-        val declarations = usedOps.map(_._2).mkString("\n  ")
-        s"ffi pure\n  $declarations"
-    }
-  }
-
   // Two-pass code generation.
   // Pass 1: Collect all partial functions to build type-to-closure map
   // Pass 2: Generate code with P-tag inference
   def generate(bindings: List[Bind]): String = {
-    // Pass 1: Collect partial functions (using empty maps - no P-tag inference)
-    val emptyClosureMap: Map[String, List[String]] = Map.empty
-    val emptyArityMap: Map[Int, List[String]] = Map.empty
-    val collectPass = for {
-      values <- bindings.traverse(bind =>
-        for {
-          value <- toLambdaBinding(bind)(emptyClosureMap, emptyArityMap)
-          _ <- Context.addBinding(bind.i, bind.b)
-        } yield value
-      )
-    } yield values.flatten.flatMap(_._2)
-
-    val (ctx1, partialFunctions) = collectPass.run(Context.emptyContext).value
-
-    // Build type-to-closure map for P-tag inference
-    // Map from typeKey -> list of closure names with that type signature
-    // This allows distinguishing closures with same arity but different types
-    val typeToClosures: Map[String, List[String]] = partialFunctions
-      .filter(_.typeKey.nonEmpty)
-      .groupBy(_.typeKey)
-      .map { case (typeKey, pfs) => (typeKey, pfs.map(_.f).distinct) }
-
-    // Build arity-to-closure map for fallback when type matching fails
-    // Map from arity -> list of closure names with that arity
-    val arityToClosures: Map[Int, List[String]] = partialFunctions
-      .groupBy(_.arity)
-      .map { case (arity, pfs) => (arity, pfs.map(_.f).distinct) }
-
-    // Build closure-to-total-arity map for generating correct dispatch patterns
-    // Map from closure name -> total arity of that closure function
-    // Total arity = closure param arity + number of captured variables (numOfAppliedVars)
-    val closureToArity: Map[String, Int] = partialFunctions
-      .map(pf => (pf.f, pf.arity + pf.numOfAppliedVars))
-      .toMap
-
+    // Build Env (Pass 1: collect partial functions + build maps)
+    implicit val env: Env = buildEnv(bindings)
     // Pass 2: Generate code with P-tag inference
-    // IMPORTANT: Start from ctx1 (context after Pass 1) to ensure consistent temp variable names
-    // Pass both typeToClosures (primary) and arityToClosures (fallback) for inference
-    implicit val closureMap: Map[String, List[String]] = typeToClosures
-    implicit val arityMap: Map[Int, List[String]] = arityToClosures
-    implicit val closureTotalArity: Map[String, Int] = closureToArity
-
     val s = for {
       values <- bindings
         .traverse(bind =>
@@ -253,115 +52,200 @@ object Grin {
         case false => s"$ffi\n\n$grinCode"
       }
     }
-    // Use empty context - both passes should generate same variable names when starting fresh
     s.runEmptyA.value
   }
 
-  // Generate specialized apply functions for each P-tag (e.g., apply_P2c18, apply_P1c18)
-  // Each specialized apply handles only ONE P-tag, avoiding HPT mixed return type issues
+  /** Build Env by collecting partial functions from bindings and constructing
+    * all closure-related maps.
+    */
+  def buildEnv(bindings: List[Bind]): Env = {
+    val collectPass = for {
+      values <- bindings.traverse(bind =>
+        for {
+          value <- toLambdaBinding(bind)(Env.empty)
+          _ <- Context.addBinding(bind.i, bind.b)
+        } yield value
+      )
+    } yield values.flatten.flatMap(_._2)
+    val partialFunctions = collectPass.run(Context.emptyContext).value._2
+
+    // Build type-to-closure map for P-tag inference
+    // Map from typeKey -> list of closure names with that type signature
+    val closureMap: Map[String, List[String]] = partialFunctions
+      .filter(_.typeKey.nonEmpty)
+      .groupBy(_.typeKey)
+      .map { case (typeKey, pfs) => (typeKey, pfs.map(_.f).distinct) }
+
+    val arityFactsMap: Map[String, ArityFact] = partialFunctions
+      .map(pf =>
+        pf.f -> ArityFact(
+          pf.f,
+          pf.arity,
+          pf.numOfAppliedVars,
+          extractReturnType(pf.typeKey)
+        )
+      )
+      .toMap
+
+    Env(
+      closureMap = closureMap,
+      arityFactsMap = arityFactsMap
+    )
+  }
+
+  def generateMissingFFI(grinCode: String): String = {
+    val missingOps = List(
+      ("_prim_int_mod", "_prim_int_mod :: T_Int64 -> T_Int64 -> T_Int64"),
+      ("_prim_float_mod", "_prim_float_mod :: T_Float -> T_Float -> T_Float"),
+      ("_prim_bool_and", "_prim_bool_and :: T_Bool -> T_Bool -> T_Bool"),
+      ("_prim_bool_or", "_prim_bool_or :: T_Bool -> T_Bool -> T_Bool"),
+      ("_prim_string_ne", "_prim_string_ne :: T_String -> T_String -> T_Int64")
+    )
+
+    val usedOps = missingOps.filter { case (opName, _) =>
+      grinCode.contains(opName)
+    }
+
+    usedOps.isEmpty match {
+      case true  => ""
+      case false =>
+        val declarations = usedOps.map(_._2).mkString("\n  ")
+        s"ffi pure\n  $declarations"
+    }
+  }
+
+  // Generate return-type-grouped apply functions following GHC-GRIN pattern.
+  // Closures are grouped by (arity, return type) to ensure HPT type homogeneity.
+  // Each apply function handles all closures with the same return type at a given arity.
   def buildApply(partialFun: List[PartialFunValue]): ContextState[String] =
     partialFun.isEmpty match {
       case false =>
         for {
-          // Generate specialized apply for each P-tag at each arity level
-          specializedApplies <- partialFun
-            .flatMap { pf =>
-              (1 to pf.arity).map(arity => (pf, arity))
-            }
-            .traverse { case (pf, arity) =>
-              buildSpecializedApply(pf, arity)
-            }
-        } yield specializedApplies.mkString("\n\n")
+          // Group by (remaining arity, return type) for return-type-grouped apply functions
+          groupedApplies <- buildReturnTypeGroupedApply(partialFun)
+        } yield groupedApplies
       case true => "".pure[ContextState]
     }
 
-  // Build a specialized apply function for a single P-tag at a specific arity
-  // The apply function takes a P-tag parameter and a function parameter,
-  // does case dispatch on the P-tag to extract captured values,
-  // then calls the actual function or returns a lower-arity P-tag
-  // For specialized closures (e.g., c28_c47), we inject the known inner closure
-  def buildSpecializedApply(
-      partialFun: PartialFunValue,
-      arity: Int
+  // Build return-type-grouped apply functions
+  def buildReturnTypeGroupedApply(
+      partialFuns: List[PartialFunValue]
   ): ContextState[String] = {
-    // Check if this is a specialized closure (has _ in the name indicating inner closure)
-    val isSpecialized = partialFun.f.contains("_")
-    val (baseClosureName, innerClosureName) = isSpecialized match {
-      case true =>
-        val parts = partialFun.f.split("_", 2)
-        (parts(0), Some(parts(1)))
-      case false =>
-        (partialFun.f, None)
-    }
+    // Step 1: Group by (remaining arity, return type)
+    // Use "unknown" as fallback when return type is empty
+    val byArityAndReturnType: Map[(Int, String), List[PartialFunValue]] =
+      partialFuns
+        .flatMap { pf =>
+          // For each closure, generate entries for all arity levels 1..pf.arity
+          (1 to pf.arity).map { remaining =>
+            val returnType = getPartialFunReturnType(pf)
+            ((remaining, returnType), pf)
+          }
+        }
+        .groupBy(_._1)
+        .map { case (key, pairs) =>
+          (key, pairs.map(_._2).distinctBy(_.f))
+        }
 
-    for {
-      ptagParameter <- addTempVariable()   // P-tag parameter (first)
-      funParameter <- addTempVariable()    // Function parameter (second)
-      // Generate variables for captured values (extracted from P-tag via pattern match)
-      capturedCount = partialFun.arity - arity + partialFun.numOfAppliedVars
-      capturedVars <- List
-        .fill(capturedCount)("")
-        .traverse(_ => addTempVariable())
-      tag = pTag(arity, partialFun.f)
-      // Build the pattern for case dispatch
-      vars = capturedVars.mkString(" ").strip()
-      pattern = s"($tag $vars)"
-      // Variable for the inner closure P-tag (used in specialized closures)
-      innerVar = s"inner_${partialFun.f.replace("_", "")}"
-      // Build the body (what happens after pattern match)
-      bodyExpr = (arity - 1, innerClosureName) match {
-        case (0, Some(inner)) =>
-          // Fully saturated specialized closure - call base closure with known inner
-          val innerTag = pTag(1, inner)
-          val allArgs = (capturedVars :+ funParameter).mkString(" ")
-          // Generate: inner <- pure (P1inner)\n   baseClosureName $ inner allArgs
-          s"$innerVar <- pure ($innerTag)\n   $baseClosureName $$ $innerVar $allArgs"
-        case (0, None) =>
-          // Fully saturated - call the actual function
-          val allArgs = (capturedVars :+ funParameter).mkString(" ").strip()
-          partialFun.f + "  " + allArgs
-        case (v, Some(inner)) =>
-          // Still partial specialized - return next specialized P-tag
-          val lowerArityTag = pTag(v, partialFun.f)
-          val allArgs = (capturedVars :+ funParameter).mkString(" ")
-          s"pure ($lowerArityTag $allArgs)"
-        case (v, None) =>
-          // Still partial - return next P-tag
-          val lowerArityTag = pTag(v, partialFun.f)
-          val allArgs = (capturedVars :+ funParameter).mkString(" ")
-          s"pure ($lowerArityTag $allArgs)"
+    // Step 2: Generate one apply function per (arity, return type) combination
+    byArityAndReturnType.toList
+      .sortBy(_._1)
+      .traverse { case ((remaining, retType), closures) =>
+        buildApplyForArityAndReturnType(remaining, retType, closures)
       }
-    } yield s"apply_$tag $ptagParameter $funParameter =\n case $ptagParameter of\n  $pattern ->\n   $bodyExpr"
+      .map(_.mkString("\n\n"))
   }
 
-  // Build a single case clause for a specialized apply function (legacy, kept for compatibility)
-  def buildApplyCase(
-      partialFun: PartialFunValue,
-      arity: Int,
-      parameter: String
-  ): ContextState[CaseClause] =
+  // Get return type for a PartialFunValue
+  // Tries resolvedType first, then typeKey, then falls back to "unknown"
+  def getPartialFunReturnType(pf: PartialFunValue): String = {
+    // First try resolvedType if available
+    val fromResolvedType = pf.resolvedType.map(typeToKey).map(extractReturnType)
+    fromResolvedType match {
+      case Some(rt) if rt.nonEmpty => rt
+      case _                       =>
+        // Fall back to typeKey
+        val fromTypeKey = extractReturnType(pf.typeKey)
+        fromTypeKey.isEmpty match {
+          case true  => "unknown"
+          case false => fromTypeKey
+        }
+    }
+  }
+
+  // Sanitize return type name for use in function names (replace special chars)
+  def sanitizeTypeName(typeName: String): String =
+    typeName
+      .replace("[", "_")
+      .replace("]", "_")
+      .replace("->", "_to_")
+      .replace("{", "_")
+      .replace("}", "_")
+      .replace(",", "_")
+      .replace(":", "_")
+      .replace("|", "_")
+      .stripSuffix("_")
+
+  // Build a unified apply function for all closures with given arity and return type
+  def buildApplyForArityAndReturnType(
+      remaining: Int,
+      returnType: String,
+      closures: List[PartialFunValue]
+  ): ContextState[String] = {
+    val sanitizedRetType = sanitizeTypeName(returnType)
     for {
-      variables <- List
-        .fill(partialFun.arity - arity + partialFun.numOfAppliedVars)("")
-        .traverse(_ => addTempVariable())
-      tag = pTag(arity, partialFun.f)
-      vars = variables.mkString(" ").strip()
-      pattern = s"($tag $vars)"
-      expr = (arity - 1) match {
-        case 0 => AppExpr(partialFun.f + " $ " + vars + " " + parameter)
-        case v =>
-          val lowerArityTag = pTag(v, partialFun.f)
-          AppExpr(s"pure ($lowerArityTag $vars $parameter)")
+      ptagParam <- addTempVariable()
+      argParam <- addTempVariable()
+      clauses <- closures.traverse(pf =>
+        buildUnifiedClause(pf, remaining, argParam)
+      )
+    } yield {
+      // Function name includes arity and return type: apply1_i32, apply1_unit, apply2_List_i32_
+      s"apply${remaining}_$sanitizedRetType $ptagParam $argParam =\n case $ptagParam of\n${clauses.mkString("\n")}"
+    }
+  }
+
+  // Build a single case clause for a unified apply function
+  def buildUnifiedClause(
+      pf: PartialFunValue,
+      remaining: Int,
+      argParam: String
+  ): ContextState[String] = {
+    val tag = pTag(remaining, pf.f)
+    val totalCaptured = pf.arity - remaining + pf.numOfAppliedVars
+
+    for {
+      capturedVars <- (1 to totalCaptured).toList.traverse(_ =>
+        addTempVariable()
+      )
+      capturedStr = capturedVars.mkString(" ").strip()
+      pattern = capturedStr.isEmpty match {
+        case true  => s"($tag)"
+        case false => s"($tag $capturedStr)"
       }
-    } yield CaseClause(pattern, expr)
+    } yield {
+      remaining match {
+        case 1 =>
+          // Final application - call the function
+          val allArgs = (capturedVars :+ argParam).mkString(" ").strip()
+          s"  $pattern ->\n   ${pf.f} $allArgs"
+        case n =>
+          // Partial application - create new P-tag with one less remaining
+          val newTag = pTag(n - 1, pf.f)
+          val allArgs = (capturedVars :+ argParam).mkString(" ")
+          s"  $pattern ->\n   pure ($newTag $allArgs)"
+      }
+    }
+  }
 
   def toLambdaBinding(
       binding: Bind
   )(implicit
-      closureMap: Map[String, List[String]] = Map.empty,
-      arityMap: Map[Int, List[String]] = Map.empty,
-      closureTotalArity: Map[String, Int] = Map.empty
-  ): ContextState[Option[(List[LambdaBinding], List[PartialFunValue])]] =
+      env: Env = Env.empty
+  ): ContextState[Option[(List[LambdaBinding], List[PartialFunValue])]] = {
+    // Pass closure types from the Bind to GRIN generation
+    implicit val localEnv: Env =
+      env.copy(closureTypesFromBind = binding.closureTypes)
     binding.b match {
       case TermAbbBind(expr: (TermBuiltin | TermClassMethod), _) =>
         State.pure(None)
@@ -371,7 +255,7 @@ object Grin {
         // and therefore cannot be code-generated
         State.pure(None)
       case TermAbbBind(expr, _) =>
-        pureToExpr(expr).map(e => {
+        pureToExpr(expr)(identity, localEnv).map(e => {
           val partialFun = extractPartialFun(e)
           val closures = lambdaLift(e)
           val lambdaName = nameBind(binding.i)
@@ -380,6 +264,7 @@ object Grin {
         })
       case _ => State.pure(None)
     }
+  }
 
   def extractPartialFun(e: Expr): List[PartialFunValue] = e match {
     case p: PartialFunValue       => List(p)
@@ -446,24 +331,20 @@ object Grin {
 
   def pureToExpr(expr: Term)(implicit
       substFunc: String => String = identity,
-      closureMap: Map[String, List[String]] = Map.empty,
-      arityMap: Map[Int, List[String]] = Map.empty,
-      closureTotalArity: Map[String, Int] = Map.empty
+      env: Env = Env.empty
   ): ContextState[Expr] =
-    Context.run(toExpr(expr)(substFunc, closureMap, arityMap, closureTotalArity))
+    Context.run(toExpr(expr))
 
   def toExpr(
       expr: Term
   )(implicit
       substFunc: String => String,
-      closureMap: Map[String, List[String]] = Map.empty,
-      arityMap: Map[Int, List[String]] = Map.empty,
-      closureTotalArity: Map[String, Int] = Map.empty
+      env: Env = Env.empty
   ): ContextState[Expr] =
     expr match {
       case TermBuiltin(_)       => StateT.pure(Value(""))
-      case TermAscribe(_, t, _) => toExpr(t)(substFunc, closureMap, arityMap, closureTotalArity)
-      case TermFix(_, body)     => pureToExpr(body)(substFunc, closureMap, arityMap, closureTotalArity)
+      case TermAscribe(_, t, _) => toExpr(t)
+      case TermFix(_, body)     => pureToExpr(body)
       case TermAbs(_, variable, variableType, c: TermClosure, _) =>
         Context
           .addBinding("c", VarBind(variableType))
@@ -474,7 +355,7 @@ object Grin {
         for {
           variable1 <- includeFunctionSuffix(variable, variableType)
           variable2 <- Context.addBinding(variable1, VarBind(variableType))
-          b <- pureToExpr(body)(substFunc, closureMap, arityMap, closureTotalArity)
+          b <- pureToExpr(body)
         } yield Abs(toParamVariable(variable2), b)
       case TermApp(_, TermFold(_, ty), tag: TermTag) =>
         // Constructor application with TermFold - use store for heap allocation
@@ -490,7 +371,7 @@ object Grin {
             case _ =>
               // Constructor with fields
               for {
-                tagExpr <- pureToExpr(tag.t)(substFunc, closureMap, arityMap, closureTotalArity)
+                tagExpr <- pureToExpr(tag.t)
                 (prepExprs, parameters) <- prepParameters(tagExpr)
                 constr = show"store (${cTag(tag.i)} $parameters)"
               } yield MultiLineExpr(prepExprs, AppExpr(constr))
@@ -501,14 +382,14 @@ object Grin {
         for {
           tyD <- typeShiftOnContextDiff(ty)
           typeName <- getNameFromType(tyD)
-          recordExpr <- pureToExpr(r)(substFunc, closureMap, arityMap, closureTotalArity)
+          recordExpr <- pureToExpr(r)
           (prepExprs, parameters) <- prepParameters(recordExpr)
           constr = show"store (C${typeName} $parameters)"
         } yield MultiLineExpr(prepExprs, AppExpr(constr))
       case TermApp(_, value, svalue) =>
         for {
-          v <- pureToExpr(value)(substFunc, closureMap, arityMap, closureTotalArity)
-          sval <- pureToExpr(svalue)(substFunc, closureMap, arityMap, closureTotalArity)
+          v <- pureToExpr(value)
+          sval <- pureToExpr(svalue)
           (prepExprs1, result) <- getResult(v)
           (prepExprs2, parameter) <- prepParameters(sval)
           prepExprs = prepExprs1 :++ prepExprs2
@@ -520,13 +401,19 @@ object Grin {
               )
               resolvedTag match {
                 case Some(tag) =>
-                  State.pure(makeApplyCall(tag, result.show, parameter, arity))
+                  // Pass tKey to makeApplyCall for return-type-based apply function selection
+                  State.pure(
+                    makeApplyCall(tag, result.show, parameter, arity, tKey)
+                  )
                 case None =>
                   lookupClosures(tKey, arity) match {
                     case cs if cs.nonEmpty =>
-                      makeDispatch(f, cs, arity, parameter)(closureTotalArity)
+                      // Pass tKey to makeDispatch for return-type-based apply function selection
+                      makeDispatch(f, cs, arity, parameter, tKey)
                     case _ =>
-                      State.pure(AppExpr(s"apply $result $parameter", arity - 1, 1, None))
+                      State.pure(
+                        AppExpr(s"apply $result $parameter", arity - 1, 1, None)
+                      )
                   }
               }
             case _ =>
@@ -546,7 +433,7 @@ object Grin {
               letValue <- toClosureValue(variable, closureName, c)
               (prepExprs, result) <- getResult(letValue)
               // Get type, extracting from closure structure to avoid re-inference
-              closureType <- GrinUtils.getClosureType(c)
+              closureType <- getClosureTypeWithFallback(c)
               specializedType <- getSpecializedTermType(t1)
               variableTypeRaw <- specializedType
                 .orElse(closureType)
@@ -559,19 +446,19 @@ object Grin {
                 TermAbbBind(c, Some(variableType))
               )
               prepExprs2 = prepExprs :+ BindExpr("", "", List(result))
-              expr <- pureToExpr(t2)(substFunc, closureMap, arityMap, closureTotalArity)
+              expr <- pureToExpr(t2)
             } yield MultiLineExpr(prepExprs2, expr)
           case _ =>
             // Regular TermLet processing
             for {
-              letValue <- pureToExpr(t1)(substFunc, closureMap, arityMap, closureTotalArity)
+              letValue <- pureToExpr(t1)
               (prepExprs, result) <- getResult(letValue)
               // Get type, using cached type for specialized methods to avoid re-inference
               specializedType <- getSpecializedTermType(t1)
               // For closures, try to extract type from structure without type-checking
               closureType <- t1 match {
-                case c: TermClosure => GrinUtils.getClosureType(c)
-                case TermFix(_, c)  => GrinUtils.getClosureType(c)
+                case c: TermClosure => getClosureTypeWithFallback(c)
+                case TermFix(_, c)  => getClosureTypeWithFallback(c)
                 case _              => State.pure(None)
               }
               variableTypeRaw <- specializedType
@@ -584,14 +471,14 @@ object Grin {
                 fVar,
                 List(result)
               )
-              expr <- pureToExpr(t2)(substFunc, closureMap, arityMap, closureTotalArity)
+              expr <- pureToExpr(t2)
             } yield MultiLineExpr(prepExprs2, expr)
         }
       case TermTag(_, tag, TermUnit(_), _) =>
         State.pure(Value(s"(${cTag(tag)})"))
       case TermTag(_, tag, term, _) =>
         for {
-          params <- toExpr(term)(substFunc, closureMap, arityMap, closureTotalArity)
+          params <- toExpr(term)
           (prepExprs, values) <- prepParameters(params)
           constr = show"(${cTag(tag)} $values)"
         } yield MultiLineExpr(prepExprs, Value(constr))
@@ -599,7 +486,7 @@ object Grin {
         fields
           .traverse { case (_, term) =>
             for {
-              e <- toExpr(term)(substFunc, closureMap, arityMap, closureTotalArity)
+              e <- toExpr(term)
               isNode <- isNodeValue(term)
               v: Tuple2[Option[BindExpr], Expr] <- isNode match {
                 case true =>
@@ -623,7 +510,7 @@ object Grin {
           })
       case TermProj(_, t, label) =>
         for {
-          e <- pureToExpr(t)(substFunc, closureMap, arityMap, closureTotalArity)
+          e <- pureToExpr(t)
           ty <- typeCheck(t)
           tyD <- typeShiftOnContextDiff(ty)
           exprType <- TypeChecker.unfoldType(tyD)
@@ -714,7 +601,7 @@ object Grin {
           ty1 <- typeCheck(e)
           tyT1D <- typeShiftOnContextDiff(ty1)
           exprType <- TypeChecker.unfoldType(tyT1D)
-          t <- pureToExpr(e)(substFunc, closureMap, arityMap, closureTotalArity)
+          t <- pureToExpr(e)
           (prepExprs, result) <- prepParameters(t)
           // Add fetch operation if matching on heap-allocated value
           isNode = isHeapAllocatedType(exprType)
@@ -781,7 +668,7 @@ object Grin {
       case TermTApp(_, t, _) =>
         // Type applications like Nil[B] reach here as TermTApp nodes
         // Process the underlying term (the constructor/variable)
-        toExpr(t)(substFunc, closureMap, arityMap, closureTotalArity)
+        toExpr(t)
       case TermAssocProj(_, ty, method) =>
         // Associated function projections (like List::foldRight when used as a value)
         method match {
@@ -814,9 +701,9 @@ object Grin {
             case (v, TermAbbBind(c: TermClosure, Some(ty))) =>
               // When referencing a TermClosure binding (from TermFix in TermLet),
               // extract free variables and create ClosureValue for partial application
-              GrinUtils.freeVars(c).map { fvs =>
+              freeVars(c).map { fvs =>
                 val freeVars = fvs.filter(_._1 != v).map(_._1)
-                val arity = GrinUtils.getClosureArity(c)
+                val arity = getClosureArity(c)
                 freeVars match {
                   case Nil =>
                     FunctionValue(v, arity)
@@ -849,92 +736,148 @@ object Grin {
       case n => Some(pTag(n, closureFromTag(tag)))
     }
 
-  // Helper: Build specialized apply call
+  // Helper: Build return-type-based apply call (e.g., "apply1_i32 f x")
+  // Uses return type from typeKey to determine the correct apply function
   def makeApplyCall(
       tag: String,
       result: String,
       param: String,
-      arity: Int
-  ): AppExpr =
-    AppExpr(s"apply_$tag $result $param", arity - 1, 1, nextPtag(tag, arity))
+      arity: Int,
+      tKey: String = ""
+  )(implicit env: Env): AppExpr = {
+    // Extract closure name from tag (e.g., "P2c18" -> "c18")
+    val closureName = closureFromTag(tag)
 
-  // Helper: Build inline dispatch for multiple closures
-  // Extracts captured values in the pattern match and passes them to apply functions
-  // This helps HPT analysis track value flow by avoiding redundant case dispatch
-  // Uses deterministic variable naming based on call site (f parameter) to avoid
-  // affecting the global temp variable counter (which would cause Pass 1 and Pass 2
-  // to generate different closure names)
+    // If tKey is a closure name (no arrows), look up its typeKey from closureMap
+    val closureToTypeKey: Map[String, String] = env.closureMap.flatMap {
+      case (typeKey, closureNames) =>
+        closureNames.map(cn => cn -> typeKey)
+    }
+
+    // Use closure name to look up typeKey, which contains the accurate return type info
+    // This ensures we use the same typeKey that was used to generate the apply function
+    val effectiveTKey = closureToTypeKey.getOrElse(closureName, tKey)
+
+    val rawReturnType = extractReturnType(effectiveTKey)
+    val returnType = rawReturnType.isEmpty match {
+      case true  => "unknown"
+      case false => rawReturnType
+    }
+    val sanitizedRetType = sanitizeTypeName(returnType)
+    val applyFn = s"apply${arity}_$sanitizedRetType"
+    AppExpr(
+      s"$applyFn $result $param",
+      arity - 1,
+      1,
+      nextPtag(tag, arity),
+      List(closureName)
+    )
+  }
+
+  // Helper: Build inline dispatch for multiple closures with different return types
+  // Dispatches to the appropriate return-type-grouped apply function based on closure's actual return type
   def makeDispatch(
       f: String,
       closures: List[String],
       arity: Int,
-      param: String
-  )(implicit closureTotalArity: Map[String, Int]): ContextState[Expr] = {
+      param: String,
+      tKey: String
+  )(implicit env: Env): ContextState[Expr] = {
     val remainingArity = arity - 1
+    // For each closure, look up its actual return type from closureMap (typeKey -> closures)
+    // by finding which typeKey contains this closure, then extracting the return type
+    val closureToTypeKey: Map[String, String] = env.closureMap.flatMap {
+      case (typeKey, closureNames) =>
+        closureNames.map(cn => cn -> typeKey)
+    }
+
+    // For each closure, dispatch to the appropriate apply function
     val clauses = closures.map { cn =>
       val tag = pTag(arity, cn)
-      // Pattern just matches the tag - apply function will do case dispatch to extract captured values
       val pattern = s"($tag)"
-      // Pass the P-tag variable and function param to apply function
-      // Apply function will case dispatch on the P-tag to extract any captured values
-      val call = s"apply_$tag $f $param"
-      CaseClause(pattern, AppExpr(call, remainingArity, 1, nextPtag(tag, arity)), 1)
+      // Get the closure's actual return type by finding its typeKey
+      val closureReturnType = closureToTypeKey
+        .get(cn)
+        .map(extractReturnType)
+        .filter(_.nonEmpty)
+        .getOrElse {
+          // Fallback to tKey's return type if closure not found
+          val raw = extractReturnType(tKey)
+          raw.isEmpty match {
+            case true  => "unknown"
+            case false => raw
+          }
+        }
+      val sanitizedRetType = sanitizeTypeName(closureReturnType)
+      val applyFn = s"apply${arity}_$sanitizedRetType"
+      val call = s"$applyFn $f $param"
+      // Pass closure name for subsequent dispatch
+      CaseClause(
+        pattern,
+        AppExpr(call, remainingArity, 1, nextPtag(tag, arity), List(cn)),
+        1
+      )
     }
     State.pure(DoExpr(CaseExpr(Value(f), clauses)))
   }
 
-  // Helper: Lookup closures with fallback
-  // Also expands to include specialized variants (e.g., c28 -> c28, c28_c47, c28_c51)
-  // when the closure is known to capture other closures
+  // Helper: Get closures by arity (derived from arityFactsMap)
+  def getClosuresByArity(arity: Int)(implicit env: Env): List[String] =
+    env.arityFactsMap.collect {
+      case (name, fact) if fact.totalParams == arity => name
+    }.toList
+
+  // Helper: Lookup closures with fallback (no specialized variant expansion)
   def lookupClosures(tKey: String, arity: Int)(implicit
-      closureMap: Map[String, List[String]],
-      arityMap: Map[Int, List[String]],
-      closureTotalArity: Map[String, Int] = Map.empty
+      env: Env
   ): List[String] = {
     // Check if tKey is a comma-separated list of closures (from DoExpr dispatch extraction)
-    val baseClosures = tKey.contains(",") match {
+    tKey.contains(",") match {
       case true  => tKey.split(",").toList
-      case false => closureMap.getOrElse(tKey, arityMap.getOrElse(arity, Nil))
+      case false =>
+        env.closureMap.getOrElse(tKey, getClosuresByArity(arity))
     }
-    // Get arity-1 closures (the possible inner closures that can be captured)
-    val innerClosures = arityMap.getOrElse(1, Nil)
-    // Expand base closures to include specialized variants
-    // For each base closure that captures closures (totalArity > dispatchArity),
-    // generate specialized variants for each possible inner closure
-    val expandedClosures = baseClosures.flatMap { base =>
-      // Check if this closure captures other closures (has more args than dispatch arity)
-      val totalArity = closureTotalArity.getOrElse(base, arity)
-      val capturesClosures = totalArity > arity
-      capturesClosures match {
-        case true =>
-          // This closure captures other closures - expand to specialized variants
-          // e.g., c28 -> c28_c47, c28_c51 (for each inner closure)
-          // Don't include the original c28 since we're replacing it with specialized versions
-          innerClosures.map(inner => s"${base}_$inner")
-        case false =>
-          // Regular closure - no expansion needed
-          List(base)
-      }
-    }.distinct
-    expandedClosures
   }
 
   // Helper: Lookup single closure (for direct P-tag inference)
   def lookupSingleClosure(tKey: String, arity: Int)(implicit
-      closureMap: Map[String, List[String]],
-      arityMap: Map[Int, List[String]],
-      closureTotalArity: Map[String, Int] = Map.empty
+      env: Env
   ): Option[String] =
     lookupClosures(tKey, arity) match {
       case List(single) => Some(single)
       case _            => None
     }
 
+  // Helper: Get return type for a closure from ArityFacts
+  def getClosureReturnType(
+      closureName: String
+  )(implicit env: Env): Option[String] = {
+    // Handle specialized closures (c28_c47 -> look up c28)
+    val baseName = closureName.contains("_") match {
+      case true  => closureName.split("_")(0)
+      case false => closureName
+    }
+    env.arityFactsMap.get(baseName).map(_.returnTypeKey).filter(_.nonEmpty)
+  }
+
+  // Helper: Check if all closures in a list have the same return type
+  def hasUniformReturnType(
+      closures: List[String]
+  )(implicit env: Env): Option[String] =
+    closures.flatMap(getClosureReturnType).distinct match {
+      case List(single) => Some(single)
+      case _            => None
+    }
+
+  // Helper: Get closures by return type for dispatch optimization
+  def getClosuresByReturnType(
+      returnType: String,
+      returnTypeMap: Map[String, List[String]]
+  ): List[String] =
+    returnTypeMap.getOrElse(returnType, Nil)
+
   def toClosureValue(matchName: String, outputName: String, c: TermClosure)(
-      implicit
-      closureMap: Map[String, List[String]] = Map.empty,
-      arityMap: Map[Int, List[String]] = Map.empty,
-      closureTotalArity: Map[String, Int] = Map.empty
+      implicit env: Env = Env.empty
   ): ContextState[Expr] = for {
     substVars <- freeVars(c).map(_.filter(_._1 != matchName))
     (freeVars, tempVars) = substVars.unzip
@@ -945,15 +888,25 @@ object Grin {
         case true => s"$outputName ${tempVars.mkString(" ")}"
       }
     }
-    expr <- Context.run(toClosureAbs(c)(substFunc, closureMap, arityMap, closureTotalArity))
+    expr <- Context.run(toClosureAbs(c)(substFunc, env))
     closure = tempVars.foldLeft(expr) { (term, v) => Abs(v, term) }
     // Compute arity from closure structure instead of type-checking
     // (avoids De Bruijn index issues when closure has stale indices from type-checking phase)
     arity = getClosureArity(c)
-    // Compute typeKey from closure type for closureMap lookup
-    // Don't use Context.run - we need access to type variables (A, B) from outer context
-    closureTypeOpt <- getClosureType(c)
-    tKey = closureTypeOpt.map(typeToKey).getOrElse("")
+    // Compute typeKey from closure type - try multiple sources:
+    // 1. First try closureTypesFromBind (from monomorphization)
+    // 2. Then try extracting from closure structure
+    // 3. Finally fall back to type-checking the closure
+    closureTypeOpt <- getClosureTypeWithFallback(c)
+    // If no type from structure, try type-checking (may fail for some closures)
+    closureTypeFromTC <- closureTypeOpt match {
+      case Some(ty) => State.pure(Some(ty))
+      case None     =>
+        toContextStateOption(
+          TypeChecker.pureInfer(c)(checking = false).map(_._1)
+        )
+    }
+    tKey = closureTypeFromTC.map(typeToKey).getOrElse("")
   } yield ClosureValue(
     outputName,
     arity,
@@ -966,9 +919,7 @@ object Grin {
       closure: Term
   )(implicit
       substFunc: String => String,
-      closureMap: Map[String, List[String]] = Map.empty,
-      arityMap: Map[Int, List[String]] = Map.empty,
-      closureTotalArity: Map[String, Int] = Map.empty
+      env: Env = Env.empty
   ): ContextState[Expr] =
     closure match {
       case TermClosure(_, variable, Some(variableType), body) =>
@@ -988,7 +939,7 @@ object Grin {
           variable2 <- Context.addBinding(variable1, VarBind(variableType))
           b <- toClosureAbs(body)
         } yield Abs(toParamVariable(variable2), b)
-      case t => pureToExpr(t)(substFunc, closureMap, arityMap, closureTotalArity)
+      case t => pureToExpr(t)
     }
 
   def toCaseClause(
@@ -998,9 +949,7 @@ object Grin {
       isLastPattern: Boolean = false
   )(implicit
       substFunc: String => String,
-      closureMap: Map[String, List[String]] = Map.empty,
-      arityMap: Map[Int, List[String]] = Map.empty,
-      closureTotalArity: Map[String, Int] = Map.empty
+      env: Env = Env.empty
   ): ContextState[CaseClause] = p match {
     case PatternNode(_, node, vars) if vars.isEmpty && isLastPattern =>
       // Empty constructors (like Nil, None) cause GRIN LLVM backend errors.
@@ -1017,16 +966,14 @@ object Grin {
         caseClause <- buildCaseClause(cpat, e)
       } yield caseClause
     case PatternDefault(_) => buildCaseClause("#default", e)
-    case t: Term => pureToExpr(t)(substFunc, closureMap, arityMap, closureTotalArity).flatMap(cpat => buildCaseClause(cpat.show, e))
+    case t: Term => pureToExpr(t).flatMap(cpat => buildCaseClause(cpat.show, e))
   }
 
   def buildCaseClause(cpat: String, t: Term)(implicit
       substFunc: String => String,
-      closureMap: Map[String, List[String]] = Map.empty,
-      arityMap: Map[Int, List[String]] = Map.empty,
-      closureTotalArity: Map[String, Int] = Map.empty
+      env: Env = Env.empty
   ): ContextState[CaseClause] = for {
-    caseExpr <- pureToExpr(t)(substFunc, closureMap, arityMap, closureTotalArity)
+    caseExpr <- pureToExpr(t)
     (prepExprs, parameter) <- prepParameters(caseExpr)
   } yield CaseClause(
     cpat,
@@ -1036,9 +983,7 @@ object Grin {
   def prepParameters(
       expr: Expr
   )(implicit
-      closureMap: Map[String, List[String]] = Map.empty,
-      arityMap: Map[Int, List[String]] = Map.empty,
-      closureTotalArity: Map[String, Int] = Map.empty
+      env: Env = Env.empty
   ): ContextState[Tuple2[List[BindExpr], String]] =
     expr match {
       case b @ BindExpr(e, v, _, _) =>
@@ -1047,7 +992,7 @@ object Grin {
         prepParameters(r).map { case (prepExprs, result) =>
           (exprs :++ prepExprs, result)
         }
-      case c @ AppExpr(e, _, i, _) =>
+      case c @ AppExpr(e, _, i, _, _) =>
         addTempVariable().flatMap(p =>
           prepParameters(BindExpr(s"$p <- $e", p, List(c), i))
         )
@@ -1067,26 +1012,17 @@ object Grin {
         )
       case FunctionValue(f, _, _, _) => State.pure(List(), f)
       case c @ ClosureValue(f, arity, freeVars, _, tKey) =>
-        // Check if any freeVar is a closure (has '' suffix) - this creates nested P-tags
-        // that GRIN's HPT analysis cannot track, causing the optimizer to remove code
-        val closureFreeVars = freeVars.filter(isVariablePartialFun)
-        closureFreeVars.isEmpty match {
-          case true =>
-            // No nested closures - use normal P-tag storage
-            addTempVariable().flatMap(p =>
-              prepParameters(
-                BindExpr(
-                  s"$p <- pure (${pTag(arity, f)} ${freeVars.mkString(" ")})",
-                  p,
-                  List(c, PartialFunValue(f, arity, freeVars.length, tKey))
-                )
-              )
+        // GHC-GRIN style: Always store all freeVars (including closures) as P-tag fields
+        // HPT can track values in P-tag fields - they're treated as node values
+        addTempVariable().flatMap(p =>
+          prepParameters(
+            BindExpr(
+              s"$p <- pure (${pTag(arity, f)} ${freeVars.mkString(" ")})",
+              p,
+              List(c, PartialFunValue(f, arity, freeVars.length, tKey))
             )
-          case false =>
-            // Has nested closures - generate dispatch to create specialized P-tags
-            // This avoids storing P-tags inside P-tags which HPT cannot track
-            generateSpecializedClosureDispatch(c, f, arity, freeVars, closureFreeVars, tKey)
-        }
+          )
+        )
       case c: CaseExpr =>
         addTempVariable().flatMap(p => {
           val doExpr = DoExpr(c, c.indent)
@@ -1100,110 +1036,6 @@ object Grin {
         )
       case Value(v) => State.pure(List(), v)
     }
-
-  /** Generate specialized P-tag dispatch when a closure captures another closure.
-    * Instead of storing P-tags inside P-tags (which HPT can't track), we:
-    * 1. Dispatch on the captured closure to determine its type
-    * 2. Create a specialized P-tag that encodes the captured closure type in the tag name
-    * 3. Don't store the captured closure in the P-tag field
-    *
-    * Example: Instead of `pure (P2c28 f''25)` where f''25 is P1c47, we generate:
-    * ```
-    * case f''25 of
-    *   (P1c47) -> pure (P2c28_c47)
-    *   (P1c51) -> pure (P2c28_c51)
-    * ```
-    */
-  def generateSpecializedClosureDispatch(
-      c: ClosureValue,
-      f: String,
-      arity: Int,
-      freeVars: List[String],
-      closureFreeVars: List[String],
-      tKey: String
-  )(implicit
-      closureMap: Map[String, List[String]] = Map.empty,
-      arityMap: Map[Int, List[String]] = Map.empty,
-      closureTotalArity: Map[String, Int] = Map.empty
-  ): ContextState[Tuple2[List[BindExpr], String]] =
-    // For simplicity, handle the case of a single captured closure
-    // (most common case: closure capturing a function parameter)
-    closureFreeVars match {
-      case capturedVar :: Nil =>
-        // Get the non-closure freeVars (these will still be stored in the P-tag)
-        val nonClosureFreeVars = freeVars.filterNot(isVariablePartialFun)
-
-        // Look up possible closure types for the captured variable
-        // Use the FunctionValue's tKey if available
-        val possibleClosures = lookupClosuresForVariable(capturedVar)
-
-        possibleClosures.isEmpty match {
-          case true =>
-            // Fallback: no known closures, use original behavior
-            // This might still have HPT issues but preserves functionality
-            addTempVariable().flatMap(p =>
-              prepParameters(
-                BindExpr(
-                  s"$p <- pure (${pTag(arity, f)} ${freeVars.mkString(" ")})",
-                  p,
-                  List(c, PartialFunValue(f, arity, freeVars.length, tKey))
-                )
-              )
-            )
-          case false =>
-            // Generate case dispatch on the captured closure
-            for {
-              resultVar <- addTempVariable()
-              clauses = possibleClosures.map { innerClosure =>
-                // Create specialized P-tag name: P2c28_c47 (encodes that inner closure is c47)
-                val specializedTag = pTag(arity, s"${f}_$innerClosure")
-                // Non-closure freeVars are still stored in the P-tag
-                val pureExpr = nonClosureFreeVars.isEmpty match {
-                  case true  => s"pure ($specializedTag)"
-                  case false => s"pure ($specializedTag ${nonClosureFreeVars.mkString(" ")})"
-                }
-                // Pattern matches the inner closure (P1c47, etc.)
-                val pattern = s"(${pTag(1, innerClosure)})"
-                CaseClause(pattern, AppExpr(pureExpr), 1)
-              }
-              // Add default clause that falls back to first closure (should never hit in practice)
-              doExpr = DoExpr(CaseExpr(Value(capturedVar), clauses))
-              bindExpr = BindExpr(
-                show"$resultVar <- $doExpr",
-                resultVar,
-                // Register all specialized P-tags as PartialFunValues
-                possibleClosures.map(inner =>
-                  PartialFunValue(s"${f}_$inner", arity, nonClosureFreeVars.length, tKey)
-                ) :+ c
-              )
-            } yield (List(bindExpr), resultVar)
-        }
-      case _ =>
-        // Multiple captured closures - fall back to original behavior for now
-        // TODO: Handle multiple captured closures with nested dispatch
-        addTempVariable().flatMap(p =>
-          prepParameters(
-            BindExpr(
-              s"$p <- pure (${pTag(arity, f)} ${freeVars.mkString(" ")})",
-              p,
-              List(c, PartialFunValue(f, arity, freeVars.length, tKey))
-            )
-          )
-        )
-    }
-
-  /** Look up possible closure types for a variable that holds a closure.
-    * Uses type key and arity maps to find matching closures.
-    */
-  def lookupClosuresForVariable(
-      varName: String
-  )(implicit
-      closureMap: Map[String, List[String]],
-      arityMap: Map[Int, List[String]]
-  ): List[String] =
-    // For closure variables (with '' suffix), try to find all closures that could match
-    // For now, use arity 1 as default since most captured closures are single-arg functions
-    arityMap.getOrElse(1, Nil)
 
   def getResult(
       expr: Expr
@@ -1220,56 +1052,60 @@ object Grin {
         getResult(BindExpr(s"$p <- $f", p, List(v)))
       )
     case f: FunctionValue => State.pure(List(), f)
-    case a @ AppExpr(e, arity, _, resultPtag) if arity >= 1 =>
+    case a @ AppExpr(e, arity, _, resultPtag, resultClosures) if arity >= 1 =>
       addTempVariable().map(p => {
         val f = toPartialFunVariable(p)
+        // Use closure names as tKey for subsequent dispatch
+        val tKey = resultClosures.mkString(",")
         (
           List(BindExpr(show"$f <- $e", f, List(a))),
           FunctionValue(
             s"$f",
             arity,
             resultPtag,
-            ""
-          ) // Propagate P-tag from apply result
+            tKey
+          ) // Propagate P-tag and closure names from apply result
         )
       })
-    case e: AppExpr  => State.pure(List(), e)
-    case d: DoExpr =>
+    case e: AppExpr => State.pure(List(), e)
+    case d: DoExpr  =>
       // Extract arity and closure names from DoExpr if it contains a dispatch with partial applications
+      // New format: "apply2_T8_i32 f x" or "apply1_i32 f x"
       val dispatchInfo = d.expr match {
         case CaseExpr(_, clauses, _) =>
-          // Extract arity and closure names from case clause results
-          // Format: "apply_P2c28 f x" -> closure "c28", arity from AppExpr
+          // Extract arity and closure names from case clause patterns
+          // Pattern like "(P2c28)" indicates closure c28 at arity 2
           val clauseInfo = clauses.flatMap {
-            case CaseClause(_, AppExpr(repr, arity, _, _), _) if arity > 0 =>
-              // Extract closure name from apply call like "apply_P2c28 f x"
-              val applyPattern = """apply_P(\d+)(\w+)""".r
-              applyPattern.findFirstMatchIn(repr).map { m =>
+            case CaseClause(pattern, AppExpr(repr, arity, _, _, closures), _)
+                if arity > 0 =>
+              // Extract closure name from pattern like "(P2c28)"
+              val ptagPattern = """\(P(\d+)(\w+)\)""".r
+              ptagPattern.findFirstMatchIn(pattern).map { m =>
                 val closureName = m.group(2) // e.g., "c28"
                 (arity, closureName)
               }
             case _ => None
           }
           clauseInfo.headOption.map { case (arity, _) =>
-            val closures = clauseInfo.map(_._2)
+            val closures = clauseInfo.map(_._2).distinct
             (arity, closures)
           }
         case _ => None
       }
       addTempVariable().flatMap(p => {
         dispatchInfo match {
-          case Some((arity, closures)) =>
+          case Some((arity, closures)) if arity > 0 =>
             // Result is a partial application - use FunctionValue with '' suffix
-            // Don't add PartialFunValues - apply functions are generated from original closures
+            // Use closure names as tKey for correct subsequent dispatch
             val varName = toPartialFunVariable(p)
-            val tKey = closures.mkString(",") // e.g., "c28,c37"
+            val tKey = closures.mkString(",")
             State.pure(
               (
                 List(BindExpr(show"$varName <- $d", varName, List(d))),
                 FunctionValue(varName, arity, None, tKey)
               )
             )
-          case None =>
+          case _ =>
             // Result is a value, not a partial application
             getResult(BindExpr(show"$p <- $d", p, List(d)))
         }

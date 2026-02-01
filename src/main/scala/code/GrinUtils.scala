@@ -12,6 +12,7 @@ import core.TypeChecker
 import core.Types.*
 import parser.Info.UnknownInfo
 import core.BuiltIn
+import Syntax.*
 
 object GrinUtils {
   val dummyType = TypeUnit(UnknownInfo)
@@ -93,6 +94,37 @@ object GrinUtils {
     simplified <- TypeChecker.simplifyType(ty)
   } yield typeToKey(simplified)
 
+  /** Extract return type from a typeKey string. For "i32->str->bool", returns
+    * "bool" For "i32->Option[i32]", returns "Option[i32]" For non-arrow types,
+    * returns the type itself
+    */
+  def extractReturnType(typeKey: String): String =
+    typeKey.isEmpty match {
+      case true  => ""
+      case false =>
+        // Find the last "->" that's not inside brackets
+        var depth = 0
+        var lastArrowIdx = -1
+        var i = 0
+        while (i < typeKey.length - 1) {
+          typeKey(i) match {
+            case '[' | '(' | '{' => depth += 1
+            case ']' | ')' | '}' => depth -= 1
+            case '-'
+                if depth == 0 && i + 1 < typeKey.length && typeKey(
+                  i + 1
+                ) == '>' =>
+              lastArrowIdx = i
+            case _ => ()
+          }
+          i += 1
+        }
+        lastArrowIdx >= 0 match {
+          case true  => typeKey.substring(lastArrowIdx + 2) // Skip "->"
+          case false => typeKey // No arrow, return as-is
+        }
+    }
+
   /** Get closure arity without type-checking (avoids De Bruijn index issues) */
   def getClosureArity(c: Term): Int = c match {
     case TermClosure(_, _, _, body) => 1 + getClosureArity(body)
@@ -104,13 +136,22 @@ object GrinUtils {
     * since we only need parameter types for typeKey. For closures without
     * annotations, returns None to rely on arity-based fallback.
     */
-  def getClosureType(c: Term): ContextState[Option[Type]] = c match {
+  def getClosureType(c: Term): ContextState[Option[Type]] =
+    getClosureTypeWithFallback(c)(Env.empty)
+
+  /** Extract closure type with fallback to closureTypesFromBind map. This is
+    * the primary entry point when we have closure type information from
+    * Monomorphization.
+    */
+  def getClosureTypeWithFallback(
+      c: Term
+  )(implicit env: Env): ContextState[Option[Type]] = c match {
     case TermFix(_, body) =>
       // Recursive closure wrapped in fixpoint
-      getClosureType(body)
-    case TermClosure(_, _, Some(paramType), body) =>
+      getClosureTypeWithFallback(body)
+    case TermClosure(_, variable, Some(paramType), body) =>
       // Extract inner closure type (if body is also a closure)
-      getClosureType(body).map {
+      getClosureTypeWithFallback(body).map {
         case Some(bodyType) =>
           // Inner closure - combine types
           Some(TypeArrow(UnknownInfo, paramType, bodyType))
@@ -118,9 +159,16 @@ object GrinUtils {
           // Innermost closure - use Unit as placeholder for return type
           Some(TypeArrow(UnknownInfo, paramType, TypeUnit(UnknownInfo)))
       }
-    case TermClosure(_, _, None, _) =>
-      // No type annotation - return None and rely on arity-based fallback
-      State.pure(None)
+    case TermClosure(_, variable, None, _) =>
+      // No type annotation - check closureTypesFromBind for this variable
+      env.closureTypesFromBind.get(variable) match {
+        case Some(resolvedType) =>
+          // Found in the map - use the resolved type
+          State.pure(Some(resolvedType))
+        case None =>
+          // Not found - return None and rely on arity-based fallback
+          State.pure(None)
+      }
     case _ =>
       // Not a closure
       State.pure(None)
@@ -271,6 +319,59 @@ object GrinUtils {
         } yield result
       case _ => State.pure(None)
     }
+
+  // CallCategory: Categorize function calls following GHC-GRIN pattern
+  // This enables explicit handling of saturated, under-saturated, and over-saturated calls
+  sealed trait CallCategory
+  case class SaturatedCall(fn: String, args: List[String]) extends CallCategory
+  case class UndersaturatedCall(fn: String, args: List[String], remaining: Int)
+      extends CallCategory
+  case class OversaturatedCall(
+      fn: String,
+      initialArgs: List[String],
+      extraArgs: List[String]
+  ) extends CallCategory
+
+  /** Categorize a function call based on arity facts.
+    * @param fn
+    *   Function name
+    * @param args
+    *   Arguments provided
+    * @param expectedArity
+    *   Expected number of arguments (from ArityFact)
+    * @return
+    *   CallCategory indicating saturated, undersaturated, or oversaturated
+    */
+  def categorizeCall(
+      fn: String,
+      args: List[String],
+      expectedArity: Int
+  ): CallCategory = {
+    val providedCount = args.length
+    providedCount.compare(expectedArity) match {
+      case 0          => SaturatedCall(fn, args)
+      case x if x < 0 =>
+        UndersaturatedCall(fn, args, expectedArity - providedCount)
+      case _ =>
+        OversaturatedCall(
+          fn,
+          args.take(expectedArity),
+          args.drop(expectedArity)
+        )
+    }
+  }
+
+  /** Categorize a closure call using ArityFact. For closures, expectedArity =
+    * totalParams - capturedVars (dispatch arity)
+    */
+  def categorizeClosureCall(
+      fn: String,
+      args: List[String],
+      fact: ArityFact
+  ): CallCategory = {
+    val dispatchArity = fact.totalParams - fact.capturedVars
+    categorizeCall(fn, args, dispatchArity)
+  }
 
   object PrimOp:
     val BuiltInOps = BuiltIn.Ops.map(_.operator)

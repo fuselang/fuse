@@ -93,7 +93,7 @@ object Monomorphization {
                   _ <- addBinding(sbind.i, sbind.b)
                   sInsts <- sbind.insts
                     .traverse(instantantionShiftOnContextDiff(_))
-                  b = binds :+ Bind(sbind.i, sbind.b, sInsts)
+                  b = binds :+ Bind(sbind.i, sbind.b, sInsts, sbind.closureTypes)
                 } yield (b, incrShifts(shifts))
               case i =>
                 i.zipWithIndex
@@ -285,7 +285,12 @@ object Monomorphization {
           // Merge self-instantiation with inherited instantiations
           allInsts = selfInstantiation ::: dedupedInsts
           finalInsts = Instantiations.distinct(allInsts)
-        } yield Bind(name, binding, finalInsts)
+          // Extract closure types map for GRIN generation
+          // Maps closure variable name -> specialized type (first type in tys)
+          closureTypesMap = specializedClosureInsts
+            .flatMap(cInst => cInst.tys.headOption.map(ty => cInst.i -> ty))
+            .toMap
+        } yield Bind(name, binding, finalInsts, closureTypesMap)
       case _ =>
         throw new RuntimeException(
           s"can't build specialized binding ${inst.i}"
@@ -393,7 +398,7 @@ object Monomorphization {
           case (b, _, _) =>
             (b, acc.insts)
         }
-      } yield Bind(bind.i, replacedBinding, insts)
+      } yield Bind(bind.i, replacedBinding, insts, bind.closureTypes)
     )
 
   /** Generic handler for term projection replacement */
