@@ -1529,6 +1529,53 @@ fun main() -> Unit
         """)
 
   }
+  test("check generic list map with unit return type") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun map[B](self, f: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(f(h), t.map(f))
+            Nil => Nil[B]
+
+fun main() -> i32
+    let l = Cons(1, Nil)
+    l.map(x => print(int_to_str(x)))
+    0
+        """,
+      CheckOutput(None)
+    )
+  }
+  test("check generic list with fold_right using chained map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    l1.map(r => print(int_to_str(r)))
+    0
+        """,
+      CheckOutput(None)
+    )
+  }
+
 }
 
 class CompilerBuildTests extends CompilerTests {
@@ -2455,9 +2502,9 @@ mapOptionstri32' self2 f''3 =
    p8 <- do
      case f''3 of
       (P1c20) ->
-       c20 v6
+       apply_P1c20 f''3 v6
       (P1c25) ->
-       c25 v6
+       apply_P1c25 f''3 v6
    p9 <- Some'i32 p8
    pure p9
   #default ->
@@ -2471,9 +2518,9 @@ flatmapOptioni32i32' self10 f''11 =
    p16 <- do
      case f''11 of
       (P1c20) ->
-       c20 a14
+       apply_P1c20 f''11 a14
       (P1c25) ->
-       c25 a14
+       apply_P1c25 f''11 a14
    pure p16
   #default ->
    p17 <- None'i32
@@ -2607,16 +2654,19 @@ foldRightListi32i32' as4 z5 f''6 =
  p9 <- fetch as4
  case p9 of
   (CCons x9 xs'10) ->
-   p12'' <- apply_P2c18 f''6 x9
+   p12'' <- apply_P2c18_c28 f''6 x9
    p13 <- foldRightListi32i32' xs'10 z5 f''6
-   p14 <- apply_P1c18 p12'' p13
+   p14 <- apply_P1c18_c28 p12'' p13
    pure p14
   #default ->
    pure z5
 
 mapListi32i32' self14 f''15 =
  p17 <- Nil'i32
- p23 <- pure (P2c18 f''15)
+ p23 <- do
+   case f''15 of
+    (P1c28) ->
+     pure (P2c18_c28)
  foldRightListi32i32' self14 p17 p23
 
 c18 f''1519 h19 t20 =
@@ -2641,20 +2691,21 @@ grinMain _23 =
 c28 v28 =
  _prim_int_add v28 1
 
-apply_P1c18 p39 p40 =
+apply_P1c18_c28 p39 p40 =
  case p39 of
-  (P1c18 p41 p42) ->
-   c18 p41 p42 p40
+  (P1c18_c28 p41) ->
+   inner_c18c28 <- pure (P1c28)
+   c18 $ inner_c18c28 p41 p40
 
-apply_P2c18 p43 p44 =
- case p43 of
-  (P2c18 p45) ->
-   pure (P1c18 p45 p44)
+apply_P2c18_c28 p42 p43 =
+ case p42 of
+  (P2c18_c28 ) ->
+   pure (P1c18_c28 p43)
 
-apply_P1c28 p46 p47 =
- case p46 of
+apply_P1c28 p44 p45 =
+ case p44 of
   (P1c28 ) ->
-   c28  p47
+   c28  p45
 """)
     )
   }
@@ -2754,11 +2805,11 @@ mapwithmapperListi32i32' self4 mapper''5 =
    p11 <- do
      case mapper''5 of
       (P1c39) ->
-       c39 h8
+       apply_P1c39 mapper''5 h8
       (P1c43) ->
-       c43 h8
+       apply_P1c43 mapper''5 h8
       (P1c47) ->
-       c47 h8
+       apply_P1c47 mapper''5 h8
    p12 <- Nil'i32
    p13 <- Cons'i32 p11 p12
    pure p13
@@ -2773,11 +2824,11 @@ mapwithtransformListi32i32' self14 transform''15 =
    p21 <- do
      case transform''15 of
       (P1c39) ->
-       c39 h18
+       apply_P1c39 transform''15 h18
       (P1c43) ->
-       c43 h18
+       apply_P1c43 transform''15 h18
       (P1c47) ->
-       c47 h18
+       apply_P1c47 transform''15 h18
    p22 <- Nil'i32
    p23 <- Cons'i32 p21 p22
    pure p23
@@ -2792,11 +2843,11 @@ mapwithcallbackListi32i32' self24 callback''25 =
    p31 <- do
      case callback''25 of
       (P1c39) ->
-       c39 h28
+       apply_P1c39 callback''25 h28
       (P1c43) ->
-       c43 h28
+       apply_P1c43 callback''25 h28
       (P1c47) ->
-       c47 h28
+       apply_P1c47 callback''25 h28
    p32 <- Nil'i32
    p33 <- Cons'i32 p31 p32
    pure p33
@@ -2910,6 +2961,202 @@ apply_P1c24 p35 p36 =
  case p35 of
   (P1c24 ) ->
    c24  p36
+""")
+    )
+  }
+  test("build generic list with fold_right using chained map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    l1.map(r => print(int_to_str(r)))
+    0
+        """,
+      BuildOutput("""Cons'i32 h0 t1 =
+ store (CCons h0 t1)
+
+Nil'i32 =  store (CNil)
+
+foldrightListi32i32' as4 z5 f''6 =
+ p9 <- fetch as4
+ case p9 of
+  (CCons x9 xs'10) ->
+   p12'' <- do
+     case f''6 of
+      (P2c28_c47) ->
+       apply_P2c28_c47 f''6 x9
+      (P2c28_c51) ->
+       apply_P2c28_c51 f''6 x9
+      (P2c37_c47) ->
+       apply_P2c37_c47 f''6 x9
+      (P2c37_c51) ->
+       apply_P2c37_c51 f''6 x9
+   p13 <- foldrightListi32i32' xs'10 z5 f''6
+   p14 <- do
+     case p12'' of
+      (P1c28_c47) ->
+       apply_P1c28_c47 p12'' p13
+      (P1c28_c51) ->
+       apply_P1c28_c51 p12'' p13
+      (P1c37_c47) ->
+       apply_P1c37_c47 p12'' p13
+      (P1c37_c51) ->
+       apply_P1c37_c51 p12'' p13
+   pure p14
+  #default ->
+   pure z5
+
+foldrightListUnitUnit' as14 z15 f''16 =
+ p19 <- fetch as14
+ case p19 of
+  (CCons x19 xs'20) ->
+   p22'' <- do
+     case f''16 of
+      (P2c28_c47) ->
+       apply_P2c28_c47 f''16 x19
+      (P2c28_c51) ->
+       apply_P2c28_c51 f''16 x19
+      (P2c37_c47) ->
+       apply_P2c37_c47 f''16 x19
+      (P2c37_c51) ->
+       apply_P2c37_c51 f''16 x19
+   p23 <- foldrightListUnitUnit' xs'20 z15 f''16
+   p24 <- do
+     case p22'' of
+      (P1c28_c47) ->
+       apply_P1c28_c47 p22'' p23
+      (P1c28_c51) ->
+       apply_P1c28_c51 p22'' p23
+      (P1c37_c47) ->
+       apply_P1c37_c47 p22'' p23
+      (P1c37_c51) ->
+       apply_P1c37_c51 p22'' p23
+   pure p24
+  #default ->
+   pure z15
+
+mapListi32i32' self24 f''25 =
+ p27 <- Nil'i32
+ p33 <- do
+   case f''25 of
+    (P1c47) ->
+     pure (P2c28_c47)
+    (P1c51) ->
+     pure (P2c28_c51)
+ foldrightListi32i32' self24 p27 p33
+
+c28 f''2529 h29 t30 =
+ p32 <- do
+   case f''2529 of
+    (P1c47) ->
+     apply_P1c47 f''2529 h29
+    (P1c51) ->
+     apply_P1c51 f''2529 h29
+ Cons'i32 p32 t30
+
+mapListUniti32' self33 f''34 =
+ p36 <- Nil'i32
+ p42 <- do
+   case f''34 of
+    (P1c47) ->
+     pure (P2c37_c47)
+    (P1c51) ->
+     pure (P2c37_c51)
+ foldrightListUnitUnit' self33 p36 p42
+
+c37 f''3438 h38 t39 =
+ p41 <- do
+   case f''3438 of
+    (P1c47) ->
+     apply_P1c47 f''3438 h38
+    (P1c51) ->
+     apply_P1c51 f''3438 h38
+ Cons'i32 p41 t39
+
+grinMain _42 =
+ p44 <- Nil'i32
+ p45 <- Cons'i32 3 p44
+ l45 <-  Cons'i32 2 p45
+ p49 <- pure (P1c47 )
+ l149 <-  mapListi32i32' l45 p49
+ p54 <- pure (P1c51 )
+ _54 <-  mapListUniti32' l149 p54
+ pure 0
+
+c47 v47 =
+ _prim_int_add v47 1
+
+c51 r51 =
+ p53 <- _prim_int_str r51
+ _prim_string_print p53
+
+apply_P1c28_c47 p56 p57 =
+ case p56 of
+  (P1c28_c47 p58) ->
+   inner_c28c47 <- pure (P1c47)
+   c28 $ inner_c28c47 p58 p57
+
+apply_P2c28_c47 p59 p60 =
+ case p59 of
+  (P2c28_c47 ) ->
+   pure (P1c28_c47 p60)
+
+apply_P1c28_c51 p61 p62 =
+ case p61 of
+  (P1c28_c51 p63) ->
+   inner_c28c51 <- pure (P1c51)
+   c28 $ inner_c28c51 p63 p62
+
+apply_P2c28_c51 p64 p65 =
+ case p64 of
+  (P2c28_c51 ) ->
+   pure (P1c28_c51 p65)
+
+apply_P1c37_c47 p66 p67 =
+ case p66 of
+  (P1c37_c47 p68) ->
+   inner_c37c47 <- pure (P1c47)
+   c37 $ inner_c37c47 p68 p67
+
+apply_P2c37_c47 p69 p70 =
+ case p69 of
+  (P2c37_c47 ) ->
+   pure (P1c37_c47 p70)
+
+apply_P1c37_c51 p71 p72 =
+ case p71 of
+  (P1c37_c51 p73) ->
+   inner_c37c51 <- pure (P1c51)
+   c37 $ inner_c37c51 p73 p72
+
+apply_P2c37_c51 p74 p75 =
+ case p74 of
+  (P2c37_c51 ) ->
+   pure (P1c37_c51 p75)
+
+apply_P1c47 p76 p77 =
+ case p76 of
+  (P1c47 ) ->
+   c47  p77
+
+apply_P1c51 p78 p79 =
+ case p78 of
+  (P1c51 ) ->
+   c51  p79
 """)
     )
   }
@@ -3620,6 +3867,31 @@ fun main() -> i32
     0
         """,
       ExecutableOutput("0")
+    )
+  }
+  test("execute generic list with fold_right using chained map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    l1.map(r => print(int_to_str(r)))
+    0
+      """,
+      ExecutableOutput("34")
     )
   }
 }

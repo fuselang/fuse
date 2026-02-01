@@ -10,7 +10,7 @@ The Fuse compiler implements monomorphization to convert generic functions into 
 
 ## Test Command
 ```bash
-nix-shell --run "bloop test fuse-test -- 'fuse.CompilerCheckTests.<test-name>'"
+bloop test fuse-test -- 'fuse.CompilerCheckTests.<test-name>'
 ```
 
 ## GRIN Executable
@@ -18,8 +18,6 @@ nix-shell --run "bloop test fuse-test -- 'fuse.CompilerCheckTests.<test-name>'"
 The `grin` executable is available at `/root/grin/result/bin/grin` (added to PATH in `~/.zshrc`).
 
 **Purpose**: GRIN (Graph Reduction Intermediate Notation) is a low-level intermediate representation and compiler for lazy functional languages. It's used as the compilation target for the Fuse compiler.
-
-**IMPORTANT**: GRIN must ALWAYS be invoked through `nix-shell` to ensure proper environment setup and dependencies:
 
 ```bash
 nix-shell --run "grin FILES... [OPTIONS]"
@@ -38,11 +36,9 @@ nix-shell --run "grin FILES... [OPTIONS]"
 
 **Example Usage**:
 ```bash
-# Compile GRIN to executable
-nix-shell --run "grin file.grin --optimize -o output.out -q -C grin/runtime.c -C grin/prim_ops.c"
+grin file.grin --optimize -o output.out -q -C grin/runtime.c -C grin/prim_ops.c
 
-# Lint GRIN code
-nix-shell --run "grin file.grin --lint -C grin/runtime.c -C grin/prim_ops.c"
+grin file.grin --lint -C grin/runtime.c -C grin/prim_ops.c
 ```
 
 **Example Workflow**:
@@ -160,7 +156,7 @@ De Bruijn index bugs often manifest as type errors in later phases (like Grin ge
 
 ## Memory
 
-- add to memory. always use `nix-shell -- run "bloop test fuse-test -- 'fuse.CompilerCheckTests.<test-name'"` to run tests
+- add to memory. always use `bloop test fuse-test -- 'fuse.CompilerCheckTests.<test-name'` to run tests
 - add to memory; always use match case expressions instead of `if` expressions in scala codebase
 - add to memory; always use functional style instead of doing any mutations => pure functions
 - add to memory; always define helper (child) functions below the (parent) function they are used uin
@@ -175,9 +171,7 @@ De Bruijn index bugs often manifest as type errors in later phases (like Grin ge
 - add to memory. always ensure all tests are passing when making incremental changes by running the whole test suite.
 - add to memory. `grin` executable is available at `/root/grin/result/bin/grin` (in PATH). It compiles GRIN intermediate representation to executables via LLVM. The Fuse compiler outputs GRIN code which is then processed by the grin executable.
 - add to memory; always run test to evaluate grin code execution. do not use tmp fuse or grin files
-- add to memory. **CRITICAL**: GRIN must ALWAYS be invoked through `nix-shell` from `/root/fuse`: `nix-shell --run "grin <file.grin> --optimize -o <output> -q -C grin/runtime.c -C grin/prim_ops.c"`. NEVER invoke grin directly without nix-shell wrapper.
 - add to memory. C file paths for grin must be relative (grin/runtime.c, grin/prim_ops.c) not absolute. Wrong paths cause misleading T_Dead errors.
 - add to memory; don't use /tmp folder for grin compilation for simpler execution
 - add to memory; always add `-C grin/prim_ops.c` and `-C grin/runtime.c` when using `grin` cli command to ensure proper compilation
-- add to memory. when invoking grin programmatically (e.g., in Fuse.scala), wrap the command with `nix-shell --run "..."` to ensure proper environment setup
 - add to memory. do not use `private` modifier on functions or vals in scala codebase; keep all members public for easier testing and extensibility

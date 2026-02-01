@@ -435,7 +435,7 @@ object Monomorphization {
     bind,
     inst,
     methodProj =>
-      (methodProj.i == tC.i && methodProj.t == tC.t) match {
+      (methodProj.i == tC.i && methodProj.info == tC.info) match {
         case true =>
           // Found the matching TermMethodProj - update its method name
           TermMethodProj(methodProj.info, methodProj.t, methodName)
