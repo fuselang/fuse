@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/fuselang/fuse/compare/v0.3.1...v0.3.2) (2026-03-14)
+
+
+### Bug Fixes
+
+* support call chain method execution with unit functions ([#10](https://github.com/fuselang/fuse/issues/10)) ([2262776](https://github.com/fuselang/fuse/commit/22627767eec2bfd3cee4de32686f5fdf688ed858))
+
 ## [0.3.1](https://github.com/fuselang/fuse/compare/v0.3.0...v0.3.1) (2026-01-25)
 
 
