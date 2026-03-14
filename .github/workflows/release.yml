@@ -50,8 +50,30 @@ jobs:
           jvm: temurin:17
           apps: sbt
 
-      # Nix for GRIN (with haskell.nix cache)
+      # Resolve GRIN ref to commit SHA for cache key
+      - name: Resolve GRIN commit
+        id: grin-ref
+        run: |
+          GRIN_SHA=$(git ls-remote https://github.com/fuselang/grin.git "${{ env.GRIN_REF }}" | head -1 | cut -f1)
+          if [ -z "$GRIN_SHA" ]; then
+            echo "Could not resolve GRIN ref, will build from source"
+            echo "sha=unknown" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$GRIN_SHA" >> "$GITHUB_OUTPUT"
+            echo "Resolved GRIN ref '${{ env.GRIN_REF }}' to $GRIN_SHA"
+          fi
+
+      # Try to restore cached GRIN binary (includes bin/grin + bundled libs)
+      - name: Cache GRIN binary
+        id: grin-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/grin-cache
+          key: grin-binary-linux-x86_64-${{ steps.grin-ref.outputs.sha }}
+
+      # Nix for GRIN (only if not cached)
       - uses: cachix/install-nix-action@v31
+        if: steps.grin-cache.outputs.cache-hit != 'true'
         with:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
@@ -59,13 +81,37 @@ jobs:
             extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
 
       - uses: nix-community/cache-nix-action@v7
+        if: steps.grin-cache.outputs.cache-hit != 'true'
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', 'flake.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
           gc-max-store-size-linux: 2G
 
       - name: Build toolchain
-        run: ./scripts/build-toolchain.sh --grin-ref "${{ env.GRIN_REF }}"
+        run: |
+          if [ "${{ steps.grin-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "Using cached GRIN binary"
+            ./scripts/build-toolchain.sh --grin-ref "${{ env.GRIN_REF }}" --skip-grin /tmp/grin-cache
+          else
+            ./scripts/build-toolchain.sh --grin-ref "${{ env.GRIN_REF }}"
+          fi
+
+      # Save GRIN binary + bundled Nix libs for future cache hits
+      # Exclude LLVM libs (libclang*, libLTO*, libRemarks*) and GC libs (libgc*, libcord*)
+      # as those are provided by download_llvm and build_gc steps
+      - name: Save GRIN to cache
+        if: steps.grin-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf /tmp/grin-cache
+          mkdir -p /tmp/grin-cache/bin /tmp/grin-cache/lib
+          TOOLCHAIN="/tmp/fuse-build/toolchain"
+          cp "$TOOLCHAIN/bin/grin" /tmp/grin-cache/bin/
+          for lib in "$TOOLCHAIN"/lib/lib*.so*; do
+            [ -f "$lib" ] || continue
+            name="$(basename "$lib")"
+            case "$name" in libclang*|libLTO*|libRemarks*|libgc*|libcord*) continue ;; esac
+            cp "$lib" /tmp/grin-cache/lib/
+          done
 
       - name: Free disk space
         run: sudo rm -rf /nix && df -h
@@ -79,7 +125,7 @@ jobs:
     name: Build macOS ARM64
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created || github.event_name == 'workflow_dispatch' }}
-    runs-on: macos-14
+    runs-on: macos-14-xlarge
     steps:
       - uses: actions/checkout@v4
 
@@ -92,8 +138,30 @@ jobs:
           jvm: temurin:17
           apps: sbt
 
-      # Nix for GRIN
+      # Resolve GRIN ref to commit SHA for cache key
+      - name: Resolve GRIN commit
+        id: grin-ref
+        run: |
+          GRIN_SHA=$(git ls-remote https://github.com/fuselang/grin.git "${{ env.GRIN_REF }}" | head -1 | cut -f1)
+          if [ -z "$GRIN_SHA" ]; then
+            echo "Could not resolve GRIN ref, will build from source"
+            echo "sha=unknown" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$GRIN_SHA" >> "$GITHUB_OUTPUT"
+            echo "Resolved GRIN ref '${{ env.GRIN_REF }}' to $GRIN_SHA"
+          fi
+
+      # Try to restore cached GRIN binary (includes bin/grin + bundled libs)
+      - name: Cache GRIN binary
+        id: grin-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/grin-cache
+          key: grin-binary-macos-arm64-${{ steps.grin-ref.outputs.sha }}
+
+      # Nix for GRIN (only if not cached)
       - uses: cachix/install-nix-action@v31
+        if: steps.grin-cache.outputs.cache-hit != 'true'
         with:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
@@ -101,13 +169,37 @@ jobs:
             extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
 
       - uses: nix-community/cache-nix-action@v7
+        if: steps.grin-cache.outputs.cache-hit != 'true'
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', 'flake.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
           gc-max-store-size-macos: 3G
 
       - name: Build toolchain
-        run: ./scripts/build-toolchain.sh --grin-ref "${{ env.GRIN_REF }}"
+        run: |
+          if [ "${{ steps.grin-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "Using cached GRIN binary"
+            ./scripts/build-toolchain.sh --grin-ref "${{ env.GRIN_REF }}" --skip-grin /tmp/grin-cache
+          else
+            ./scripts/build-toolchain.sh --grin-ref "${{ env.GRIN_REF }}"
+          fi
+
+      # Save GRIN binary + bundled Nix libs for future cache hits
+      # Exclude LLVM libs (libclang*, libLTO*, libRemarks*) and GC libs (libgc*, libcord*)
+      # as those are provided by download_llvm and build_gc steps
+      - name: Save GRIN to cache
+        if: steps.grin-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf /tmp/grin-cache
+          mkdir -p /tmp/grin-cache/bin /tmp/grin-cache/lib
+          TOOLCHAIN="/tmp/fuse-build/toolchain"
+          cp "$TOOLCHAIN/bin/grin" /tmp/grin-cache/bin/
+          for lib in "$TOOLCHAIN"/lib/lib*.dylib*; do
+            [ -f "$lib" ] || continue
+            name="$(basename "$lib")"
+            case "$name" in libclang*|libLTO*|libRemarks*|libgc*|libcord*) continue ;; esac
+            cp "$lib" /tmp/grin-cache/lib/
+          done
 
       - uses: actions/upload-artifact@v4
         with:

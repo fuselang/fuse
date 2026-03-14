@@ -12,7 +12,7 @@
 #   ./scripts/build-toolchain.sh                    # Auto-detect platform
 #   ./scripts/build-toolchain.sh --grin-ref boehm-gc # Specify GRIN version
 #   ./scripts/build-toolchain.sh --output-dir ./out # Specify output directory
-#   ./scripts/build-toolchain.sh --skip-grin /path  # Use pre-built GRIN
+#   ./scripts/build-toolchain.sh --skip-grin /path  # Use pre-built GRIN binary or cached dir
 #   ./scripts/build-toolchain.sh --skip-fuse        # Skip Fuse compiler build
 #
 # Linux builds use Docker (manylinux2014) for maximum compatibility.
@@ -505,7 +505,12 @@ build_linux_in_docker() {
     fi
 
     # Build or copy GRIN (on host with Nix - slow step)
-    if [ -n "$grin_bin" ] && [ -f "$grin_bin" ]; then
+    if [ -n "$grin_bin" ] && [ -d "$grin_bin" ]; then
+        say "Using cached GRIN directory: $grin_bin"
+        cp "$grin_bin/bin/grin" "${toolchain_dir}/bin/grin"
+        chmod +x "${toolchain_dir}/bin/grin"
+        cp "$grin_bin"/lib/* "${toolchain_dir}/lib/" 2>/dev/null || true
+    elif [ -n "$grin_bin" ] && [ -f "$grin_bin" ]; then
         say "Using pre-built GRIN: $grin_bin"
         cp "$grin_bin" "${toolchain_dir}/bin/grin"
         chmod +x "${toolchain_dir}/bin/grin"
@@ -551,7 +556,12 @@ build_macos_native() {
     fi
 
     # Build or copy GRIN (slow step)
-    if [ -n "$grin_bin" ] && [ -f "$grin_bin" ]; then
+    if [ -n "$grin_bin" ] && [ -d "$grin_bin" ]; then
+        say "Using cached GRIN directory: $grin_bin"
+        cp "$grin_bin/bin/grin" "${toolchain_dir}/bin/grin"
+        chmod +x "${toolchain_dir}/bin/grin"
+        cp "$grin_bin"/lib/* "${toolchain_dir}/lib/" 2>/dev/null || true
+    elif [ -n "$grin_bin" ] && [ -f "$grin_bin" ]; then
         say "Using pre-built GRIN: $grin_bin"
         cp "$grin_bin" "${toolchain_dir}/bin/grin"
         chmod +x "${toolchain_dir}/bin/grin"
@@ -588,7 +598,7 @@ USAGE:
 OPTIONS:
     --grin-ref <ref>      GRIN git ref (default: $DEFAULT_GRIN_REF)
     --output-dir <path>   Output directory (default: ./output)
-    --skip-grin <path>    Path to pre-built GRIN binary
+    --skip-grin <path>    Path to pre-built GRIN binary or cached directory
     --skip-fuse           Skip building Fuse compiler (built by default)
     -h, --help            Print this help
 
@@ -620,7 +630,7 @@ main() {
             --skip-grin)
                 shift
                 grin_bin="$1"
-                [ ! -f "$grin_bin" ] && err "GRIN binary not found: $grin_bin"
+                [ ! -e "$grin_bin" ] && err "GRIN path not found: $grin_bin"
                 ;;
             --skip-fuse)
                 build_fuse="false"
