@@ -28,7 +28,8 @@ object Shifting {
           i.cls,
           i.r
         )
-      )
+      ),
+      b.closureTypes.map { case (name, ty) => (name, typeShiftAbove(d, c, ty)) }
     )
 
   def bindingShift(d: Int, b: Binding, c: Int = 0): Binding = b match {

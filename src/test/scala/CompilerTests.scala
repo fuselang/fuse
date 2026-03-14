@@ -1529,6 +1529,53 @@ fun main() -> Unit
         """)
 
   }
+  test("check generic list map with unit return type") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun map[B](self, f: A -> B) -> List[B]
+        match self:
+            Cons(h, t) => Cons(f(h), t.map(f))
+            Nil => Nil[B]
+
+fun main() -> i32
+    let l = Cons(1, Nil)
+    l.map(x => print(int_to_str(x)))
+    0
+        """,
+      CheckOutput(None)
+    )
+  }
+  test("check generic list with fold_right using chained map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    l1.map(r => print(int_to_str(r)))
+    0
+        """,
+      CheckOutput(None)
+    )
+  }
+
 }
 
 class CompilerBuildTests extends CompilerTests {
@@ -2162,12 +2209,12 @@ None =  store (CNone)
 Some t10 =
  store (CSome t10)
 
-grinMain _2 =
- o4 <-  Some 5
- p7 <- fetch o4
- case p7 of
-  (CSome v7) ->
-   pure v7
+grinMain _1 =
+ o3 <-  Some 5
+ p6 <- fetch o3
+ case p6 of
+  (CSome v6) ->
+   pure v6
   #default ->
    pure 1""")
     )
@@ -2186,17 +2233,17 @@ fun main() -> i32
         None => 1
         """,
       BuildOutput("""
-None'i32 =  store (CNone)
+None'i32 =  store (CNonei32)
 
 Some'i32 t10 =
- store (CSome t10)
+ store (CSomei32 t10)
 
-grinMain _2 =
- o3 <-  Some'i32 5
- p6 <- fetch o3
- case p6 of
-  (CSome v6) ->
-   pure v6
+grinMain _1 =
+ o2 <-  Some'i32 5
+ p5 <- fetch o2
+ case p5 of
+  (CSomei32 v5) ->
+   pure v5
   #default ->
    pure 1
         """)
@@ -2220,35 +2267,35 @@ fun main() -> i32
     o.map(a => a + 1)
     0
         """,
-      BuildOutput("""None'i32 =  store (CNone)
+      BuildOutput("""None'i32 =  store (CNonei32)
 
 Some'i32 t10 =
- store (CSome t10)
+ store (CSomei32 t10)
 
-mapOptioni32i32' self2 f''3 =
- p6 <- fetch self2
- case p6 of
-  (CSome v6) ->
-   p8 <- apply_P1c13 f''3 v6
-   p9 <- Some'i32 p8
-   pure p9
+mapOptioni32i32' self1 f''2 =
+ p5 <- fetch self1
+ case p5 of
+  (CSomei32 v5) ->
+   p7 <- apply1_i32 f''2 v5
+   p8 <- Some'i32 p7
+   pure p8
   #default ->
-   p10 <- None'i32
-   pure p10
+   p9 <- None'i32
+   pure p9
 
-grinMain _10 =
- o11 <-  Some'i32 5
- p15 <- pure (P1c13 )
- _15 <-  mapOptioni32i32' o11 p15
+grinMain _9 =
+ o10 <-  Some'i32 5
+ p18 <- pure (P1c12 )
+ _18 <-  mapOptioni32i32' o10 p18
  pure 0
 
-c13 a13 =
- _prim_int_add a13 1
+c12 a12 =
+ _prim_int_add a12 1
 
-apply_P1c13 p17 p18 =
- case p17 of
-  (P1c13 ) ->
-   c13  p18
+apply1_i32 p20 p21 =
+ case p20 of
+  (P1c12) ->
+   c12 p21
 """)
     )
   }
@@ -2273,37 +2320,36 @@ fun main() -> i32
     o.map(a => a + 1)
     0
         """,
-      BuildOutput("""
-Some'i32 t10 =
- store (CSome t10)
+      BuildOutput("""Some'i32 t10 =
+ store (CSomei32 t10)
 
-None'i32 =  store (CNone)
+None'i32 =  store (CNonei32)
 
-mapOptionFunctori32i32' self2 f''3 =
- p6 <- fetch self2
- case p6 of
-  (CSome v6) ->
-   p8 <- apply_P1c13 f''3 v6
-   p9 <- Some'i32 p8
-   pure p9
+mapOptionFunctori32i32' self1 f''2 =
+ p5 <- fetch self1
+ case p5 of
+  (CSomei32 v5) ->
+   p7 <- apply1_i32 f''2 v5
+   p8 <- Some'i32 p7
+   pure p8
   #default ->
-   p10 <- None'i32
-   pure p10
+   p9 <- None'i32
+   pure p9
 
-grinMain _10 =
- o11 <-  Some'i32 5
- p15 <- pure (P1c13 )
- _15 <-  mapOptionFunctori32i32' o11 p15
+grinMain _9 =
+ o10 <-  Some'i32 5
+ p18 <- pure (P1c12 )
+ _18 <-  mapOptionFunctori32i32' o10 p18
  pure 0
 
-c13 a13 =
- _prim_int_add a13 1
+c12 a12 =
+ _prim_int_add a12 1
 
-apply_P1c13 p17 p18 =
- case p17 of
-  (P1c13 ) ->
-   c13  p18
-        """)
+apply1_i32 p20 p21 =
+ case p20 of
+  (P1c12) ->
+   c12 p21
+""")
     )
   }
   test("build minimal generic option") {
@@ -2352,40 +2398,40 @@ fun main() -> i32
         Some(v) => v
         None => 0
         """,
-      BuildOutput("""None'i32 =  store (CNone)
+      BuildOutput("""None'i32 =  store (CNonei32)
 
 Some'i32 t10 =
- store (CSome t10)
+ store (CSomei32 t10)
 
-mapOptioni32i32' self2 f''3 =
- p6 <- fetch self2
- case p6 of
-  (CSome v6) ->
-   p8 <- apply_P1c13 f''3 v6
-   p9 <- Some'i32 p8
-   pure p9
+mapOptioni32i32' self1 f''2 =
+ p5 <- fetch self1
+ case p5 of
+  (CSomei32 v5) ->
+   p7 <- apply1_i32 f''2 v5
+   p8 <- Some'i32 p7
+   pure p8
   #default ->
-   p10 <- None'i32
-   pure p10
+   p9 <- None'i32
+   pure p9
 
-grinMain _10 =
- o11 <-  Some'i32 5
- p15 <- pure (P1c13 )
- o115 <-  mapOptioni32i32' o11 p15
- p18 <- fetch o115
- case p18 of
-  (CSome v18) ->
-   pure v18
+grinMain _9 =
+ o10 <-  Some'i32 5
+ p18 <- pure (P1c12 )
+ o118 <-  mapOptioni32i32' o10 p18
+ p21 <- fetch o118
+ case p21 of
+  (CSomei32 v21) ->
+   pure v21
   #default ->
    pure 0
 
-c13 a13 =
- _prim_int_add a13 1
+c12 a12 =
+ _prim_int_add a12 1
 
-apply_P1c13 p20 p21 =
- case p20 of
-  (P1c13 ) ->
-   c13  p21
+apply1_i32 p23 p24 =
+ case p23 of
+  (P1c12) ->
+   c12 p24
 """)
     )
   }
@@ -2443,22 +2489,20 @@ fun main() -> i32
         Some(v) => 0
         None => 1
         """,
-      BuildOutput("""None'i32 =  store (CNone)
+      BuildOutput("""None'i32 =  store (CNonei32)
 
 Some'i32 t10 =
- store (CSome t10)
+ store (CSomei32 t10)
 
-mapOptionstri32' self2 f''3 =
+Some'str t11 =
+ store (CSomestr t11)
+
+mapOptioni32str' self2 f''3 =
  p6 <- fetch self2
  case p6 of
-  (CSome v6) ->
-   p8 <- do
-     case f''3 of
-      (P1c20) ->
-       c20 v6
-      (P1c25) ->
-       c25 v6
-   p9 <- Some'i32 p8
+  (CSomei32 v6) ->
+   p8 <- apply1_str f''3 v6
+   p9 <- Some'str p8
    pure p9
   #default ->
    p10 <- None'i32
@@ -2467,13 +2511,8 @@ mapOptionstri32' self2 f''3 =
 flatmapOptioni32i32' self10 f''11 =
  p14 <- fetch self10
  case p14 of
-  (CSome a14) ->
-   p16 <- do
-     case f''11 of
-      (P1c20) ->
-       c20 a14
-      (P1c25) ->
-       c25 a14
+  (CSomei32 a14) ->
+   p16 <- apply1_T13_i32 f''11 a14
    pure p16
   #default ->
    p17 <- None'i32
@@ -2481,37 +2520,37 @@ flatmapOptioni32i32' self10 f''11 =
 
 tostrOption' v17 =
  s18 <-  Some'i32 v17
- p22 <- pure (P1c20 )
- mapOptionstri32' s18 p22
+ p26 <- pure (P1c20 )
+ mapOptioni32str' s18 p26
 
 c20 a20 =
  _prim_int_str a20
 
-grinMain _22 =
- o23 <-  Some'i32 5
- p28 <- pure (P1c25 )
- o128 <-  flatmapOptioni32i32' o23 p28
- l30 <-  tostrOption' 5
- p33 <- fetch l30
- case p33 of
-  (CSome v33) ->
+grinMain _26 =
+ o27 <-  Some'i32 5
+ p36 <- pure (P1c29 )
+ o136 <-  flatmapOptioni32i32' o27 p36
+ l38 <-  tostrOption' 5
+ p41 <- fetch l38
+ case p41 of
+  (CSomestr v41) ->
    pure 0
   #default ->
    pure 1
 
-c25 t25 =
- p27 <- _prim_int_add t25 1
- Some'i32 p27
+c29 t29 =
+ p31 <- _prim_int_add t29 1
+ Some'i32 p31
 
-apply_P1c20 p35 p36 =
- case p35 of
-  (P1c20 ) ->
-   c20  p36
+apply1_T13_i32 p43 p44 =
+ case p43 of
+  (P1c29) ->
+   c29 p44
 
-apply_P1c25 p37 p38 =
- case p37 of
-  (P1c25 ) ->
-   c25  p38
+apply1_str p45 p46 =
+ case p45 of
+  (P1c20) ->
+   c20 p46
 """)
     )
   }
@@ -2530,8 +2569,7 @@ fun value(a: State[i32, i32]) -> i32
 fun main() -> i32
   value(State(a => Tuple(a + 1, a + 2)))
         """,
-      BuildOutput("""
-Tuple'i32'i32 t10 t21 =
+      BuildOutput("""Tuple'i32'i32 t10 t21 =
  store (CTuple t10 t21)
 
 State'i32'i32 run''4 =
@@ -2543,7 +2581,7 @@ value a6 =
    case p9 of
     (CState p10) ->
      pure p10
- t13 <-  apply_P1c26 p11'' 1
+ t13 <-  apply1_T7_i32__i32 p11'' 1
  p16 <- fetch t13
  p19 <- do
    case p16 of
@@ -2557,19 +2595,20 @@ value a6 =
  _prim_int_add p19 p24
 
 grinMain _24 =
- p30 <- pure (P1c26 )
- p31 <- State'i32'i32 p30
- value p31
+ p34 <- pure (P1c26 )
+ p35 <- State'i32'i32 p34
+ value p35
 
 c26 a26 =
  p28 <- _prim_int_add a26 1
  p29 <- _prim_int_add a26 2
  Tuple'i32'i32 p28 p29
 
-apply_P1c26 p32 p33 =
- case p32 of
-  (P1c26 ) ->
-   c26  p33""")
+apply1_T7_i32__i32 p36 p37 =
+ case p36 of
+  (P1c26) ->
+   c26 p37
+""")
     )
   }
   test("build generic list with fold right") {
@@ -2599,62 +2638,62 @@ fun main() -> i32
         Nil => 1
         """,
       BuildOutput("""Cons'i32 h0 t1 =
- store (CCons h0 t1)
+ store (CConsi32 h0 t1)
 
-Nil'i32 =  store (CNil)
+Nil'i32 =  store (CNili32)
 
-foldRightListi32i32' as4 z5 f''6 =
- p9 <- fetch as4
- case p9 of
-  (CCons x9 xs'10) ->
-   p12'' <- apply_P2c18 f''6 x9
-   p13 <- foldRightListi32i32' xs'10 z5 f''6
-   p14 <- apply_P1c18 p12'' p13
-   pure p14
+foldRightListi32i32' as2 z3 f''4 =
+ p7 <- fetch as2
+ case p7 of
+  (CConsi32 x7 xs'8) ->
+   p10'' <- apply2_i32_T4 f''4 x7
+   p11 <- foldRightListi32i32' xs'8 z3 f''4
+   p12 <- apply1_i32_T4 p10'' p11
+   pure p12
   #default ->
-   pure z5
+   pure z3
 
-mapListi32i32' self14 f''15 =
- p17 <- Nil'i32
- p23 <- pure (P2c18 f''15)
- foldRightListi32i32' self14 p17 p23
+mapListi32i32' self12 f''13 =
+ p15 <- Nil'i32
+ p21 <- pure (P2c16 f''13)
+ foldRightListi32i32' self12 p15 p21
 
-c18 f''1519 h19 t20 =
- p22 <- apply_P1c28 f''1519 h19
- Cons'i32 p22 t20
+c16 f''1317 h17 t18 =
+ p20 <- apply1_i32 f''1317 h17
+ Cons'i32 p20 t18
 
-grinMain _23 =
- p25 <- Nil'i32
- p26 <- Cons'i32 3 p25
- l26 <-  Cons'i32 2 p26
- p30 <- pure (P1c28 )
- l130 <-  mapListi32i32' l26 p30
- p33 <- fetch l130
- case p33 of
-  (CCons h33 t'34) ->
-   p36 <- _prim_int_str h33
-   _37 <-  _prim_string_print p36
+grinMain _21 =
+ p23 <- Nil'i32
+ p24 <- Cons'i32 3 p23
+ l24 <-  Cons'i32 2 p24
+ p32 <- pure (P1c26 )
+ l132 <-  mapListi32i32' l24 p32
+ p35 <- fetch l132
+ case p35 of
+  (CConsi32 h35 t'36) ->
+   p38 <- _prim_int_str h35
+   _39 <-  _prim_string_print p38
    pure 0
   #default ->
    pure 1
 
-c28 v28 =
- _prim_int_add v28 1
+c26 v26 =
+ _prim_int_add v26 1
 
-apply_P1c18 p39 p40 =
- case p39 of
-  (P1c18 p41 p42) ->
-   c18 p41 p42 p40
+apply1_i32 p41 p42 =
+ case p41 of
+  (P1c26) ->
+   c26 p42
 
-apply_P2c18 p43 p44 =
+apply1_i32_T4 p43 p44 =
  case p43 of
-  (P2c18 p45) ->
-   pure (P1c18 p45 p44)
+  (P1c16 p45 p46) ->
+   c16 p45 p46 p44
 
-apply_P1c28 p46 p47 =
- case p46 of
-  (P1c28 ) ->
-   c28  p47
+apply2_i32_T4 p47 p48 =
+ case p47 of
+  (P2c16 p49) ->
+   pure (P1c16 p49 p48)
 """)
     )
   }
@@ -2677,37 +2716,37 @@ fun main() -> i32
     0
         """,
       BuildOutput("""Cons'i32 h0 t1 =
- store (CCons h0 t1)
+ store (CConsi32 h0 t1)
 
-Nil'i32 =  store (CNil)
+Nil'i32 =  store (CNili32)
 
-simplemapListi32i32' self4 f''5 =
- p8 <- fetch self4
- case p8 of
-  (CCons h8 t'9) ->
-   p11 <- apply_P1c19 f''5 h8
-   p12 <- Nil'i32
-   p13 <- Cons'i32 p11 p12
-   pure p13
+simplemapListi32i32' self2 f''3 =
+ p6 <- fetch self2
+ case p6 of
+  (CConsi32 h6 t'7) ->
+   p9 <- apply1_i32 f''3 h6
+   p10 <- Nil'i32
+   p11 <- Cons'i32 p9 p10
+   pure p11
   #default ->
-   p14 <- Nil'i32
-   pure p14
+   p12 <- Nil'i32
+   pure p12
 
-grinMain _14 =
- p16 <- Nil'i32
- p17 <- Cons'i32 3 p16
- l17 <-  Cons'i32 2 p17
- p21 <- pure (P1c19 )
- l121 <-  simplemapListi32i32' l17 p21
+grinMain _12 =
+ p14 <- Nil'i32
+ p15 <- Cons'i32 3 p14
+ l15 <-  Cons'i32 2 p15
+ p23 <- pure (P1c17 )
+ l123 <-  simplemapListi32i32' l15 p23
  pure 0
 
-c19 v19 =
- _prim_int_add v19 1
+c17 v17 =
+ _prim_int_add v17 1
 
-apply_P1c19 p23 p24 =
- case p23 of
-  (P1c19 ) ->
-   c19  p24
+apply1_i32 p25 p26 =
+ case p25 of
+  (P1c17) ->
+   c17 p26
 """)
     )
   }
@@ -2743,102 +2782,96 @@ fun main() -> i32
     0
         """,
       BuildOutput("""Cons'i32 h0 t1 =
- store (CCons h0 t1)
+ store (CConsi32 h0 t1)
 
-Nil'i32 =  store (CNil)
+Nil'i32 =  store (CNili32)
 
-mapwithmapperListi32i32' self4 mapper''5 =
- p8 <- fetch self4
- case p8 of
-  (CCons h8 t'9) ->
-   p11 <- do
-     case mapper''5 of
-      (P1c39) ->
-       c39 h8
-      (P1c43) ->
-       c43 h8
-      (P1c47) ->
-       c47 h8
+mapwithmapperListi32i32' self2 mapper''3 =
+ p6 <- fetch self2
+ case p6 of
+  (CConsi32 h6 t'7) ->
+   p9 <- do
+     case mapper''3 of
+      (P1c37) ->
+       apply1_i32 mapper''3 h6
+      (P1c45) ->
+       apply1_i32 mapper''3 h6
+      (P1c53) ->
+       apply1_i32 mapper''3 h6
+   p10 <- Nil'i32
+   p11 <- Cons'i32 p9 p10
+   pure p11
+  #default ->
    p12 <- Nil'i32
-   p13 <- Cons'i32 p11 p12
-   pure p13
-  #default ->
-   p14 <- Nil'i32
-   pure p14
+   pure p12
 
-mapwithtransformListi32i32' self14 transform''15 =
- p18 <- fetch self14
- case p18 of
-  (CCons h18 t'19) ->
-   p21 <- do
-     case transform''15 of
-      (P1c39) ->
-       c39 h18
-      (P1c43) ->
-       c43 h18
-      (P1c47) ->
-       c47 h18
+mapwithtransformListi32i32' self12 transform''13 =
+ p16 <- fetch self12
+ case p16 of
+  (CConsi32 h16 t'17) ->
+   p19 <- do
+     case transform''13 of
+      (P1c37) ->
+       apply1_i32 transform''13 h16
+      (P1c45) ->
+       apply1_i32 transform''13 h16
+      (P1c53) ->
+       apply1_i32 transform''13 h16
+   p20 <- Nil'i32
+   p21 <- Cons'i32 p19 p20
+   pure p21
+  #default ->
    p22 <- Nil'i32
-   p23 <- Cons'i32 p21 p22
-   pure p23
-  #default ->
-   p24 <- Nil'i32
-   pure p24
+   pure p22
 
-mapwithcallbackListi32i32' self24 callback''25 =
- p28 <- fetch self24
- case p28 of
-  (CCons h28 t'29) ->
-   p31 <- do
-     case callback''25 of
-      (P1c39) ->
-       c39 h28
-      (P1c43) ->
-       c43 h28
-      (P1c47) ->
-       c47 h28
+mapwithcallbackListi32i32' self22 callback''23 =
+ p26 <- fetch self22
+ case p26 of
+  (CConsi32 h26 t'27) ->
+   p29 <- do
+     case callback''23 of
+      (P1c37) ->
+       apply1_i32 callback''23 h26
+      (P1c45) ->
+       apply1_i32 callback''23 h26
+      (P1c53) ->
+       apply1_i32 callback''23 h26
+   p30 <- Nil'i32
+   p31 <- Cons'i32 p29 p30
+   pure p31
+  #default ->
    p32 <- Nil'i32
-   p33 <- Cons'i32 p31 p32
-   pure p33
-  #default ->
-   p34 <- Nil'i32
-   pure p34
+   pure p32
 
-grinMain _34 =
- p36 <- Nil'i32
- p37 <- Cons'i32 3 p36
- l37 <-  Cons'i32 2 p37
- p41 <- pure (P1c39 )
- l141 <-  mapwithmapperListi32i32' l37 p41
- p45 <- pure (P1c43 )
- l245 <-  mapwithtransformListi32i32' l37 p45
- p49 <- pure (P1c47 )
- l349 <-  mapwithcallbackListi32i32' l37 p49
+grinMain _32 =
+ p34 <- Nil'i32
+ p35 <- Cons'i32 3 p34
+ l35 <-  Cons'i32 2 p35
+ p43 <- pure (P1c37 )
+ l143 <-  mapwithmapperListi32i32' l35 p43
+ p51 <- pure (P1c45 )
+ l251 <-  mapwithtransformListi32i32' l35 p51
+ p59 <- pure (P1c53 )
+ l359 <-  mapwithcallbackListi32i32' l35 p59
  pure 0
 
-c39 x39 =
- _prim_int_add x39 1
+c37 x37 =
+ _prim_int_add x37 1
 
-c43 y43 =
- _prim_int_mul y43 2
+c45 y45 =
+ _prim_int_mul y45 2
 
-c47 z47 =
- _prim_int_add z47 3
+c53 z53 =
+ _prim_int_add z53 3
 
-apply_P1c39 p51 p52 =
- case p51 of
-  (P1c39 ) ->
-   c39  p52
-
-apply_P1c43 p53 p54 =
- case p53 of
-  (P1c43 ) ->
-   c43  p54
-
-apply_P1c47 p55 p56 =
- case p55 of
-  (P1c47 ) ->
-   c47  p56
+apply1_i32 p61 p62 =
+ case p61 of
+  (P1c37) ->
+   c37 p62
+  (P1c45) ->
+   c45 p62
+  (P1c53) ->
+   c53 p62
 """)
     )
   }
@@ -2869,47 +2902,186 @@ fun main() -> i32
         Nil => 1
         """,
       BuildOutput("""Cons'i32 h0 t1 =
- store (CCons h0 t1)
+ store (CConsi32 h0 t1)
 
-Nil'i32 =  store (CNil)
+Nil'i32 =  store (CNili32)
 
-map2Listi32i32' self4 f''5 =
- p19 <- Nil'i32
- iter7 f''5 self4 p19
+map2Listi32i32' self2 f''3 =
+ p17 <- Nil'i32
+ iter5 f''3 self2 p17
 
-iter7 f''58 l8 acc9 =
- p12 <- fetch l8
- case p12 of
-  (CCons h12 t'13) ->
-   p15 <- apply_P1c24 f''58 h12
-   p16 <- Cons'i32 p15 acc9
-   p17 <- iter7 f''58 t'13 p16
-   pure p17
+iter5 f''36 l6 acc7 =
+ p10 <- fetch l6
+ case p10 of
+  (CConsi32 h10 t'11) ->
+   p13 <- apply1_i32 f''36 h10
+   p14 <- Cons'i32 p13 acc7
+   p15 <- iter5 f''36 t'11 p14
+   pure p15
   #default ->
-   pure acc9
+   pure acc7
 
-grinMain _19 =
- p21 <- Nil'i32
- p22 <- Cons'i32 3 p21
- l22 <-  Cons'i32 2 p22
- p26 <- pure (P1c24 )
- l126 <-  map2Listi32i32' l22 p26
- p29 <- fetch l126
- case p29 of
-  (CCons h29 t'30) ->
-   p32 <- _prim_int_str h29
-   _33 <-  _prim_string_print p32
+grinMain _17 =
+ p19 <- Nil'i32
+ p20 <- Cons'i32 3 p19
+ l20 <-  Cons'i32 2 p20
+ p28 <- pure (P1c22 )
+ l128 <-  map2Listi32i32' l20 p28
+ p31 <- fetch l128
+ case p31 of
+  (CConsi32 h31 t'32) ->
+   p34 <- _prim_int_str h31
+   _35 <-  _prim_string_print p34
    pure 0
   #default ->
    pure 1
 
-c24 v24 =
- _prim_int_add v24 1
+c22 v22 =
+ _prim_int_add v22 1
 
-apply_P1c24 p35 p36 =
- case p35 of
-  (P1c24 ) ->
-   c24  p36
+apply1_i32 p37 p38 =
+ case p37 of
+  (P1c22) ->
+   c22 p38
+""")
+    )
+  }
+  test("build generic list with fold right using chained map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    l1.map(r => print(int_to_str(r)))
+    0
+        """,
+      BuildOutput("""Cons'i32 h0 t1 =
+ store (CConsi32 h0 t1)
+
+Cons'Unit h2 t3 =
+ store (CConsUnit h2 t3)
+
+Nil'i32 =  store (CNili32)
+
+foldrightListi32i32' as4 z5 f''6 =
+ p9 <- fetch as4
+ case p9 of
+  (CConsi32 x9 xs'10) ->
+   p12'' <- do
+     case f''6 of
+      (P2c28 _f''6_c28_0) ->
+       apply2_i32_T5 f''6 x9
+      (P2c37 _f''6_c37_0) ->
+       apply2_i32_T6 f''6 x9
+   p13 <- foldrightListi32i32' xs'10 z5 f''6
+   p14 <- do
+     case p12'' of
+      (P1c28 _p12''_c28_0 _p12''_c28_1) ->
+       apply1_i32_T5 p12'' p13
+      (P1c37 _p12''_c37_0 _p12''_c37_1) ->
+       apply1_i32_T6 p12'' p13
+   pure p14
+  #default ->
+   pure z5
+
+foldrightListi32Unit' as14 z15 f''16 =
+ p19 <- fetch as14
+ case p19 of
+  (CConsi32 x19 xs'20) ->
+   p22'' <- do
+     case f''16 of
+      (P2c28 _f''16_c28_0) ->
+       apply2_i32_T5 f''16 x19
+      (P2c37 _f''16_c37_0) ->
+       apply2_i32_T6 f''16 x19
+   p23 <- foldrightListi32Unit' xs'20 z15 f''16
+   p24 <- do
+     case p22'' of
+      (P1c28 _p22''_c28_0 _p22''_c28_1) ->
+       apply1_i32_T5 p22'' p23
+      (P1c37 _p22''_c37_0 _p22''_c37_1) ->
+       apply1_i32_T6 p22'' p23
+   pure p24
+  #default ->
+   pure z15
+
+mapListi32i32' self24 f''25 =
+ p27 <- Nil'i32
+ p33 <- pure (P2c28 f''25)
+ foldrightListi32i32' self24 p27 p33
+
+c28 f''2529 h29 t30 =
+ p32 <- apply1_i32 f''2529 h29
+ Cons'i32 p32 t30
+
+mapListi32Unit' self33 f''34 =
+ p36 <- Nil'i32
+ p42 <- pure (P2c37 f''34)
+ foldrightListi32Unit' self33 p36 p42
+
+c37 f''3438 h38 t39 =
+ p41 <- apply1_unit f''3438 h38
+ Cons'Unit p41 t39
+
+grinMain _42 =
+ p44 <- Nil'i32
+ p45 <- Cons'i32 3 p44
+ l45 <-  Cons'i32 2 p45
+ p53 <- pure (P1c47 )
+ l153 <-  mapListi32i32' l45 p53
+ p62 <- pure (P1c55 )
+ _62 <-  mapListi32Unit' l153 p62
+ pure 0
+
+c47 v47 =
+ _prim_int_add v47 1
+
+c55 r55 =
+ p57 <- _prim_int_str r55
+ _prim_string_print p57
+
+apply1_i32 p64 p65 =
+ case p64 of
+  (P1c47) ->
+   c47 p65
+
+apply1_i32_T5 p66 p67 =
+ case p66 of
+  (P1c28 p68 p69) ->
+   c28 p68 p69 p67
+
+apply1_i32_T6 p70 p71 =
+ case p70 of
+  (P1c37 p72 p73) ->
+   c37 p72 p73 p71
+
+apply1_unit p74 p75 =
+ case p74 of
+  (P1c55) ->
+   c55 p75
+
+apply2_i32_T5 p76 p77 =
+ case p76 of
+  (P2c28 p78) ->
+   pure (P1c28 p78 p77)
+
+apply2_i32_T6 p79 p80 =
+ case p79 of
+  (P2c37 p81) ->
+   pure (P1c37 p81 p80)
 """)
     )
   }
@@ -3620,6 +3792,31 @@ fun main() -> i32
     0
         """,
       ExecutableOutput("0")
+    )
+  }
+  test("execute generic list with fold_right using chained map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    l1.map(r => print(int_to_str(r)))
+    0
+      """,
+      ExecutableOutput("43")
     )
   }
 }

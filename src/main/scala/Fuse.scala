@@ -123,6 +123,7 @@ object Fuse
     val grinCommand = Seq(
       "grin",
       paths.grin.toString,
+      "--no-prelude",
       "--gc=boehm",
       "--optimize",
       "-o",
