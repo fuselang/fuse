@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/fuselang/fuse/compare/v0.3.2...v0.3.3) (2026-03-14)
+
+
+### Bug Fixes
+
+* mac os release job with caching ([8bd49ce](https://github.com/fuselang/fuse/commit/8bd49ce03a046acd6e4208ec4b33be7f7937d7aa))
+
 ## [0.3.2](https://github.com/fuselang/fuse/compare/v0.3.1...v0.3.2) (2026-03-14)
 
 
