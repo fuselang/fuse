@@ -238,6 +238,7 @@ object Bindings {
       i: String,
       b: Binding,
       insts: List[Instantiation] = List(),
-      closureTypes: Map[String, Type] = Map.empty  // Closure name -> resolved type for GRIN generation
+      closureTypes: Map[String, Type] =
+        Map.empty // Closure name -> resolved type for GRIN generation
   )
 }

@@ -18,6 +18,7 @@ import scala.annotation.tailrec
 import scala.util.*
 import fuse.Utils.*
 import fuse.SpecializedMethodUtils
+import core.Instantiations.Resolution
 import core.Instantiations.Instantiation
 
 object TypeChecker {
@@ -54,7 +55,9 @@ object TypeChecker {
     case TypeAbbBind(ty, None) =>
       pureKindOf(ty).map(k => (TypeAbbBind(ty, Some(k)), Nil))
     case TermAbbBind(term, None) =>
-      pureInfer(term).map((ty, insts) => (TermAbbBind(term, Some(ty)), insts))
+      pureInfer(term).map { case (ty, insts) =>
+        (TermAbbBind(term, Some(ty)), insts)
+      }
     case _ => EitherT.rightT(b, Nil)
   }
 
@@ -122,9 +125,7 @@ object TypeChecker {
             tys =
               List(resolvedType), // The resolved parameter type with TypeIds
             cls = List(),
-            r = Some(
-              -1
-            ) // Special marker: -1 indicates closure param instantiation
+            r = Resolution.Closure
           )
         } yield (TypeArrow(info, eAS1, typeShift(-1, eCS)), closureInst :: aI)
       case TermAbs(info, variable, variableType, expr, returnType) =>
@@ -854,7 +855,7 @@ object TypeChecker {
       case (TermTrue(_), TypeBool(_))        => (Nil, Nil).pure
       case (TermFalse(_), TypeBool(_))       => (Nil, Nil).pure
       // ->I :: (λx.e, A→B)
-      case (TermClosure(_, arg, None, exp), TypeArrow(_, argT, expT)) =>
+      case (TermClosure(info, arg, None, exp), TypeArrow(_, argT, expT)) =>
         for {
           b <- EitherT.liftF(addBinding(arg, VarBind(argT)))
           (insts, sol) <- check(exp, expT) // Γ,α ⊢ e ⇐ A ⊣ ∆,α,Θ
@@ -862,8 +863,25 @@ object TypeChecker {
           // type solution, as its solution might be lost in the
           // inferring of a nested expression.
           redArgT <- apply(argT)
+          redExpT <- apply(expT)
           _ <- EitherT.liftF(peel(b))
-        } yield (insts, sol :+ TypeESolutionBind(redArgT))
+          // Resolve type constructors to TypeIds while context is valid
+          resolvedArgType <- EitherT.liftF(State.inspect { (ctx: Context) =>
+            resolveTypeConstructors(redArgT, ctx)
+          })
+          resolvedExpType <- EitherT.liftF(State.inspect { (ctx: Context) =>
+            resolveTypeConstructors(redExpT, ctx)
+          })
+          // Build closure instantiation with full arrow type (needed for code gen).
+          // The full type enables correct return type inference during code generation.
+          closureInst = Instantiation(
+            i = arg,
+            term = TermClosure(info, arg, None, exp),
+            tys = List(TypeArrow(info, resolvedArgType, resolvedExpType)),
+            cls = List(),
+            r = Resolution.Closure
+          )
+        } yield (insts :+ closureInst, TypeESolutionBind(redArgT) +: sol)
       // ∀I :: (e, ∀α.A)
       case (exp, TypeAll(_, uA, k, cls, tpe)) =>
         for {

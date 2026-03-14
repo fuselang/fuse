@@ -31,7 +31,16 @@ object Compiler {
       result = compile(command, code, fileName)
       value <- result match {
         case Right(compiledCode) =>
-          IO.blocking(destination.write(compiledCode.getBytes)).map(_ => None)
+          val fullCode = command match {
+            case BuildFile(_) =>
+              val prelude = Grin.generatePrelude(compiledCode)
+              prelude.isEmpty match {
+                case true  => compiledCode
+                case false => s"$prelude\n\n$compiledCode"
+              }
+            case _ => compiledCode
+          }
+          IO.blocking(destination.write(fullCode.getBytes)).map(_ => None)
         case Left(error) => IO(Some(error))
       }
     } yield value

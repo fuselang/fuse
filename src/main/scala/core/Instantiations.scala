@@ -32,12 +32,19 @@ object Instantiations {
     case _          => false
   }
 
+  enum Resolution {
+    case Unresolved
+    case Closure
+    case DeferredDataConstr
+    case Resolved(index: Int)
+  }
+
   case class Instantiation(
       i: String,
       term: Term,
       tys: List[Type],
       cls: List[TypeClass] = List(),
-      r: Option[Int] = None
+      r: Resolution = Resolution.Unresolved
   ) {
     def isTypeResolved(): StateEither[Boolean] =
       for {
@@ -75,13 +82,20 @@ object Instantiations {
     val tys = solutions.map(_.t)
     val cls = solutions.map(_.cls).flatten
     val rootTerm = findRootTerm(t)
-
     (t, rootTerm, solutions) match {
       case (app: TermApp, assocProj @ TermAssocProj(_, ty, method), Nil) =>
         // Static method calls without type solutions - no instantiation needed
         acc.pure[StateEither]
       case (_, _, Nil) =>
         acc.pure[StateEither]
+      case (assocProj @ TermAssocProj(_, ty, method), _, _) if tys.nonEmpty =>
+        // Direct static method term (not yet wrapped in TermApp)
+        // Captures type solutions from innermost TypeAll unwrapping
+        for {
+          typeName <- EitherT.liftF(getNameFromType(ty))
+          methodID = Desugar.toMethodID(method, typeName)
+          extractedTys = extractTypeArgs(tys)
+        } yield acc :+ Instantiation(methodID, assocProj, extractedTys, cls)
       case (_: TermApp, methodTerm @ TermMethodProj(_, obj, method), _) =>
         for {
           (objType, _) <- pureInfer(
@@ -116,7 +130,43 @@ object Instantiations {
           typeName <- EitherT.liftF(getNameFromType(ty))
           methodID = Desugar.toMethodID(method, typeName)
           extractedTys = extractTypeArgs(tys)
-        } yield acc :+ Instantiation(methodID, assocProj, extractedTys, cls)
+          existingInst = acc.find(_.i == methodID)
+          // Look up the method's type arity to limit accumulation
+          typeArity <- existingInst match {
+            case Some(_) =>
+              for {
+                idx <- EitherT.liftF(State.inspect { (ctx: Context) =>
+                  nameToIndex(ctx, methodID)
+                })
+                arity <- idx match {
+                  case Some(i) =>
+                    getType(UnknownInfo, i).map(getTypeArrity).recover {
+                      case _ => 0
+                    }
+                  case None => 0.pure[StateEither]
+                }
+              } yield arity
+            case None => 0.pure[StateEither]
+          }
+        } yield existingInst match {
+          // If an inst already exists (from direct TermAssocProj case or prior TermApp layer),
+          // append new types only if we haven't reached the type arity yet
+          case Some(existing) if existing.tys.length < typeArity =>
+            acc.map {
+              case i if i.i == methodID =>
+                val remaining = typeArity - i.tys.length
+                Instantiation(
+                  i.i,
+                  i.term,
+                  i.tys ::: extractedTys.take(remaining),
+                  i.cls
+                )
+              case e => e
+            }
+          case Some(_) => acc // Already has enough types
+          case None    =>
+            acc :+ Instantiation(methodID, assocProj, extractedTys, cls)
+        }
 
       case (app: TermApp, _, _) =>
         for {
@@ -127,11 +177,17 @@ object Instantiations {
           )
           fInsts <- acc.filterA(_.isTypeResolved().map(_ == false))
           r = fInsts.find(_.term == rootTerm) match {
-            case Some(_) =>
-              acc.map {
-                case i if i.term == rootTerm && isFormedSolution =>
-                  Instantiation(i.i, i.term, i.tys ::: tys, i.cls)
-                case e => e
+            case Some(existing) =>
+              // Don't accumulate types onto TermAssocProj instantiations -
+              // they already have their types managed by the TermAssocProj case above
+              existing.term match {
+                case _: TermAssocProj => acc
+                case _                =>
+                  acc.map {
+                    case i if i.term == rootTerm && isFormedSolution =>
+                      Instantiation(i.i, i.term, i.tys ::: tys, i.cls)
+                    case e => e
+                  }
               }
             case _ => acc
           }
@@ -160,7 +216,6 @@ object Instantiations {
             case Some(name) => name.pure[StateEither]
             case None       => TypeError.format(NotFoundTypeError(info))
           }
-          // Skip data constructors with unresolved type parameters
           // Data constructors are uppercase and don't contain specialized suffix
           isDataConstructor = name.headOption.exists(_.isUpper) && !name
             .contains("#")
@@ -169,12 +224,22 @@ object Instantiations {
           isClosureParam <- EitherT.liftF(
             State.inspect(Context.isClosureParameter(_, idx))
           )
-          shouldSkip = (isAllPureTypeVars(
-            tys
-          ) && isDataConstructor) || isClosureParam
-          result <- shouldSkip match {
-            case true  => acc.pure[StateEither]
-            case false =>
+          result <- (
+            isClosureParam,
+            isAllPureTypeVars(tys) && isDataConstructor
+          ) match {
+            case (true, _) => acc.pure[StateEither]
+            case (_, true) =>
+              // Deferred data constructor instantiation - these will be specialized
+              // during buildSpecializedBind with concrete types
+              (acc :+ Instantiation(
+                name,
+                termVar,
+                tys,
+                cls,
+                Resolution.DeferredDataConstr
+              )).pure[StateEither]
+            case _ =>
               (acc :+ Instantiation(name, termVar, tys, cls)).pure[StateEither]
           }
         } yield result

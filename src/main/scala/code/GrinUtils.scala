@@ -248,6 +248,27 @@ object GrinUtils {
         .getOrElse(getTypeFallbackName(ty))
   }
 
+  def getTypeArgSuffix(ty: Type): ContextState[String] = ty match {
+    case TypeApp(_, _, arg) => typeArgToString(arg)
+    case _                  => State.pure("")
+  }
+
+  def typeArgToString(ty: Type): ContextState[String] = ty match {
+    case TypeInt(_)         => State.pure("i32")
+    case TypeFloat(_)       => State.pure("f32")
+    case TypeString(_)      => State.pure("str")
+    case TypeBool(_)        => State.pure("bool")
+    case TypeUnit(_)        => State.pure("Unit")
+    case TypeId(_, name)    => State.pure(name)
+    case TypeVar(_, idx, _) => getNameFromIndex(idx)
+    case TypeApp(_, t1, t2) =>
+      for {
+        s1 <- typeArgToString(t1)
+        s2 <- typeArgToString(t2)
+      } yield s1 + s2
+    case _ => State.pure("")
+  }
+
   private def getTypeFallbackName(ty: Type): ContextState[String] = ty match {
     case TypeArrow(_, _, _)     => State.pure("Function")
     case TypeAll(_, _, _, _, _) => State.pure("Generic")

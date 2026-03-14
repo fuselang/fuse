@@ -57,20 +57,22 @@ void cstring(char* buffer, struct string* s){
 #endif
 }
 
-void _prim_string_print(struct string* p1){
+int64_t _prim_string_print(struct string* p1){
 #ifdef DEBUG
     printf("_prim_string_print(%d)\n", (int)p1);
 #endif
     for(int i = 0; i < p1->length; i++) {
         putchar(p1->data[i]);
     }
+    return 0;
 }
 
-void _prim_int_print(int64_t p1) {
+int64_t _prim_int_print(int64_t p1) {
 #ifdef DEBUG
     printf("_prim_int_print(%d)\n", (int)p1);
 #endif
     printf("%ld", p1);
+    return 0;
 }
 
 struct string* _prim_read_string() {
@@ -90,19 +92,21 @@ struct string* _prim_read_string() {
     }
 }
 
-void _prim_usleep(int64_t p1) {
+int64_t _prim_usleep(int64_t p1) {
 #ifdef DEBUG
     printf("_prim_usleep(%ld)\n", p1);
 #endif
     usleep(p1); // p1 microseconds
+    return 0;
 }
 
-void _prim_error(struct string* p1) {
+int64_t _prim_error(struct string* p1) {
 #ifdef DEBUG
     printf("_prim_error(%d)\n", (int)p1);
 #endif
     _prim_string_print(p1);
     exit(-1);
+    return 0;
 }
 
 int64_t _prim_ffi_file_eof(int64_t p1) {

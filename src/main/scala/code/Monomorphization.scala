@@ -16,16 +16,35 @@ import core.Instantiations
 import core.Context.addBinding
 import code.GrinUtils.toContextState
 import core.Instantiations.Instantiation
+import core.Instantiations.Resolution
 import core.Context
 import core.Shifting.*
 import core.Desugar.MethodNamePrefix
 import fuse.SpecializedMethodUtils
 import parser.Info.UnknownInfo
+import parser.Info.Info
 import core.Desugar
 import core.Desugar.toTypeInstanceMethodID
 import code.GrinUtils.toContextStateOption
 
 object Monomorphization {
+
+  case class ReplacementResult(binding: Binding, insts: List[Instantiation])
+
+  case class SpecializationContext(
+      parentTys: List[Type],
+      specCtxLength: Int,
+      shiftCtxLength: Int,
+      specializedTerm: Term,
+      regularTypeVarIndices: List[Int],
+      deferredDataConstrSpecializations: Map[Instantiation, List[Type]]
+  )
+
+  case class DataConstrContext(
+      regularTypeVarIndices: List[Int],
+      regularCtxLen: Option[Int],
+      numParentTypeParams: Int
+  )
 
   /** Replaces each generic function invocation with monomorphic function.
     *
@@ -43,23 +62,37 @@ object Monomorphization {
   def replace(binds: List[Bind]): List[Bind] =
     replaceM(binds).runEmptyA.value
 
-  def replaceM(binds: List[Bind]): ContextState[List[Bind]] = {
-    // Collect instantiations, filtering out closure parameter instantiations (r == Some(-1))
-    // These are only used during specialization in buildSpecializedBind, not for creating new binds
+  def replaceM(
+      binds: List[Bind],
+      savedGenericBinds: Map[String, Bind] = Map.empty
+  ): ContextState[List[Bind]] = {
     val allInsts = Instantiations.distinct(binds.map(_.insts).flatten)
-    val insts = allInsts.filter(_.r != Some(-1))
+    val insts = allInsts.filter(i =>
+      i.r match {
+        case Resolution.Closure | Resolution.DeferredDataConstr => false
+        case _                                                  => true
+      }
+    )
 
     insts match {
       case Nil => binds.pure[ContextState]
       case _   =>
+        // Save generic binds (TermTAbs) before specialization replaces them
+        val newSavedGenericBinds = savedGenericBinds ++ binds.collect {
+          case b @ Bind(name, TermAbbBind(_: TermTAbs, _), _, _)
+              if !name.contains("#") =>
+            name -> b
+        }.toMap
         for {
-          // Create specialilized functions for each bindig that has corresponding
-          // instantiation.
           specializedBinds <- toSpecializedBinds(binds, insts)
-          // Replace each generic function invocation with a specialized function.
-          modifiedBinds <- specializedBinds.traverse(replaceInstantiations(_))
-          // Do a recursive replace until no generic instantiations are found.
-          ibinds <- replaceM(modifiedBinds)
+          bindsWithDataConstrSpecs <- createMissingDataConstrSpecs(
+            specializedBinds,
+            newSavedGenericBinds
+          )
+          modifiedBinds <- bindsWithDataConstrSpecs.traverse(
+            replaceInstantiations(_)
+          )
+          ibinds <- replaceM(modifiedBinds, newSavedGenericBinds)
         } yield ibinds
     }
   }
@@ -80,39 +113,49 @@ object Monomorphization {
       binds: List[Bind],
       insts: List[Instantiation]
   ): ContextState[List[Bind]] =
-    binds
-      .foldLeftM((List[Bind](), List[Shift]())) {
-        case ((binds, shifts), bind) =>
-          getBindInstantiations(bind, insts).flatMap { bindInsts =>
-            bindInsts match {
-              case Nil =>
-                val sbind = shifts.foldLeft(bind) { (b, s) =>
-                  bindShift(s.d, b, s.c)
-                }
-                for {
-                  _ <- addBinding(sbind.i, sbind.b)
-                  sInsts <- sbind.insts
-                    .traverse(instantantionShiftOnContextDiff(_))
-                  b = binds :+ Bind(sbind.i, sbind.b, sInsts, sbind.closureTypes)
-                } yield (b, incrShifts(shifts))
-              case i =>
-                i.zipWithIndex
-                  .traverse((inst, idx) =>
-                    for {
-                      // NOTE: Specialized binding is shifted based on the number of
-                      // bindings built, as they also shift the context.
-                      bind <- buildSpecializedBind(bind, inst, idx)
-                        .map(bindShift(idx, _))
-                      id <- addBinding(bind.i, bind.b)
-                    } yield bind
+    for {
+      result <- binds
+        .foldLeftM((List[Bind](), List[Shift]())) {
+          case ((binds, shifts), bind) =>
+            getBindInstantiations(bind, insts).flatMap { bindInsts =>
+              bindInsts match {
+                case Nil =>
+                  val sbind = shifts.foldLeft(bind) { (b, s) =>
+                    bindShift(s.d, b, s.c)
+                  }
+                  for {
+                    _ <- addBinding(sbind.i, sbind.b)
+                    sInsts <- sbind.insts
+                      .traverse(instantantionShiftOnContextDiff(_))
+                    b = binds :+ Bind(
+                      sbind.i,
+                      sbind.b,
+                      sInsts,
+                      sbind.closureTypes
+                    )
+                  } yield (b, incrShifts(shifts))
+                case i =>
+                  for {
+                    specializedBindsList <- i.zipWithIndex
+                      .traverse((inst, idx) =>
+                        for {
+                          bind <- buildSpecializedBind(bind, inst, idx)
+                            .map(bindShift(idx, _))
+                          id <- addBinding(bind.i, bind.b)
+                        } yield bind
+                      )
+                  } yield (
+                    binds ::: specializedBindsList,
+                    incrShifts(shifts) :+ Shift(
+                      specializedBindsList.length - 1,
+                      0
+                    )
                   )
-                  .map(l =>
-                    (binds ::: l, incrShifts(shifts) :+ Shift(l.length - 1, 0))
-                  )
+              }
             }
-          }
-      }
-      .map(_._1)
+        }
+      (specializedBinds, _) = result
+    } yield specializedBinds
 
   /** Finds bind instantiations from a specified list when bind is a a generic
     * function.
@@ -181,6 +224,174 @@ object Monomorphization {
     )
   } yield filteredBindInsts
 
+  /** Create missing data constructor specializations needed by deferred data
+    * constructor insts.
+    *
+    * After toSpecializedBinds, specialized binds may have deferred data
+    * constructor insts (r=DeferredDataConstr) with concrete types whose
+    * specialized data constructor bind doesn't exist. This function creates
+    * those missing data constructor binds and inserts them at the correct
+    * position in the bind list (right after the existing data constructor
+    * specialization), shifting subsequent binds' indices accordingly.
+    */
+  def createMissingDataConstrSpecs(
+      binds: List[Bind],
+      savedGenericBinds: Map[String, Bind]
+  ): ContextState[List[Bind]] = {
+    val deferredDataConstrInsts = binds.flatMap(b =>
+      b.insts.filter(i =>
+        i.r == Resolution.DeferredDataConstr && isDataConstrName(i.i) &&
+          !i.tys.exists(ty => getTypeContextLength(ty).isDefined)
+      )
+    )
+    val uniqueDataConstrInsts = Instantiations.distinct(deferredDataConstrInsts)
+    uniqueDataConstrInsts.foldLeftM(binds) { (currentBinds, dataConstrInst) =>
+      for {
+        specName <- toContextState(
+          Instantiation(
+            dataConstrInst.i,
+            dataConstrInst.term,
+            dataConstrInst.tys,
+            dataConstrInst.cls
+          ).bindName()
+        )
+        exists <- State.inspect { (ctx: Context) =>
+          nameToIndex(ctx, specName).isDefined
+        }
+        result <- (exists, savedGenericBinds.get(dataConstrInst.i)) match {
+          case (false, Some(genericBind)) =>
+            for {
+              newBind <- buildSpecializedBind(
+                genericBind,
+                Instantiation(
+                  dataConstrInst.i,
+                  dataConstrInst.term,
+                  dataConstrInst.tys,
+                  dataConstrInst.cls
+                ),
+                0
+              )
+              _ <- addBinding(newBind.i, newBind.b)
+              insertPos = findDataConstrInsertPos(
+                currentBinds,
+                dataConstrInst.i
+              )
+              (beforeInsert, afterInsert) = currentBinds.splitAt(insertPos)
+              updatedAfter = afterInsert.zipWithIndex
+                .map { case (b, idx) => shiftBindAfterInsert(b, idx) }
+                .map(b => redirectDataConstrInBind(b, dataConstrInst))
+            } yield beforeInsert ::: (newBind :: updatedAfter)
+          case _ => currentBinds.pure[ContextState]
+        }
+      } yield result
+    }
+  }
+
+  /** Find the insertion position for a new data constructor specialization.
+    * Returns the index right after the last existing specialization of this
+    * data constructor, or the end of the list if none exist.
+    */
+  def findDataConstrInsertPos(
+      binds: List[Bind],
+      dataConstrName: String
+  ): Int = {
+    val prefix = dataConstrName + Instantiations.BindTypeSeparator
+    val positions = binds.zipWithIndex.collect {
+      case (b, idx) if b.i.startsWith(prefix) => idx
+    }
+    positions.lastOption.map(_ + 1).getOrElse(binds.length)
+  }
+
+  /** Shift a bind's terms and inst terms to account for a newly inserted bind.
+    * The cutoff determines which De Bruijn indices get shifted: only indices
+    * above the cutoff (referencing binds before the insertion point) are
+    * shifted +1.
+    */
+  def shiftBindAfterInsert(bind: Bind, cutoff: Int): Bind = {
+    val shiftedBinding = bind.b match {
+      case TermAbbBind(term, None) =>
+        TermAbbBind(termShiftAbove(1, cutoff, term), None)
+      case TermAbbBind(term, Some(ty)) =>
+        TermAbbBind(
+          termShiftAbove(1, cutoff, term),
+          Some(typeShiftAbove(1, cutoff, ty))
+        )
+      case other => other
+    }
+    val shiftedInsts = bind.insts.map { inst =>
+      inst.copy(term = termShiftAbove(1, cutoff, inst.term))
+    }
+    Bind(bind.i, shiftedBinding, shiftedInsts, bind.closureTypes)
+  }
+
+  /** Redirect a deferred data constructor TermVar in a bind to point at the
+    * newly inserted specialization, and remove the matched deferred inst.
+    * Returns the bind unchanged if no deferred inst matches.
+    */
+  def redirectDataConstrInBind(
+      bind: Bind,
+      dataConstrInst: Instantiation
+  ): Bind = {
+    val matchingInst = bind.insts.find(i =>
+      i.r == Resolution.DeferredDataConstr && i.i == dataConstrInst.i && i.tys == dataConstrInst.tys
+    )
+    matchingInst match {
+      case None       => bind
+      case Some(inst) =>
+        val termInfo = inst.term match {
+          case tv: TermVar => Some(tv.info)
+          case _           => None
+        }
+        termInfo match {
+          case None       => bind
+          case Some(info) =>
+            val redirectedBinding = bind.b match {
+              case TermAbbBind(term, ty) =>
+                val newTerm = findTermVarByInfoWithDepth(term, info) match {
+                  case Some((rawIdx, _, depth)) =>
+                    val baseIdx = rawIdx - depth
+                    redirectTermVar(term, info, baseIdx, baseIdx - 1)
+                  case None => term
+                }
+                TermAbbBind(newTerm, ty)
+              case _ => bind.b
+            }
+            val updatedInsts = bind.insts.filterNot(i =>
+              i.r == Resolution.DeferredDataConstr && i.i == dataConstrInst.i && i.tys == dataConstrInst.tys
+            )
+            Bind(bind.i, redirectedBinding, updatedInsts, bind.closureTypes)
+        }
+    }
+  }
+
+  /** Redirect a TermVar with specific info from one index to another. Walks the
+    * term tree and replaces TermVars matching the info whose current index
+    * equals oldIdx with newIdx.
+    */
+  def redirectTermVar(
+      term: Term,
+      targetInfo: Info,
+      oldIdx: Int,
+      newIdx: Int
+  ): Term =
+    termMap(
+      (info, c, k, n) =>
+        // Match by info AND by the raw index being oldIdx + depth adjustment
+        (info == targetInfo && k == oldIdx + c) match {
+          case true  => TermVar(info, newIdx + c, n)
+          case false => TermVar(info, k, n)
+        },
+      (c, ty) => ty,
+      0,
+      term
+    )
+
+  /** Check if a name is a data constructor name (starts with uppercase, not
+    * specialized)
+    */
+  def isDataConstrName(name: String): Boolean =
+    name.headOption.exists(_.isUpper) && !name.contains("#")
+
   def buildSpecializedBind(
       bind: Bind,
       inst: Instantiation,
@@ -194,8 +405,8 @@ object Monomorphization {
           // with type instance (built-in) named binds.
           name <- toContextState(shiftedInst.bindName())
           ctxlen <- State.inspect { (ctx: Context) => ctx._1.length }
-          // Separate closure instantiations (r == Some(-1)) from regular ones
-          (closureInsts, regularInsts) = bind.insts.partition(_.r == Some(-1))
+          // Separate closure instantiations (r == Closure) from regular ones
+          closureInsts = bind.insts.filter(_.r == Resolution.Closure)
           // Specialize closure types using SAME substitution as parent function
           specializedClosureInsts = closureInsts.map { cInst =>
             val specializedTys = cInst.tys.map(ty =>
@@ -208,93 +419,215 @@ object Monomorphization {
             term,
             specializedClosureInsts
           )
-          // Now specialize the term with closure types already applied
+          // Specialize the term with closure types already applied
           specializedTerm = shiftedInst.tys.foldLeft(
             termWithClosureTypes: Term
           ) { case (t, ty) =>
             specializeTerm(t, idx, ty)
           }
-          binding = TermAbbBind(
-            specializedTerm,
-            ty.map(originalTy => {
-              specializeType(originalTy, shiftedInst.tys, ctxlen - idx)
-            })
-          )
-          insts <- bind.insts.traverse(i =>
-            // Try to resolve the resulting index of an instantation binding when
-            // specilizing the binding (this phase). As target method might
-            // already exist in the context, the resulting index is resolved while
-            // iterating and adding (spec) bindings instead of doing it at the
-            // `replaceInstantiations` phase.
-            // NOTE: Because this logic is the only one that works! :P
-            // Taking the indexes while building the specialized binding will get
-            // us the correct values, otherwise the shifting would lose the
-            // neccessary information on _replacing_ phase.
-            for {
-              n <- toContextState(i.bindName())
-              tIdx <- State.inspect { (ctx: Context) => nameToIndex(ctx, n) }
-            } yield {
-              val specializedTys = i.tys.map(originalTy =>
-                specializeType(originalTy, shiftedInst.tys, ctxlen - idx)
-              )
-              // Preserve r = Some(-1) for closure instantiations
-              val newR = i.r match {
-                case Some(-1) => Some(-1) // Closure param, keep marker
-                case _        =>
-                  tIdx.map(_ + 1) // Regular instantiation, resolve index
-              }
-              val inst = Instantiation(
-                i.i,
-                termShiftAbove(-1, ctxlen, i.term),
-                specializedTys,
-                i.cls,
-                newR
-              )
-              inst
+          // Compute specialized types for deferred data constructor insts
+          regularInsts = bind.insts.filter(i =>
+            i.r match {
+              case Resolution.Closure | Resolution.DeferredDataConstr => false
+              case _                                                  => true
             }
           )
-          // Filter out instantiations that still contain TypeVars after specialization
-          // These represent cases we can't handle yet
-          filteredInsts = insts.filter(inst =>
-            !inst.tys.exists(ty => getTypeContextLength(ty).isDefined)
+          regularTypeVarIndices = regularInsts
+            .flatMap(i =>
+              i.tys.collect { case tv: TypeVar => tv.index.intValue }
+            )
+            .distinct
+            .sorted
+            .reverse
+          deferredDataConstrInsts = bind.insts.filter(
+            _.r == Resolution.DeferredDataConstr
           )
-          // Apply distinct to remove partial instantiations (e.g., 1-type vs 2-type for same method)
-          dedupedInsts = Instantiations.distinct(filteredInsts)
-          // Check for self-recursive calls and add self-instantiation if needed
-          hasSelfRecursion = containsAssocProjCall(binding, bind.i)
-          selfInstantiation = hasSelfRecursion match {
-            case true =>
-              // Create instantiation pointing to the specialized bind itself
-              // Use bind.i (original method name) as inst.i, not name (specialized name)
-              // This ensures bindName() generates correct name from base + types
-              List(
-                Instantiation(
-                  bind.i, // Original bind name (e.g., !foldRight#List)
-                  TermAssocProj(
-                    UnknownInfo,
-                    inst.tys.head,
-                    bind.i
-                  ), // Use first type as placeholder
-                  inst.tys, // Concrete types from THIS specialization
-                  List(),
-                  Some(0) // Points to self (index 0 relative to current bind)
-                )
+          numParentTypeParams = shiftedInst.tys.length
+          regularCtxLen = regularInsts
+            .flatMap(i =>
+              i.tys.collect { case tv: TypeVar => tv.length.intValue }
+            )
+            .headOption
+          dcCtx = DataConstrContext(
+            regularTypeVarIndices,
+            regularCtxLen,
+            numParentTypeParams
+          )
+          deferredDataConstrSpecializations = deferredDataConstrInsts.map {
+            dcInst =>
+              dcInst -> specializeDataConstrInstTys(
+                dcInst,
+                shiftedInst.tys,
+                ctxlen - idx,
+                dcCtx
               )
-            case false => List()
-          }
-          // Merge self-instantiation with inherited instantiations
-          allInsts = selfInstantiation ::: dedupedInsts
-          finalInsts = Instantiations.distinct(allInsts)
-          // Extract closure types map for GRIN generation
-          // Maps closure variable name -> specialized type (first type in tys)
-          closureTypesMap = specializedClosureInsts
-            .flatMap(cInst => cInst.tys.headOption.map(ty => cInst.i -> ty))
-            .toMap
-        } yield Bind(name, binding, finalInsts, closureTypesMap)
+          }.toMap
+          binding = TermAbbBind(
+            specializedTerm,
+            ty.map(originalTy =>
+              specializeType(originalTy, shiftedInst.tys, ctxlen - idx)
+            )
+          )
+          specCtx = SpecializationContext(
+            shiftedInst.tys,
+            ctxlen - idx,
+            ctxlen,
+            specializedTerm,
+            regularTypeVarIndices,
+            deferredDataConstrSpecializations
+          )
+          insts <- bind.insts.traverse(i =>
+            resolveInstSpecialization(i, specCtx)
+          )
+        } yield finalizeSpecializedBind(
+          name,
+          binding,
+          insts,
+          bind.i,
+          inst.tys,
+          specializedClosureInsts
+        )
       case _ =>
         throw new RuntimeException(
           s"can't build specialized binding ${inst.i}"
         )
+    }
+
+  /** Finalize a specialized bind: filter unresolved insts, add self-recursion,
+    * extract closure types map for GRIN generation.
+    */
+  def finalizeSpecializedBind(
+      name: String,
+      binding: Binding,
+      insts: List[Instantiation],
+      originalBindName: String,
+      instTys: List[Type],
+      specializedClosureInsts: List[Instantiation]
+  ): Bind = {
+    val filteredInsts = insts.filter(inst =>
+      !inst.tys.exists(ty => getTypeContextLength(ty).isDefined)
+    )
+    val dedupedInsts = Instantiations.distinct(filteredInsts)
+    val selfInstantiation =
+      containsAssocProjCall(binding, originalBindName) match {
+        case true =>
+          List(
+            Instantiation(
+              originalBindName,
+              TermAssocProj(UnknownInfo, instTys.head, originalBindName),
+              instTys,
+              List(),
+              Resolution.Resolved(0)
+            )
+          )
+        case false => List()
+      }
+    val finalInsts = Instantiations.distinct(selfInstantiation ::: dedupedInsts)
+    val closureTypesMap = specializedClosureInsts
+      .flatMap(cInst => cInst.tys.headOption.map(ty => cInst.i -> ty))
+      .toMap
+    Bind(name, binding, finalInsts, closureTypesMap)
+  }
+
+  /** Compute specialized types for a deferred data constructor inst. Data
+    * constructor TypeVars may be in a deeper context than regular insts,
+    * requiring context shift adjustment before mapping to parent types.
+    */
+  def specializeDataConstrInstTys(
+      dataConstrInst: Instantiation,
+      parentTys: List[Type],
+      ctxLength: Int,
+      dcCtx: DataConstrContext
+  ): List[Type] = {
+    val dataConstrCtxLen = dataConstrInst.tys.collectFirst { case tv: TypeVar =>
+      tv.length.intValue
+    }
+    val contextShift = (dcCtx.regularCtxLen, dataConstrCtxLen) match {
+      case (Some(regLen), Some(dataConstrLen)) => dataConstrLen - regLen
+      case _                                   => dataConstrInst.tys.length
+    }
+    val referenceIndices = dcCtx.regularTypeVarIndices match {
+      case Nil =>
+        val typeVarIndices = dataConstrInst.tys.collect { case tv: TypeVar =>
+          tv.index.intValue
+        }
+        typeVarIndices.headOption match {
+          case Some(knownIdx) =>
+            (0 until dcCtx.numParentTypeParams)
+              .map(i => knownIdx + (dcCtx.numParentTypeParams - 1 - i))
+              .toList
+              .sorted
+              .reverse
+          case None => Nil
+        }
+      case indices => indices.map(_ + contextShift)
+    }
+    specializeInstTys(
+      dataConstrInst.tys,
+      parentTys,
+      ctxLength,
+      referenceIndices
+    )
+  }
+
+  /** Resolve a single inst into its specialized form during bind
+    * specialization. Handles regular insts, closure insts (r=-1), and deferred
+    * data constructor insts (r=-2).
+    */
+  def resolveInstSpecialization(
+      inst: Instantiation,
+      ctx: SpecializationContext
+  ): ContextState[Instantiation] =
+    for {
+      n <- toContextState(inst.bindName())
+      tIdx <- State.inspect { (c: Context) => nameToIndex(c, n) }
+      specializedTys = inst.r match {
+        case Resolution.DeferredDataConstr =>
+          ctx.deferredDataConstrSpecializations.getOrElse(inst, inst.tys)
+        case _ =>
+          specializeInstTys(
+            inst.tys,
+            ctx.parentTys,
+            ctx.specCtxLength,
+            ctx.regularTypeVarIndices
+          )
+      }
+      specializedDataConstrIdx <- inst.r match {
+        case Resolution.DeferredDataConstr =>
+          for {
+            sn <- toContextState(
+              Instantiation(inst.i, inst.term, specializedTys, inst.cls)
+                .bindName()
+            )
+            idx <- State.inspect { (c: Context) => nameToIndex(c, sn) }
+          } yield idx
+        case _ => None.pure[ContextState]
+      }
+    } yield {
+      val newR: Resolution = inst.r match {
+        case Resolution.Closure            => Resolution.Closure
+        case Resolution.DeferredDataConstr =>
+          specializedDataConstrIdx match {
+            case Some(idx) => Resolution.Resolved(idx + 1)
+            case None      => Resolution.DeferredDataConstr
+          }
+        case _ =>
+          tIdx
+            .map(idx => Resolution.Resolved(idx + 1))
+            .getOrElse(Resolution.Unresolved)
+      }
+      val actualTerm: Term = (inst.r, inst.term) match {
+        case (Resolution.DeferredDataConstr, tv: TermVar) =>
+          findTermVarByInfoWithDepth(ctx.specializedTerm, tv.info) match {
+            case Some((actualIdx, actualN, _)) =>
+              TermVar(tv.info, actualIdx, actualN)
+            case None =>
+              termShiftAbove(-1, ctx.shiftCtxLength, tv)
+          }
+        case _ =>
+          termShiftAbove(-1, ctx.shiftCtxLength, inst.term)
+      }
+      Instantiation(inst.i, actualTerm, specializedTys, inst.cls, newR)
     }
 
   def specializeTerm(
@@ -337,9 +670,8 @@ object Monomorphization {
       case (TypeAll(_, _, _, _, tyT), (tyS, _)) =>
         typeSubstitute(tyS, 0, tyT)
       case (tyT: TypeVar, (tyS, idx)) =>
-        // For a TypeVar in the instantiation list, directly replace with the concrete type
-        // The idx parameter tells us which type parameter this is (0, 1, 2, ...)
-        // and tyS is the concrete type to substitute
+        // For a raw TypeVar (not inside TypeAll), directly substitute
+        // This handles cases where a single TypeVar represents a type parameter
         tyS
       case (tyT @ TypeApp(info, ctor, param), (tyS, idx)) =>
         // For TypeApp(TypeId, param), only specialize the parameter
@@ -374,6 +706,58 @@ object Monomorphization {
         tyT
     }
 
+  /** Specialize a list of inst types, handling raw TypeVars correctly.
+    *
+    * When inst types are raw TypeVars (from static method calls like
+    * fold_right), we need to map each TypeVar to the correct position in the
+    * parent's tys. TypeVars with higher De Bruijn indices correspond to outer
+    * TAbs positions (earlier in tys), while lower indices correspond to inner
+    * positions.
+    */
+  def specializeInstTys(
+      instTys: List[Type],
+      parentTys: List[Type],
+      ctxLength: Int,
+      referenceTypeVarIndices: List[Int] = List()
+  ): List[Type] = {
+    // Extract TypeVar indices to build a position mapping
+    val typeVarIndices = instTys.zipWithIndex.collect {
+      case (tv: TypeVar, pos) => (tv.index, pos)
+    }
+    // If all inst types are TypeVars, use index-based mapping
+    val allTypeVars =
+      instTys.length == typeVarIndices.length && instTys.nonEmpty
+    allTypeVars match {
+      case true =>
+        // Use reference indices if provided to build a complete mapping
+        // Reference indices come from ALL inst TypeVars in the enclosing bind
+        val allIndices = (referenceTypeVarIndices ++ typeVarIndices.map(
+          _._1.intValue
+        )).distinct.sorted.reverse
+        // Build mapping from TypeVar index -> parent tys position
+        // Highest index = outermost TAbs = tys[0]
+        val indexToParentPos: Map[Int, Int] = allIndices.zipWithIndex.map {
+          case (tvIdx, parentPos) => tvIdx -> parentPos
+        }.toMap
+        instTys.zipWithIndex.map { case (ty, pos) =>
+          typeVarIndices.find(_._2 == pos) match {
+            case Some((tvIdx, _)) =>
+              indexToParentPos.get(tvIdx) match {
+                case Some(parentPos) if parentPos < parentTys.length =>
+                  parentTys(parentPos)
+                case _ => ty
+              }
+            case None => ty
+          }
+        }
+      case false =>
+        // Mixed types — use standard per-type specialization
+        instTys.map(originalTy =>
+          specializeType(originalTy, parentTys, ctxLength)
+        )
+    }
+  }
+
   /** Replaces all instantiations found on specified bind with specialized
     * functions (binds).
     */
@@ -384,33 +768,85 @@ object Monomorphization {
         (specBindIndex, ctxlen) <- State.inspect { (ctx: Context) =>
           (nameToIndex(ctx, specBindName), ctx._1.length)
         }
-        (replacedBinding, insts) = (
-          acc.b,
-          inst.term,
-          inst.r.orElse(specBindIndex)
-        ) match {
-          case (TermAbbBind(tT, ty), tC: TermMethodProj, Some(s)) =>
-            handleMethodProjReplacement(tT, ty, tC, specBindName, acc, inst)
-          case (TermAbbBind(tT, ty), tC: TermAssocProj, Some(s)) =>
-            handleAssocProjReplacement(tT, ty, tC, specBindName, acc, inst)
-          case (TermAbbBind(tT, ty), tC: TermVar, Some(s)) =>
-            handleVarReplacement(tT, ty, tC, s, ctxlen, acc, inst)
-          case (b, _, _) =>
-            (b, acc.insts)
+        isDeferredDataConstr = inst.term.isInstanceOf[TermVar] &&
+          isDataConstrName(inst.i) &&
+          bind.i.contains("#")
+        resolvedIndex = inst.r match {
+          case Resolution.Resolved(s) => Some(s)
+          case Resolution.Unresolved  => specBindIndex
+          case _                      => None
         }
-      } yield Bind(bind.i, replacedBinding, insts, bind.closureTypes)
+        result = isDeferredDataConstr match {
+          case true =>
+            // Deferred data constructor insts: remove from inst list.
+            // The TermVar replacement is handled later in createMissingDataConstrSpecs.
+            ReplacementResult(acc.b, acc.insts.filterNot(_ == inst))
+          case false =>
+            (
+              acc.b,
+              inst.term,
+              resolvedIndex
+            ) match {
+              case (TermAbbBind(tT, ty), tC: TermMethodProj, Some(s)) =>
+                replaceProj(
+                  tT,
+                  ty,
+                  acc,
+                  inst,
+                  methodProj =>
+                    (methodProj.i == tC.i && methodProj.info == tC.info) match {
+                      case true =>
+                        TermMethodProj(
+                          methodProj.info,
+                          methodProj.t,
+                          specBindName
+                        )
+                      case false => methodProj
+                    },
+                  assocProj => assocProj
+                )
+              case (TermAbbBind(tT, ty), tC: TermAssocProj, Some(s)) =>
+                replaceProj(
+                  tT,
+                  ty,
+                  acc,
+                  inst,
+                  methodProj => methodProj,
+                  assocProj => {
+                    val cleanTCI = tC.i.startsWith(MethodNamePrefix) match {
+                      case true =>
+                        tC.i.drop(MethodNamePrefix.length).takeWhile(_ != '#')
+                      case false => tC.i
+                    }
+                    val methodMatch = assocProj.i == cleanTCI
+                    val alreadySpecialized =
+                      assocProj.i.startsWith(Desugar.MethodNamePrefix)
+                    (methodMatch && !alreadySpecialized) match {
+                      case true =>
+                        TermAssocProj(assocProj.info, assocProj.t, specBindName)
+                      case false => assocProj
+                    }
+                  }
+                )
+              case (TermAbbBind(tT, ty), tC: TermVar, Some(s)) =>
+                replaceVar(tT, ty, tC, s, ctxlen, acc, inst)
+              case (b, _, _) =>
+                ReplacementResult(b, acc.insts)
+            }
+        }
+      } yield Bind(bind.i, result.binding, result.insts, bind.closureTypes)
     )
 
-  /** Generic handler for term projection replacement */
-  def handleProjReplacement(
+  /** Replace projection terms in a binding using termMap with custom replacers
+    */
+  def replaceProj(
       tT: Term,
       ty: Option[Type],
-      methodName: String,
       bind: Bind,
       inst: Instantiation,
       methodProjReplacer: TermMethodProj => Term,
       assocProjReplacer: TermAssocProj => Term
-  ): (Binding, List[Instantiation]) = {
+  ): ReplacementResult = {
     val replacedTerm = termMap(
       (info, c, k, n) => TermVar(info, k, n),
       (c, ty) => ty,
@@ -419,71 +855,14 @@ object Monomorphization {
       0,
       tT
     )
-    (
+    ReplacementResult(
       TermAbbBind(replacedTerm, ty),
       bind.insts.filterNot(_ == inst)
     )
   }
 
-  /** Handle TermMethodProj instantiation replacement */
-  def handleMethodProjReplacement(
-      tT: Term,
-      ty: Option[Type],
-      tC: TermMethodProj,
-      methodName: String,
-      bind: Bind,
-      inst: Instantiation
-  ): (Binding, List[Instantiation]) = handleProjReplacement(
-    tT,
-    ty,
-    methodName,
-    bind,
-    inst,
-    methodProj =>
-      (methodProj.i == tC.i && methodProj.info == tC.info) match {
-        case true =>
-          // Found the matching TermMethodProj - update its method name
-          TermMethodProj(methodProj.info, methodProj.t, methodName)
-        case false =>
-          methodProj
-      },
-    assocProj => assocProj
-  )
-
-  /** Handle TermAssocProj instantiation replacement */
-  def handleAssocProjReplacement(
-      tT: Term,
-      ty: Option[Type],
-      tC: TermAssocProj,
-      methodName: String,
-      bind: Bind,
-      inst: Instantiation
-  ): (Binding, List[Instantiation]) = handleProjReplacement(
-    tT,
-    ty,
-    methodName,
-    bind,
-    inst,
-    methodProj => methodProj,
-    assocProj => {
-      // Strip method prefix from tC.i if present (e.g., !foldRight#List -> foldRight)
-      val cleanTCI = tC.i.startsWith(MethodNamePrefix) match {
-        case true  => tC.i.drop(MethodNamePrefix.length).takeWhile(_ != '#')
-        case false => tC.i
-      }
-      val methodMatch = assocProj.i == cleanTCI
-      val alreadySpecialized = assocProj.i.startsWith(Desugar.MethodNamePrefix)
-      // Match on method name only - type equality fails after extractTypeArgs + type substitution
-      // Don't replace if already specialized (handles multiple instantiations for same call site)
-      (methodMatch && !alreadySpecialized) match {
-        case true  => TermAssocProj(assocProj.info, assocProj.t, methodName)
-        case false => assocProj
-      }
-    }
-  )
-
-  /** Handle TermVar instantiation replacement */
-  def handleVarReplacement(
+  /** Replace a TermVar reference with a specialized bind index */
+  def replaceVar(
       tT: Term,
       ty: Option[Type],
       tC: TermVar,
@@ -491,15 +870,52 @@ object Monomorphization {
       ctxlen: Int,
       bind: Bind,
       inst: Instantiation
-  ): (Binding, List[Instantiation]) = {
-    val d = inst.r.isDefined match {
-      case true  => None
-      case false => Some(ctxlen)
+  ): ReplacementResult = {
+    val d = inst.r match {
+      case Resolution.Resolved(_) => None
+      case _                      => Some(ctxlen)
     }
-    (
-      TermAbbBind(termVarSubstitute(s, d, tC, tT), ty),
+    val resultTerm = termVarSubstitute(s, d, tC, tT)
+    ReplacementResult(
+      TermAbbBind(resultTerm, ty),
       bind.insts.filterNot(_ == inst)
     )
+  }
+
+  /** Find the raw De Bruijn index, context length, and depth of a TermVar
+    * matching a given Info. Depth tracks c from termMap (incremented for
+    * TermAbs, TermTAbs, TermClosure, TermLet body).
+    */
+  def findTermVarByInfoWithDepth(
+      term: Term,
+      targetInfo: Info
+  ): Option[(Int, Int, Int)] = {
+    def search(t: Term, c: Int): Option[(Int, Int, Int)] = t match {
+      case TermVar(info, idx, n) =>
+        (info == targetInfo) match {
+          case true  => Some((idx, n, c))
+          case false => None
+        }
+      case TermAbs(_, _, _, body, _)  => search(body, c + 1)
+      case TermTAbs(_, _, _, body)    => search(body, c + 1)
+      case TermClosure(_, _, _, body) => search(body, c + 1)
+      case TermLet(_, _, t1, t2)      => search(t1, c).orElse(search(t2, c + 1))
+      case TermFix(_, body)           => search(body, c)
+      case TermApp(_, f, arg)         => search(f, c).orElse(search(arg, c))
+      case TermTApp(_, t, _)          => search(t, c)
+      case TermMatch(_, scrutinee, cases) =>
+        search(scrutinee, c).orElse(
+          cases.view.flatMap { case (_, body) => search(body, c) }.headOption
+        )
+      case TermProj(_, t, _)       => search(t, c)
+      case TermMethodProj(_, t, _) => search(t, c)
+      case TermRecord(_, fields)   =>
+        fields.view.flatMap { case (_, t) => search(t, c) }.headOption
+      case TermTag(_, _, t, _)  => search(t, c)
+      case TermAscribe(_, t, _) => search(t, c)
+      case _                    => None
+    }
+    search(term, 0)
   }
 
   /** Check if a term contains a TermAssocProj call to a specific method */
@@ -542,6 +958,7 @@ object Monomorphization {
     }
 
   /** Check if a binding contains a TermAssocProj call to a specific method */
+
   def containsAssocProjCall(
       binding: Binding,
       methodName: String
@@ -571,9 +988,11 @@ object Monomorphization {
       // Find matching closure instantiation by variable name
       closureInsts.find(_.i == variable) match {
         case Some(inst) if inst.tys.nonEmpty =>
-          // Apply the specialized type without monomorphizing TypeApp(TypeId)
-          // Keep TypeApp(TypeId("List"), TypeInt) as-is for now
-          val paramType = inst.tys.head
+          // Extract param type from the full arrow type stored in closure inst
+          val paramType = inst.tys.head match {
+            case TypeArrow(_, param, _) => param
+            case ty => ty // Backwards compat: handle bare param type
+          }
           val bodyWithTypes = applyClosureTypes(body, closureInsts)
           TermClosure(info, variable, Some(paramType), bodyWithTypes)
         case _ =>

@@ -94,24 +94,38 @@ object Grin {
   }
 
   def generateMissingFFI(grinCode: String): String = {
-    val missingOps = List(
-      ("_prim_int_mod", "_prim_int_mod :: T_Int64 -> T_Int64 -> T_Int64"),
-      ("_prim_float_mod", "_prim_float_mod :: T_Float -> T_Float -> T_Float"),
-      ("_prim_bool_and", "_prim_bool_and :: T_Bool -> T_Bool -> T_Bool"),
-      ("_prim_bool_or", "_prim_bool_or :: T_Bool -> T_Bool -> T_Bool"),
-      ("_prim_string_ne", "_prim_string_ne :: T_String -> T_String -> T_Int64")
-    )
-
-    val usedOps = missingOps.filter { case (opName, _) =>
+    val usedOps = GrinPrelude.missingFFI.filter { case (opName, _) =>
       grinCode.contains(opName)
     }
-
     usedOps.isEmpty match {
       case true  => ""
       case false =>
         val declarations = usedOps.map(_._2).mkString("\n  ")
         s"ffi pure\n  $declarations"
     }
+  }
+
+  /** Generate GRIN external declarations to replace the built-in prelude. Used
+    * with --no-prelude flag. Key difference from GRIN's default prelude:
+    * effectful functions return T_Int64 instead of T_Unit, avoiding LLVM's
+    * "void type only allowed for function results" error when Unit values
+    * appear in constructor fields.
+    */
+  def generatePrelude(grinCode: String): String = {
+    def filterUsed(ops: List[(String, String)]): List[String] =
+      ops
+        .filter { case (name, _) =>
+          grinCode.contains(name) && !grinCode.contains(s"$name ::")
+        }
+        .map(_._2)
+    val sections = List(
+      ("ffi effectful", filterUsed(GrinPrelude.ffiEffectful)),
+      ("ffi pure", filterUsed(GrinPrelude.ffiPure)),
+      ("primop pure", filterUsed(GrinPrelude.primopPure))
+    ).filter(_._2.nonEmpty).map { case (header, decls) =>
+      s"$header\n  ${decls.mkString("\n  ")}"
+    }
+    sections.mkString("\n\n")
   }
 
   // Generate return-type-grouped apply functions following GHC-GRIN pattern.
@@ -362,18 +376,38 @@ object Grin {
         for {
           tyD <- typeShiftOnContextDiff(ty)
           typeName <- getNameFromType(tyD)
+          // Use tag.typ for type arg suffix - it preserves concrete types from monomorphization
+          // while TermFold's ty has broken TypeVar references after specialization
+          tagTyD <- typeShiftOnContextDiff(tag.typ)
+          typeArgSuffix <- getTypeArgSuffix(tagTyD)
           // Handle empty constructors (TermUnit should not generate parameters)
           result <- tag.t match {
             case TermUnit(_) =>
               // Empty constructor like Nil - no parameters
-              val constr = show"store (${cTag(tag.i)})"
+              val constr = show"store (${cTag(tag.i)}${typeArgSuffix})"
               State.pure(MultiLineExpr(List(), AppExpr(constr)))
+            case TermRecord(_, fields) =>
+              // Constructor with record fields - fields are already values/pointers,
+              // no extra store needed (avoids double indirection in GRIN)
+              for {
+                params <- fields.traverse { case (_, term) =>
+                  for {
+                    e <- toExpr(term)
+                    (preps, param) <- prepParameters(e)
+                  } yield (preps, param)
+                }
+                prepExprs = params.flatMap(_._1)
+                parameters = params.map(_._2).mkString(" ")
+                constr =
+                  show"store (${cTag(tag.i)}${typeArgSuffix} $parameters)"
+              } yield MultiLineExpr(prepExprs, AppExpr(constr))
             case _ =>
-              // Constructor with fields
+              // Constructor with non-record body
               for {
                 tagExpr <- pureToExpr(tag.t)
                 (prepExprs, parameters) <- prepParameters(tagExpr)
-                constr = show"store (${cTag(tag.i)} $parameters)"
+                constr =
+                  show"store (${cTag(tag.i)}${typeArgSuffix} $parameters)"
               } yield MultiLineExpr(prepExprs, AppExpr(constr))
           }
         } yield result
@@ -610,13 +644,15 @@ object Grin {
             result,
             isNode
           )
+          typeArgSuffix <- getTypeArgSuffix(tyT1D)
           p <- patterns.zipWithIndex.traverse { case ((p, e), idx) =>
             Context.run(
               toCaseClause(
                 p,
                 e,
                 exprType,
-                isLastPattern = idx == patterns.length - 1
+                isLastPattern = idx == patterns.length - 1,
+                typeArgSuffix = typeArgSuffix
               )
             )
           }
@@ -794,7 +830,15 @@ object Grin {
     // For each closure, dispatch to the appropriate apply function
     val clauses = closures.map { cn =>
       val tag = pTag(arity, cn)
-      val pattern = s"($tag)"
+      // Determine number of fields in the P-tag pattern from ArityFact.
+      // Fields = capturedVars + (totalParams - current_arity).
+      // Use fixed wildcard names to avoid incrementing the global variable counter.
+      val numFields = env.arityFactsMap
+        .get(cn)
+        .map(af => af.capturedVars + (af.totalParams - arity))
+        .getOrElse(0)
+      val fieldStr = (0 until numFields).map(i => s" _${f}_${cn}_$i").mkString
+      val pattern = s"($tag$fieldStr)"
       // Get the closure's actual return type by finding its typeKey
       val closureReturnType = closureToTypeKey
         .get(cn)
@@ -894,19 +938,25 @@ object Grin {
     // (avoids De Bruijn index issues when closure has stale indices from type-checking phase)
     arity = getClosureArity(c)
     // Compute typeKey from closure type - try multiple sources:
-    // 1. First try closureTypesFromBind (from monomorphization)
-    // 2. Then try extracting from closure structure
-    // 3. Finally fall back to type-checking the closure
-    closureTypeOpt <- getClosureTypeWithFallback(c)
-    // If no type from structure, try type-checking (may fail for some closures)
-    closureTypeFromTC <- closureTypeOpt match {
-      case Some(ty) => State.pure(Some(ty))
-      case None     =>
+    // 1. First try closureTypesFromBind (from monomorphization) - has accurate full arrow types
+    // 2. Then try type-checking the closure
+    // 3. Finally fall back to structure extraction
+    closureTypeFromBind = c match {
+      case TermClosure(_, variable, _, _) =>
+        env.closureTypesFromBind.get(variable)
+      case _ => None
+    }
+    closureTypeOpt <- closureTypeFromBind match {
+      case Some(_) => State.pure(closureTypeFromBind)
+      case None    =>
         toContextStateOption(
           TypeChecker.pureInfer(c)(checking = false).map(_._1)
-        )
+        ).flatMap {
+          case Some(ty) => State.pure(Some(ty))
+          case None     => getClosureTypeWithFallback(c)
+        }
     }
-    tKey = closureTypeFromTC.map(typeToKey).getOrElse("")
+    tKey = closureTypeOpt.map(typeToKey).getOrElse("")
   } yield ClosureValue(
     outputName,
     arity,
@@ -946,7 +996,8 @@ object Grin {
       p: Pattern,
       e: Term,
       matchExprType: Type,
-      isLastPattern: Boolean = false
+      isLastPattern: Boolean = false,
+      typeArgSuffix: String = ""
   )(implicit
       substFunc: String => String,
       env: Env = Env.empty
@@ -962,7 +1013,7 @@ object Grin {
         (_, bindVariables, _) <- toContextState(
           TypeChecker.inferPattern(p, matchExprType)(checking = false)
         )
-        cpat = s"(${cTag(node)} ${bindVariables.mkString(" ")})"
+        cpat = s"(${cTag(node)}${typeArgSuffix} ${bindVariables.mkString(" ")})"
         caseClause <- buildCaseClause(cpat, e)
       } yield caseClause
     case PatternDefault(_) => buildCaseClause("#default", e)
@@ -1079,7 +1130,7 @@ object Grin {
             case CaseClause(pattern, AppExpr(repr, arity, _, _, closures), _)
                 if arity > 0 =>
               // Extract closure name from pattern like "(P2c28)"
-              val ptagPattern = """\(P(\d+)(\w+)\)""".r
+              val ptagPattern = """\(P(\d+)(\w+)""".r
               ptagPattern.findFirstMatchIn(pattern).map { m =>
                 val closureName = m.group(2) // e.g., "c28"
                 (arity, closureName)
