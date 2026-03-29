@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/fuselang/fuse/compare/v0.3.3...v0.3.4) (2026-03-29)
+
+
+### Bug Fixes
+
+* pin nix to 2.33.0 for macOS release build ([b1630a2](https://github.com/fuselang/fuse/commit/b1630a24134b95201fb5cbd0b39f61f11f913728))
+
 ## [0.3.3](https://github.com/fuselang/fuse/compare/v0.3.2...v0.3.3) (2026-03-14)
 
 
