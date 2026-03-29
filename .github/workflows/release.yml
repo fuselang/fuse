@@ -159,10 +159,11 @@ jobs:
           path: /tmp/grin-cache
           key: grin-binary-macos-arm64-${{ steps.grin-ref.outputs.sha }}
 
-      # Nix for GRIN (only if not cached)
+      # Nix for GRIN (only if not cached; pinned to 2.33.0 — 2.34.x breaks patch on aarch64-darwin)
       - uses: cachix/install-nix-action@v31
         if: steps.grin-cache.outputs.cache-hit != 'true'
         with:
+          install_url: https://releases.nixos.org/nix/nix-2.33.0/install
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             extra-substituters = https://cache.iog.io
