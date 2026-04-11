@@ -1,6 +1,12 @@
-**Fuse** is a statically typed functional language.
+# <img src="https://github.com/user-attachments/assets/2ea27287-fd60-4ade-bdf9-373ec63bbf56" height="28px"/> Fuse
 
-# Features
+**Fuse** is a statically typed, purely functional language with higher-kinded types and ad-hoc polymorphism. It compiles to the GRIN whole-program optimizer, producing LLVM-generated native code.
+
+Website: https://fuselang.org/
+
+<img width="496" height="624" alt="Image" src="https://github.com/user-attachments/assets/90a73280-ef49-446a-afc4-dbcabab5ea1b" />
+
+## Features
 
 - Algebraic Data Types (ADT)
 - Generics (Parametric Polymorphism)
@@ -9,199 +15,16 @@
 - Pattern Matching
 - Uses [Grin](https://github.com/grin-compiler/grin) as compiler backend
 
-# Installation
+## Documentation
 
-```bash
-curl -fsSL https://fuselang.github.io/fuse/fuseup | sh
-```
+#### [Get Started](https://fuselang.org/getting-started)
 
-# Road-map
+Instructions for downloading and installing the Fuse compiler and libraries.
 
-- [x] Parser
-- [x] Type Checker for System F with ADT and Pattern Matching
-- [x] Type Error Messages
-- [x] Code Generation to LLVM (without generics)
-- [x] Implement Type Inference for higher order types (Bidirectional)
-- [x] Implement Type Classes
-- [x] Implement `do` notation
-- [x] Code Generation to LLVM with monomorphisation
-- [ ] Add modules & imports
+#### [Overview of Fuse](https://fuselang.org/overview)
 
-# Example with [Tree-Sitter](https://github.com/stevanmilic/tree-sitter-fuse)
+An overview of the Fuse programming language.
 
-![fuse](https://user-images.githubusercontent.com/6879030/231895964-3d6e447a-726c-4bfd-9b0a-7785a54d419d.png)
+## Warnings
 
-# ADTs (Algebraic Data Types)
-
-## Sum type (Enumeration)
-
-```
-type bool:
-    true
-    false
-```
-
-## Record (Product type)
-
-```
-type Point:
-    x: i32
-    y: i32
-```
-
-## Tuple (Product type)
-
-```
-type Pair(i32, str)
-```
-
-## Generics (parametric polymorphism)
-
-```
-type Option[T]:
-    None
-    Some(T)
-
-type Map[K, V]:
-    key: K
-    value: V
-
-type Data[T](Option[Map[str, T]])
-
-type Tuple[A, B](A, B)
-```
-
-# Type Methods
-
-```
-impl Option[T]:
-    fun is_some(self) -> bool
-        match self:
-            Some(_) => True
-            None => False
-
-impl Point:
-    fun distance(self, other: Point) -> f32
-        let x_diff = self.x - other.x
-        let y_diff = self.y - other.y
-        math.sqrt(x_diff * x_diff - y_diff * y_diff)
-```
-
-# Traits (Type Classes)
-
-```
-trait Monad[A]:
-  fun unit[T](a: T) -> Self[T];
-
-  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
-
-  fun map[B](self, f: A -> B) -> Self[B]
-    let f = a => Self::unit(f(a))
-    self.flat_map(f)
-
-impl Monad for Option[A]:
-  fun unit[T](a: T) -> Option[T]
-    Some(a)
-
-  fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
-    match self:
-      Some(v) => f(v)
-      _ => None
-```
-
-# Type Alias
-
-```
-type Ints = List[i32]
-```
-
-# Expressions
-
-## Operators
-
-```
-1 + 1
-# output: 2 (i32)
-
-2 - 1
-# output: 1 (i32)
-
-"Hello " + " World"
-# output: "Hello World" (str)
-
-1 == 2
-# output: false (bool)
-
-# comparison and equality
-less < than
-less_than <= or_equal
-greater > then
-greaterThan >= orEqual
-```
-
-## Let expression
-
-```
-let x = 5
-let y = x + 1
-
-let m = Some(5)
-```
-
-## Match expression
-
-```
-let x = 2
-
-match x:
-    1 => "one"
-    2 => "two"
-    _ => "whatever"
-
-let m = Some(5)
-match m:
-    Some(v) => v + 1
-    None => 0
-```
-
-# Functions
-
-```
-fun sum(x: i32, y: i32) -> i32
-    x + y
-
-sum(5, 3)
-```
-
-## Recursive Functions
-
-```
-fun fib(n: i32, a: i32, b: i32) -> i32
-    match n:
-        0 => b
-        _ => fib(n - 1, b, a + b)
-```
-
-## Lambda Functions
-
-```
-let f = a => a + 1
-
-let g = (x, y) => x + y
-
-let f_annotated: i32 = (a: i32) -> i32 => a + 1
-```
-
-
-## Do Notation
-
-```
-let x = Some(1)
-let y = Some(2)
-let z = Some(3)
-do:
-    i <- x
-    j <- y
-    k <- z
-    i + j + k
-```
+* The Fuse compiler is still heavy in development.

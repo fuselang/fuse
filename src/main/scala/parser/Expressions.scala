@@ -274,8 +274,27 @@ abstract class Expressions(fileName: String) extends Types(fileName) {
       ExprId ~ "::" ~ ExprId
     }
 
+    def MethodChainSuffix = rule {
+      '.' ~ ExprId ~ TypeArguments.named("type arguments").? ~ Arguments
+        .named("arguments")
+        .+ ~> (
+        (
+            base: FInfixExpr,
+            method: FVar,
+            ta: FTypeArguments,
+            args: Seq[FArguments]
+        ) =>
+          FMethodApp(
+            method.info,
+            FProj(method.info, base, Seq(method)),
+            ta,
+            args
+          ): FInfixExpr
+      )
+    }
+
     def PrimaryExpr: Rule1[FInfixExpr] = rule {
-      MethodExpr | AssocCallExpr | Proj | CallExpr | SimpleExpr
+      (MethodExpr | AssocCallExpr | Proj | CallExpr | SimpleExpr) ~ MethodChainSuffix.*
     }
 
     def MultiplicativeExpr = rule {

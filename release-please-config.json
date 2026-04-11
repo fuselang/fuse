@@ -2,7 +2,7 @@
   "release-type": "simple",
   "packages": {
     ".": {
-      "extra-files": ["build.sbt"]
+      "extra-files": ["build.sbt", "src/main/scala/Fuse.scala"]
     }
   }
 }

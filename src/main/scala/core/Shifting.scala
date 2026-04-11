@@ -157,7 +157,7 @@ object Shifting {
       case TermApp(info, t1, t2)     => TermApp(info, iter(c, t1), iter(c, t2))
       case TermFix(info, t)          => TermFix(info, iter(c, t))
       case TermMatch(info, t, cases) =>
-        TermMatch(info, t, cases.map((p, e) => (p, iter(c, e))))
+        TermMatch(info, iter(c, t), cases.map((p, e) => (p, iter(c, e))))
       case TermLet(info, i, t1, t2) =>
         TermLet(info, i, iter(c, t1), iter(c + 1, t2))
       case TermProj(info, t, i) => TermProj(info, iter(c, t), i)

@@ -15,6 +15,7 @@ import java.io.{
   OutputStream
 }
 import java.nio.file.{Files, Path, Paths}
+import parser.Info.UnknownInfo
 
 sealed trait Command
 case class BuildFile(file: String) extends Command
@@ -23,13 +24,13 @@ case class CheckFile(file: String) extends Command
 /** Build pipeline errors. */
 sealed trait BuildError
 case class FuseCompileError(error: Error) extends BuildError
-case class GrinCompileError(exitCode: Int) extends BuildError
+case class GrinCompileError(exitCode: Int, output: String) extends BuildError
 
 object Fuse
     extends CommandIOApp(
       name = "fuse",
       header = "Fuse is a tool for managing Fuse source code.",
-      version = "0.1"
+      version = "0.3.4" // x-release-please-version
     ) {
 
   // File extensions (public for test access)
@@ -99,8 +100,13 @@ object Fuse
 
   /** Format build error for display. */
   def formatBuildError(error: BuildError): String = error match {
-    case FuseCompileError(e)    => e.toString
-    case GrinCompileError(code) => s"GRIN compilation failed (exit code: $code)"
+    case FuseCompileError(e)            => e.toString
+    case GrinCompileError(code, output) =>
+      val details = output.trim match {
+        case "" => ""
+        case s  => s"\n$s"
+      }
+      s"GRIN compilation failed (exit code: $code)$details"
   }
 
   /** Phase 1: Compile Fuse source to GRIN. */
@@ -134,8 +140,8 @@ object Fuse
       "-C",
       s"$runtime/prim_ops.c"
     ).mkString(" ")
-    EitherT(executeCommand(grinCommand).map { exitCode =>
-      Either.cond(exitCode == 0, (), GrinCompileError(exitCode))
+    EitherT(executeCommand(grinCommand).map { case (exitCode, output) =>
+      Either.cond(exitCode == 0, (), GrinCompileError(exitCode, output))
     })
   }
 
@@ -162,29 +168,73 @@ object Fuse
       command: Command,
       origin: File,
       destination: File
-  ): IO[Option[Error]] = {
-    val acquireStreams: IO[(InputStream, OutputStream)] =
-      (
-        IO(new FileInputStream(origin)),
-        IO(new FileOutputStream(destination))
-      ).tupled
-
-    val releaseStreams: ((InputStream, OutputStream)) => IO[Unit] = {
-      case (in, out) =>
-        (IO(in.close()), IO(out.close())).tupled
-          .handleErrorWith(_ => IO.unit)
-          .void
+  ): IO[Option[Error]] =
+    validateSourceFile(origin).flatMap {
+      case Some(error) => IO.pure(Some(error))
+      case None        =>
+        val acquireStreams: IO[(InputStream, OutputStream)] =
+          (
+            IO(new FileInputStream(origin)),
+            IO(new FileOutputStream(destination))
+          ).tupled
+        val releaseStreams: ((InputStream, OutputStream)) => IO[Unit] = {
+          case (in, out) =>
+            (IO(in.close()), IO(out.close())).tupled
+              .handleErrorWith(_ => IO.unit)
+              .void
+        }
+        acquireStreams
+          .bracket { case (in, out) =>
+            Compiler.run(command, origin.getPath, in, out)
+          }(releaseStreams)
+          .handleErrorWith { e =>
+            IO.pure(
+              Some(
+                Utils.consoleError(
+                  s"I/O error: ${e.getMessage}",
+                  UnknownInfo
+                )
+              )
+            )
+          }
     }
 
-    acquireStreams.bracket { case (in, out) =>
-      Compiler.run(command, origin.getPath, in, out)
-    }(releaseStreams)
+  /** Validate that a source file exists, is a regular file, and is readable. */
+  def validateSourceFile(file: File): IO[Option[Error]] = IO {
+    (file.exists, file.isFile, file.canRead) match {
+      case (false, _, _) =>
+        Some(
+          Utils.consoleError(
+            s"file not found: ${file.getPath}",
+            UnknownInfo
+          )
+        )
+      case (_, false, _) =>
+        Some(
+          Utils.consoleError(
+            s"not a file: ${file.getPath}",
+            UnknownInfo
+          )
+        )
+      case (_, _, false) =>
+        Some(
+          Utils.consoleError(
+            s"file not readable: ${file.getPath}",
+            UnknownInfo
+          )
+        )
+      case _ => None
+    }
   }
 
-  /** Execute a shell command and return the exit code. */
-  def executeCommand(command: String): IO[Int] =
+  /** Execute a shell command and return the exit code with combined output. */
+  def executeCommand(command: String): IO[(Int, String)] =
     IO.blocking {
-      val process = new ProcessBuilder("sh", "-c", command).start()
-      process.waitFor()
+      val process = new ProcessBuilder("sh", "-c", command)
+        .redirectErrorStream(true)
+        .start()
+      val output = new String(process.getInputStream.readAllBytes())
+      val exitCode = process.waitFor()
+      (exitCode, output)
     }
 }

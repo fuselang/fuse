@@ -102,26 +102,21 @@ object GrinUtils {
     typeKey.isEmpty match {
       case true  => ""
       case false =>
-        // Find the last "->" that's not inside brackets
-        var depth = 0
-        var lastArrowIdx = -1
-        var i = 0
-        while (i < typeKey.length - 1) {
-          typeKey(i) match {
-            case '[' | '(' | '{' => depth += 1
-            case ']' | ')' | '}' => depth -= 1
-            case '-'
-                if depth == 0 && i + 1 < typeKey.length && typeKey(
-                  i + 1
-                ) == '>' =>
-              lastArrowIdx = i
-            case _ => ()
+        val (_, lastArrowIdx) =
+          typeKey.zipWithIndex.dropRight(1).foldLeft((0, -1)) {
+            case ((depth, lastArrow), ('[' | '(' | '{', _)) =>
+              (depth + 1, lastArrow)
+            case ((depth, lastArrow), (']' | ')' | '}', _)) =>
+              (depth - 1, lastArrow)
+            case ((0, _), ('-', idx))
+                if idx + 1 < typeKey.length && typeKey(idx + 1) == '>' =>
+              (0, idx)
+            case ((depth, lastArrow), _) =>
+              (depth, lastArrow)
           }
-          i += 1
-        }
         lastArrowIdx >= 0 match {
-          case true  => typeKey.substring(lastArrowIdx + 2) // Skip "->"
-          case false => typeKey // No arrow, return as-is
+          case true  => typeKey.substring(lastArrowIdx + 2)
+          case false => typeKey
         }
     }
 
@@ -174,18 +169,22 @@ object GrinUtils {
       State.pure(None)
   }
 
-  def freeVars(term: Term): ContextState[List[(String, String)]] =
+  def freeVars(term: Term): ContextState[List[(String, String, Boolean)]] =
     Context.run(extractFreeVars(term))
 
-  def extractFreeVars(term: Term): ContextState[List[(String, String)]] =
+  def extractFreeVars(
+      term: Term
+  ): ContextState[List[(String, String, Boolean)]] =
     term match {
       case TermVar(info, idx, ctxLength) =>
         toContextState(Context.getBinding(info, idx))
           .flatMap(_ match {
-            case VarBind(_) =>
-              getNameFromIndex(idx).flatMap(v =>
-                addTempVariable(v).map { p => List((v, p)) }
-              )
+            case VarBind(ty) =>
+              for {
+                v <- getNameFromIndex(idx)
+                p <- addTempVariable(v)
+                isFunc <- isFunctionType(ty)
+              } yield List((v, p, isFunc))
             // TODO: Capture constructors/functions in closures to avoid De Bruijn index issues
             // Currently TermAbbBind captures cause wrong constructors due to index corruption
             case _ =>

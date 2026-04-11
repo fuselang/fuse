@@ -1,0 +1,94 @@
+type Option[T]:
+    None
+    Some(T)
+
+type Term:
+    Var(index: i32, ctxlen: i32)
+    Abs(hint: str, body: Term)
+    App(t1: Term, t2: Term)
+
+fun term_shift_above(d: i32, c: i32, t: Term) -> Term
+    match t:
+        Abs(hint, body) => Abs(hint, term_shift_above(d, c + 1, body))
+        App(t1, t2) => App(term_shift_above(d, c, t1), term_shift_above(d, c, t2))
+        Var(x, n) => {
+            match x >= c:
+                true => Var(x + d, n + d)
+                false => Var(x, n + d)
+        }
+
+fun term_shift(d: i32, t: Term) -> Term
+    term_shift_above(d, 0, t)
+
+fun term_subst(j: i32, s: Term, t: Term) -> Term
+    match t:
+        Abs(hint, body) => Abs(hint, term_subst(j + 1, s, body))
+        App(t1, t2) => App(term_subst(j, s, t1), term_subst(j, s, t2))
+        Var(x, n) => {
+            match x == j:
+                true => term_shift(j, s)
+                false => Var(x, n)
+        }
+
+fun term_subst_top(s: Term, t: Term) -> Term
+    term_shift(0 - 1, term_subst(0, term_shift(1, s), t))
+
+fun is_val(t: Term) -> bool
+    match t:
+        Abs(h, b) => true
+        _ => false
+
+fun eval1(t: Term) -> Option[Term]
+    match t:
+        App(t1, t2) => {
+            match t1:
+                Abs(hint, body) => {
+                    match is_val(t2):
+                        true => Some(term_subst_top(t2, body))
+                        false => {
+                            match eval1(t2):
+                                Some(t2p) => Some(App(t1, t2p))
+                                None => None[Term]
+                        }
+                }
+                _ => {
+                    match eval1(t1):
+                        Some(t1p) => Some(App(t1p, t2))
+                        None => None[Term]
+                }
+        }
+        _ => None[Term]
+
+fun eval(t: Term) -> Term
+    match eval1(t):
+        Some(tp) => eval(tp)
+        None => t
+
+fun term_to_str(t: Term) -> str
+    match t:
+        Var(x, n) => int_to_str(x)
+        Abs(hint, body) => "(\\" + hint + ". " + term_to_str(body) + ")"
+        App(t1, t2) => "(" + term_to_str(t1) + " " + term_to_str(t2) + ")"
+
+fun println(s: str) -> Unit
+    print(s + "\n")
+    ()
+
+fun main() -> i32
+    let id = Abs("x", Var(0, 1))
+    let app_id = App(Abs("x", Var(0, 1)), Abs("y", Var(0, 1)))
+    let tru = Abs("t", Abs("f", Var(1, 2)))
+    let fls = Abs("t", Abs("f", Var(0, 2)))
+    let c0 = Abs("s", Abs("z", Var(0, 2)))
+    let c1 = Abs("s", Abs("z", App(Var(1, 2), Var(0, 2))))
+    let c2 = Abs("s", Abs("z", App(Var(1, 2), App(Var(1, 2), Var(0, 2)))))
+    let scc = Abs("n", Abs("s", Abs("z", App(Var(1, 3), App(App(Var(2, 3), Var(1, 3)), Var(0, 3))))))
+    println("id = " + term_to_str(id))
+    println("(id id) = " + term_to_str(eval(app_id)))
+    println("tru = " + term_to_str(tru))
+    println("fls = " + term_to_str(fls))
+    println("c0 = " + term_to_str(c0))
+    println("c1 = " + term_to_str(c1))
+    println("scc c0 = " + term_to_str(eval(App(scc, c0))))
+    println("scc c1 = " + term_to_str(eval(App(scc, c1))))
+    0

@@ -28,7 +28,7 @@ object Desugar {
   val MapMethod = "map"
 
   // Patterns
-  val AlphaNum = "[a-zA-Z0-9]+";
+  val AlphaNum = "[a-zA-Z0-9_]+";
   val TypeInstanceMethodPattern =
     s"$MethodNamePrefix($AlphaNum)#($AlphaNum)#($AlphaNum)".r
   val TypeInstancePattern =
@@ -307,7 +307,8 @@ object Desugar {
         } yield TermMatch(info, me, mc.flatten)
       case FDo(info, actions) =>
         actions.toList match {
-          case actions :+ (last: FInfixExpr) => toFlatExpr(actions, last)
+          case actions :+ (last: FInfixExpr) =>
+            Context.runE(toFlatExpr(actions, last))
           case _ => DesugarError.format(DoRequiresYieldExprDesugarError(info))
         }
       case FProj(info, expr, projections) => toTermProj(info, expr, projections)
@@ -609,8 +610,11 @@ object Desugar {
             )
           )
         )
+        val selfParamNames = selfTypeParams.toSeq.flatten.map(_.i.value).toSet
+        val dedupedFunctionTypeParams = functionTypeParams.toSeq.flatten
+          .filterNot(tp => selfParamNames.contains(tp.i.value))
         val typeParams =
-          selfTypeParams.toSeq.flatten ++ functionTypeParams.toSeq.flatten
+          selfTypeParams.toSeq.flatten ++ dedupedFunctionTypeParams
         val combinedParams = selfParam +: args.toSeq.flatten
         (Some(typeParams), Some(combinedParams))
       case Some(FParamsWithSelf(None, Some(params))) =>
@@ -625,8 +629,9 @@ object Desugar {
         .nameToIndex(ctx, toRecordConstructorID(i))
         .orElse(Context.nameToIndex(ctx, i))
         .orElse(Context.nameToIndex(ctx, toRecAbsId(i))) match {
-        case Some(index) => (ctx, Some(TermVar(info, index, ctx._1.length)))
-        case None        => (ctx, None)
+        case Some(index) =>
+          (ctx, Some(TermVar(info, index, ctx._1.length)))
+        case None => (ctx, None)
       }
     }
 

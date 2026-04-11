@@ -14,7 +14,8 @@ object Syntax {
       arity: Int,
       freeVarParameters: List[String],
       binding: LambdaBinding,
-      typeKey: String = "" // Type signature for closureMap lookup
+      typeKey: String = "", // Type signature for closureMap lookup
+      freeVarIsFunction: List[Boolean] = List()
   ) extends Expr
   case class FunctionValue(
       f: String,
@@ -70,7 +71,8 @@ object Syntax {
   case class Env(
       closureMap: Map[String, List[String]] = Map.empty,
       arityFactsMap: Map[String, ArityFact] = Map.empty,
-      closureTypesFromBind: Map[String, Type] = Map.empty
+      closureTypesFromBind: Map[String, Type] = Map.empty,
+      closureTypesFallback: Map[String, Type] = Map.empty
   )
 
   object Env {
@@ -112,13 +114,14 @@ object Syntax {
   // Show instances
   implicit val showExpr: Show[Expr] =
     Show.show(_ match {
-      case Value(e)                           => e
-      case FunctionValue(f, _, _, _)          => f
-      case ClosureValue(f, _, freeVars, _, _) => s"$f ${freeVars.mkString(" ")}"
-      case PartialFunValue(f, _, _, _, _)     => f
-      case AppExpr(e, _, i, _, _)             => indent(i, e)
-      case BindExpr(e, _, _, i)               => indent(i, e)
-      case MultiLineExpr(exprs, result)       =>
+      case Value(e)                              => e
+      case FunctionValue(f, _, _, _)             => f
+      case ClosureValue(f, _, freeVars, _, _, _) =>
+        s"$f ${freeVars.mkString(" ")}"
+      case PartialFunValue(f, _, _, _, _) => f
+      case AppExpr(e, _, i, _, _)         => indent(i, e)
+      case BindExpr(e, _, _, i)           => indent(i, e)
+      case MultiLineExpr(exprs, result)   =>
         (exprs.filter(b => !b.repr.isBlank) :+ result)
           .map((_: Expr).show)
           .mkString("\n")

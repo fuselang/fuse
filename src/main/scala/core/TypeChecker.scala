@@ -192,7 +192,9 @@ object TypeChecker {
           typeBounds <- EitherT.liftF(
             getTypeBounds(rootTypeVarOption.getOrElse(tyS))
           )
-          assocMethodType <- inferMethod(ty, tyS, typeBounds, method, info)
+          // If method is already specialized, extract the base method name
+          baseMethod = SpecializedMethodUtils.extractBaseMethodName(method)
+          assocMethodType <- inferMethod(ty, tyS, typeBounds, baseMethod, info)
         } yield (assocMethodType, Nil)
       case TermFix(info, t1) =>
         for {
@@ -302,7 +304,7 @@ object TypeChecker {
             } yield (Some(cT), accInsts ::: patternInsts ::: caseExprInsts)
           }
         } yield caseType match {
-          case (t, insts) => (t.getOrElse(TypeUnit(info)), insts)
+          case (t, insts) => (t.getOrElse(TypeUnit(info)), exprInsts ::: insts)
         }
       case TermTag(info, tag, t1, ty1) =>
         for {

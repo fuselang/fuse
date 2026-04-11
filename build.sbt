@@ -13,14 +13,15 @@ val sharedSettings = Seq(
     "-unchecked",
     "-language:postfixOps"
   ),
-  libraryDependencies += "org.parboiled" %%% "parboiled" % "2.5.0",
-  libraryDependencies += "org.typelevel" %%% "cats-core" % "2.11.0",
-  libraryDependencies += "org.typelevel" %%% "cats-effect" % "3.5.7" withSources () withJavadoc (),
-  libraryDependencies += "com.monovore" %%% "decline" % "2.4.0",
-  libraryDependencies += "com.monovore" %%% "decline-effect" % "2.4.0",
-  libraryDependencies += "com.lihaoyi" %%% "fansi" % "0.4.0",
-  libraryDependencies += "org.scalameta" %%% "munit" % "1.0.0-M11" % Test,
-  libraryDependencies += "org.typelevel" %%% "munit-cats-effect" % "2.0.0-M5" % Test,
+  resolvers += "jitpack" at "https://jitpack.io",
+  libraryDependencies += "com.github.sirthias.parboiled2" %%% "parboiled" % "6c4471fc8b",
+  libraryDependencies += "org.typelevel" %%% "cats-core" % "2.13.0",
+  libraryDependencies += "org.typelevel" %%% "cats-effect" % "3.7.0" withSources () withJavadoc (),
+  libraryDependencies += "com.monovore" %%% "decline" % "2.6.1",
+  libraryDependencies += "com.monovore" %%% "decline-effect" % "2.6.1",
+  libraryDependencies += "com.lihaoyi" %%% "fansi" % "0.5.1",
+  libraryDependencies += "org.scalameta" %%% "munit" % "1.2.4" % Test,
+  libraryDependencies += "org.typelevel" %%% "munit-cats-effect" % "2.2.0" % Test,
   testFrameworks += new TestFramework("munit.Framework")
 )
 

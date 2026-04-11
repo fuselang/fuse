@@ -2,23 +2,51 @@ type List[A]:
     Cons(h: A, t: List[A])
     Nil
 
+trait Functor[A]:
+    fun map[B](self, f: A -> B) -> Self[B];
+
 impl List[A]:
     fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
         match as:
             Cons(x, xs) => f(x, List::fold_right(xs, z, f))
             Nil => z
 
+    fun fold_left[A, B](l: List[A], acc: B, f: (B, A) -> B) -> B
+        match l:
+            Cons(h, t) => List::fold_left(t, f(acc, h), f)
+            Nil => acc
+
+    fun append[A](l1: List[A], l2: List[A]) -> List[A]
+        List::fold_right(l1, l2, (h, t) => Cons(h, t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+    fun product(l: List[i32]) -> i32
+        List::fold_left(l, 1, (acc, b) => acc * b)
+
+    fun filter[A](self, f: A -> bool) -> List[A]
+        List::fold_right(self, Nil[A], (h, t) => {
+            match f(h):
+                true => Cons(h, t)
+                false => t
+        })
+
+impl Functor[A] for List[A]:
     fun map[B](self, f: A -> B) -> List[B]
         List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
 
+fun fmap[A, B, T: Functor](f: A -> B, c: T[A]) -> T[B]
+    c.map(f)
+
 fun main() -> i32
     let l = Cons(2, Cons(3, Nil))
-    let l1 = l.map(v => v + 1)
-    let result = {
-        match l1:
-            Cons(h, t) => h
-            Nil => 0
-    }
-    print(int_to_str(result))
+    let l1 = fmap(v => v + 1, l)
+    let l2 = Cons(7, Nil)
+    let l3 = List::append(l1, l2)
+    let l4 = l3.filter(e => e > 3)
+    let s = List::sum(l4)
+    let p = List::product(l4)
+    print(int_to_str(s + p))
     0
-       
+      

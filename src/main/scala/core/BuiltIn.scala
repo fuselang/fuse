@@ -69,7 +69,9 @@ object BuiltIn {
           Representation.typeToString(ty).value.runA(emptyContext).value.merge,
           ty,
           op.operator,
-          TermBuiltin(buildFunc(List(ty, ty), ty))
+          TermBuiltin(
+            buildFunc(List(ty, ty), if (op.compareOp) TypeBool(i) else ty)
+          )
         )
       )
       .flatten

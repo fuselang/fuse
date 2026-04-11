@@ -333,6 +333,23 @@ object Context {
       }.toList
     }
 
+  /** Returns all methods of a type class, including both abstract (required)
+    * and default (provided) implementations.
+    */
+  def getAllTypeClassMethods(cls: String): ContextState[List[String]] =
+    State.inspect { (ctx: Context) =>
+      getNotes(ctx)
+        .collect {
+          case (Desugar.MethodPattern(method, c), _: TermAbbBind) if cls == c =>
+            method
+          case (Desugar.TypeInstanceMethodPattern(method, _, c), _: TermAbbBind)
+              if cls == c =>
+            method
+        }
+        .toList
+        .distinct
+    }
+
   // region: existential variables
 
   def addEVar(
@@ -365,13 +382,14 @@ object Context {
       }.isDefined
     }
 
-  def insertEArrow(
-      eA: TypeEVar
+  def insertEStructure(
+      eA: TypeEVar,
+      mkType: (Info, TypeEVar, TypeEVar) => Type
   ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeESolutionBind]] = for {
     (idx, cls) <- getFreeEVarIndex(eA)
     ty1 <- EitherT.liftF(freshEVar("a1", eA.info, cls))
     ty2 <- EitherT.liftF(freshEVar("a2", eA.info, cls))
-    sol = TypeESolutionBind(TypeArrow(eA.info, ty1, ty2))
+    sol = TypeESolutionBind(mkType(eA.info, ty1, ty2))
     notes = List(
       (eA.name, sol),
       (ty1.name, TypeEFreeBind),
@@ -386,26 +404,15 @@ object Context {
     })
   } yield (ty1, ty2, sol)
 
+  def insertEArrow(
+      eA: TypeEVar
+  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeESolutionBind]] =
+    insertEStructure(eA, (info, t1, t2) => TypeArrow(info, t1, t2))
+
   def insertEApp(
       eA: TypeEVar
-  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeESolutionBind]] = for {
-    (idx, cls) <- getFreeEVarIndex(eA)
-    ty1 <- EitherT.liftF(freshEVar("a1", eA.info, cls))
-    ty2 <- EitherT.liftF(freshEVar("a2", eA.info, cls))
-    sol = TypeESolutionBind(TypeApp(eA.info, ty1, ty2))
-    notes = List(
-      (eA.name, sol),
-      (ty1.name, TypeEFreeBind),
-      (ty2.name, TypeEFreeBind)
-    )
-    s <- EitherT.liftF(State.modify { (ctx: Context) =>
-      {
-        val (postNotes, preNotes) =
-          getNotes(ctx, withMarks = true).toList.splitAt(idx)
-        (postNotes ::: notes ::: preNotes.tail, ctx._2)
-      }
-    })
-  } yield (ty1, ty2, sol)
+  ): StateEither[Tuple3[TypeEVar, TypeEVar, TypeESolutionBind]] =
+    insertEStructure(eA, (info, t1, t2) => TypeApp(info, t1, t2))
 
   /** Replaces existential variable at specified index with existential type
     * solution binding.

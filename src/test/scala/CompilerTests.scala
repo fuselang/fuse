@@ -938,9 +938,12 @@ impl Functor for Option[A]:
       Some(v) => Some(f(v))
       _ => None
 
+fun fmap[A, B, F: Functor](f: A -> B, c: F[A]) -> F[B]
+    c.map(f)
+
 fun main() -> i32
     let o = Some(5)
-    o.map(a => a + 1)
+    fmap(a => a + 1, o)
     0
         """)
   }
@@ -1432,7 +1435,7 @@ fun main() -> i32
         """,
       CheckOutput(
         Some(
-          "expected type of `Right[{unknown}][{unknown}]`, found `Option[i32]`"
+          "expected `[Self::* -> *]: Monad, [A::*], [B::*] => Self[A] -> A -> Self[B] -> Self[B]`, found `[A::*], [B::*], [C::*] => Either[A][B] -> A -> Either[C][B] -> Either[C][B]` for `flat_map`"
         )
       )
     )
@@ -1550,6 +1553,67 @@ fun main() -> i32
       CheckOutput(None)
     )
   }
+  test("check generic list with fold_right using map and sum") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    let s = List::sum(l1)
+    print(int_to_str(s))
+    0
+        """,
+      CheckOutput(None)
+    )
+  }
+  test("check generic list with fold_right using flat_map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun append[A](l1: List[A], l2: List[A]) -> List[A]
+        List::fold_right(l1, l2, (h, t) => Cons(h, t))
+
+    fun flat_map[B](self, f: A -> List[B]) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => List::append(f(h), t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+fun main() -> i32
+    let l = Cons(1, Cons(2, Cons(3, Nil)))
+    let l1 = l.flat_map(v => Cons(v, Cons(v * 10, Nil)))
+    let s = List::sum(l1)
+    print(int_to_str(s))
+    0
+        """,
+      CheckOutput(None)
+    )
+  }
   test("check generic list with fold_right using chained map") {
     fuse(
       """
@@ -1574,6 +1638,423 @@ fun main() -> i32
         """,
       CheckOutput(None)
     )
+  }
+
+  test("check generic list with append and product using fold_left") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun fold_left[A, B](l: List[A], acc: B, f: (B, A) -> B) -> B
+        match l:
+            Cons(h, t) => List::fold_left(t, f(acc, h), f)
+            Nil => acc
+
+    fun append[A](l1: List[A], l2: List[A]) -> List[A]
+        List::fold_right(l1, l2, (h, t) => Cons(h, t))
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+    fun product(l: List[i32]) -> i32
+        List::fold_left(l, 1, (acc, b) => acc * b)
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    let l2 = Cons(7, Nil)
+    let l3 = List::append(l1, l2)
+    let s = List::sum(l3)
+    let p = List::product(l3)
+    print(int_to_str(s + p))
+    0
+        """,
+      CheckOutput(None)
+    )
+  }
+
+  test("build generic list with append called from main") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun append[A](l1: List[A], l2: List[A]) -> List[A]
+        List::fold_right(l1, l2, (h, t) => Cons(h, t))
+
+fun main() -> i32
+    let l1 = Cons(1, Nil)
+    let l2 = Cons(2, Nil)
+    let l3 = List::append(l1, l2)
+    0
+        """,
+      BuildOutput("""
+Cons'i32 h0 t1 =
+ store (CConsi32 h0 t1)
+
+Nil'i32 =  store (CNili32)
+
+appendListi32' l12 l23 =
+ p8 <- pure (P2c5 )
+ foldrightListi32Listi32' l12 l23 p8
+
+c5 h5 t6 =
+ Cons'i32 h5 t6
+
+grinMain _8 =
+ p10 <- Nil'i32
+ l110 <-  Cons'i32 1 p10
+ p12 <- Nil'i32
+ l212 <-  Cons'i32 2 p12
+ l314 <-  appendListi32' l110 l212
+ pure 0
+
+foldrightListi32Listi32' as15 z16 f''17 =
+ p20 <- fetch as15
+ case p20 of
+  (CConsi32 x20 xs'21) ->
+   p23'' <- apply2_List_i32 f''17 x20
+   p24 <- foldrightListi32Listi32' xs'21 z16 f''17
+   p25 <- apply1_List_i32 p23'' p24
+   pure p25
+  #default ->
+   pure z16
+
+apply1_List_i32 p26 p27 =
+ case p26 of
+  (P1c5 p28) ->
+   c5 p28 p27
+
+apply2_List_i32 p29 p30 =
+ case p29 of
+  (P2c5) ->
+   pure (P1c5 p30)""")
+    )
+  }
+
+  test("build generic list with append and product using fold_left") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun fold_left[A, B](l: List[A], acc: B, f: (B, A) -> B) -> B
+        match l:
+            Cons(h, t) => List::fold_left(t, f(acc, h), f)
+            Nil => acc
+
+    fun append[A](l1: List[A], l2: List[A]) -> List[A]
+        List::fold_right(l1, l2, (h, t) => Cons(h, t))
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+    fun product(l: List[i32]) -> i32
+        List::fold_left(l, 1, (acc, b) => acc * b)
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    let l2 = Cons(7, Nil)
+    let l3 = List::append(l1, l2)
+    let s = List::sum(l3)
+    let p = List::product(l3)
+    print(int_to_str(s + p))
+    0
+        """,
+      BuildOutput("""
+Cons'i32 h0 t1 =
+ store (CConsi32 h0 t1)
+
+Nil'i32 =  store (CNili32)
+
+foldrightListi32i32' as2 z3 f''4 =
+ p7 <- fetch as2
+ case p7 of
+  (CConsi32 x7 xs'8) ->
+   p10'' <- apply2_i32 f''4 x7
+   p11 <- foldrightListi32i32' xs'8 z3 f''4
+   p12 <- apply1_i32 p10'' p11
+   pure p12
+  #default ->
+   pure z3
+
+foldleftListi32i32' l12 acc13 f''14 =
+ p17 <- fetch l12
+ case p17 of
+  (CConsi32 h17 t'18) ->
+   p20'' <- apply2_i32 f''14 acc13
+   p21 <- apply1_i32 p20'' h17
+   p22 <- foldleftListi32i32' t'18 p21 f''14
+   pure p22
+  #default ->
+   pure acc13
+
+appendListi32' l122 l223 =
+ p28 <- pure (P2c25 )
+ foldrightListi32Listi32' l122 l223 p28
+
+c25 h25 t26 =
+ Cons'i32 h25 t26
+
+mapListi32i32' self28 f''29 =
+ p31 <- Nil'i32
+ p38 <- store f''29
+ p39 <- pure (P2c32 p38)
+ foldrightListi32Listi32' self28 p31 p39
+
+c32 f''2933 h34 t35 =
+ f''293334 <- fetch f''2933
+ p37 <- c68 h34
+ Cons'i32 p37 t35
+
+sumList' l39 =
+ p51 <- pure (P2c41 )
+ foldrightListi32i32' l39 0 p51
+
+c41 acc41 b42 =
+ _prim_int_add acc41 b42
+
+productList' l51 =
+ p63 <- pure (P2c53 )
+ foldleftListi32i32' l51 1 p63
+
+c53 acc53 b54 =
+ _prim_int_mul acc53 b54
+
+grinMain _63 =
+ p65 <- Nil'i32
+ p66 <- Cons'i32 3 p65
+ l66 <-  Cons'i32 2 p66
+ p74 <- pure (P1c68 )
+ l174 <-  mapListi32i32' l66 p74
+ p76 <- Nil'i32
+ l276 <-  Cons'i32 7 p76
+ l378 <-  appendListi32' l174 l276
+ s80 <-  sumList' l378
+ p82 <-  productList' l378
+ p84 <- _prim_int_add s80 p82
+ p85 <- _prim_int_str p84
+ _86 <-  _prim_string_print p85
+ pure 0
+
+c68 v68 =
+ _prim_int_add v68 1
+
+foldrightListi32Listi32' as87 z88 f''89 =
+ p92 <- fetch as87
+ case p92 of
+  (CConsi32 x92 xs'93) ->
+   p95'' <- apply2_List_i32 f''89 x92
+   p96 <- foldrightListi32Listi32' xs'93 z88 f''89
+   p97 <- apply1_List_i32 p95'' p96
+   pure p97
+  #default ->
+   pure z88
+
+apply1_List_i32 p98 p99 =
+ case p98 of
+  (P1c25 p100) ->
+   c25 p100 p99
+  (P1c32 p101 p102) ->
+   c32 p101 p102 p99
+
+apply1_i32 p103 p104 =
+ case p103 of
+  (P1c41 p105) ->
+   c41 p105 p104
+  (P1c53 p106) ->
+   c53 p106 p104
+  (P1c68) ->
+   c68 p104
+
+apply2_List_i32 p107 p108 =
+ case p107 of
+  (P2c25) ->
+   pure (P1c25 p108)
+  (P2c32 p109) ->
+   pure (P1c32 p109 p108)
+
+apply2_i32 p110 p111 =
+ case p110 of
+  (P2c41) ->
+   pure (P1c41 p111)
+  (P2c53) ->
+   pure (P1c53 p111)""")
+    )
+  }
+
+  test("check list filter with comparison operator") {
+    fuse("""
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun filter[A](self, f: A -> bool) -> List[A]
+        List::fold_right(self, Nil[A], (h, t) => {
+            match f(h):
+                true => Cons(h, t)
+                false => t
+        })
+
+fun main() -> i32
+    let l = Cons(1, Cons(2, Cons(3, Nil)))
+    let l2 = l.filter(e => e > 1)
+    0
+        """)
+  }
+
+  test("check do expr build output") {
+    val code = """
+trait Monad[A]:
+  fun unit[A](a: A) -> Self[A];
+  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
+  fun map[B](self, f: A -> B) -> Self[B];
+
+type Option[T]:
+  Some(T)
+  None
+
+impl Monad for Option[A]:
+  fun unit[A](a: A) -> Option[A]
+    Some(a)
+  fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
+    match self:
+      Some(v) => f(v)
+      _ => None
+  fun map[B](self, f: A -> B) -> Option[B]
+    match self:
+      Some(v) => Some(f(v))
+      _ => None
+
+fun main() -> i32
+  let x = Some(1)
+  let y = Some(2)
+  let result = x.flat_map(i => y.map(j => i + j))
+  match result:
+    Some(v) => {
+      print(int_to_str(v))
+      0
+    }
+    _ => 1
+        """
+    val result = build(code)
+    result match {
+      case Right(grin) => grin.split("\n").foreach(l => println(s"GRIN> $l"))
+      case Left(err)   => println(s"ERR> $err")
+    }
+    assert(result.isRight, s"Build failed: ${result.merge}")
+  }
+
+  test("check multi-param lambda unused") {
+    fuse("""
+fun main() -> i32
+    let f = a => a + 1
+    let g = (x, y) => x + y
+    print(int_to_str(f(5)))
+    0
+        """)
+  }
+
+  test("check method call chaining") {
+    fuse("""
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+    fun filter[A](self, f: A -> bool) -> List[A]
+        List::fold_right(self, Nil[A], (h, t) => {
+            match f(h):
+                true => Cons(h, t)
+                false => t
+        })
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let result = l.map(v => v + 1).filter(e => e > 3)
+    let s = List::sum(result)
+    print(int_to_str(s))
+    0
+        """)
+  }
+
+  test("check monad trait flat_map with nested map") {
+    fuse("""
+trait Monad[A]:
+  fun unit[A](a: A) -> Self[A];
+  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
+  fun map[B](self, f: A -> B) -> Self[B];
+
+type Option[T]:
+  Some(T)
+  None
+
+impl Monad for Option[A]:
+  fun unit[A](a: A) -> Option[A]
+    Some(a)
+  fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
+    match self:
+      Some(v) => f(v)
+      _ => None
+  fun map[B](self, f: A -> B) -> Option[B]
+    match self:
+      Some(v) => Some(f(v))
+      _ => None
+
+fun main() -> i32
+  let x = Some(1)
+  let y = Some(2)
+  let result = x.flat_map(i => y.map(j => i + j))
+  match result:
+    Some(v) => v
+    _ => 0
+    """)
   }
 
 }
@@ -2315,9 +2796,12 @@ impl Functor for Option[A]:
       Some(v) => Some(f(v))
       _ => None
 
+fun fmap[A, B, F: Functor](f: A -> B, c: F[A]) -> F[B]
+    c.map(f)
+
 fun main() -> i32
     let o = Some(5)
-    o.map(a => a + 1)
+    fmap(a => a + 1, o)
     0
         """,
       BuildOutput("""Some'i32 t10 =
@@ -2336,19 +2820,22 @@ mapOptionFunctori32i32' self1 f''2 =
    p9 <- None'i32
    pure p9
 
-grinMain _9 =
- o10 <-  Some'i32 5
- p18 <- pure (P1c12 )
- _18 <-  mapOptionFunctori32i32' o10 p18
+fmap'i32'i32'Option f''9 c10 =
+ mapOptionFunctori32i32' c10 f''9
+
+grinMain _11 =
+ o12 <-  Some'i32 5
+ p20 <- pure (P1c14 )
+ _20 <-  fmap'i32'i32'Option p20 o12
  pure 0
 
-c12 a12 =
- _prim_int_add a12 1
+c14 a14 =
+ _prim_int_add a14 1
 
-apply1_i32 p20 p21 =
- case p20 of
-  (P1c12) ->
-   c12 p21
+apply1_i32 p22 p23 =
+ case p22 of
+  (P1c14) ->
+   c14 p23
 """)
     )
   }
@@ -2512,7 +2999,7 @@ flatmapOptioni32i32' self10 f''11 =
  p14 <- fetch self10
  case p14 of
   (CSomei32 a14) ->
-   p16 <- apply1_T13_i32 f''11 a14
+   p16 <- apply1_Option_i32 f''11 a14
    pure p16
   #default ->
    p17 <- None'i32
@@ -2542,7 +3029,7 @@ c29 t29 =
  p31 <- _prim_int_add t29 1
  Some'i32 p31
 
-apply1_T13_i32 p43 p44 =
+apply1_Option_i32 p43 p44 =
  case p43 of
   (P1c29) ->
    c29 p44
@@ -2581,7 +3068,7 @@ value a6 =
    case p9 of
     (CState p10) ->
      pure p10
- t13 <-  apply1_T7_i32__i32 p11'' 1
+ t13 <-  apply1_Tuple_i32__i32 p11'' 1
  p16 <- fetch t13
  p19 <- do
    case p16 of
@@ -2604,7 +3091,7 @@ c26 a26 =
  p29 <- _prim_int_add a26 2
  Tuple'i32'i32 p28 p29
 
-apply1_T7_i32__i32 p36 p37 =
+apply1_Tuple_i32__i32 p36 p37 =
  case p36 of
   (P1c26) ->
    c26 p37
@@ -2642,58 +3129,60 @@ fun main() -> i32
 
 Nil'i32 =  store (CNili32)
 
-foldRightListi32i32' as2 z3 f''4 =
- p7 <- fetch as2
- case p7 of
-  (CConsi32 x7 xs'8) ->
-   p10'' <- apply2_i32_T4 f''4 x7
-   p11 <- foldRightListi32i32' xs'8 z3 f''4
-   p12 <- apply1_i32_T4 p10'' p11
-   pure p12
-  #default ->
-   pure z3
+mapListi32i32' self2 f''3 =
+ p5 <- Nil'i32
+ p12 <- store f''3
+ p13 <- pure (P2c6 p12)
+ foldRightListi32Listi32' self2 p5 p13
 
-mapListi32i32' self12 f''13 =
+c6 f''37 h8 t9 =
+ f''378 <- fetch f''37
+ p11 <- apply1_i32 f''378 h8
+ Cons'i32 p11 t9
+
+grinMain _13 =
  p15 <- Nil'i32
- p21 <- pure (P2c16 f''13)
- foldRightListi32i32' self12 p15 p21
-
-c16 f''1317 h17 t18 =
- p20 <- apply1_i32 f''1317 h17
- Cons'i32 p20 t18
-
-grinMain _21 =
- p23 <- Nil'i32
- p24 <- Cons'i32 3 p23
- l24 <-  Cons'i32 2 p24
- p32 <- pure (P1c26 )
- l132 <-  mapListi32i32' l24 p32
- p35 <- fetch l132
- case p35 of
-  (CConsi32 h35 t'36) ->
-   p38 <- _prim_int_str h35
-   _39 <-  _prim_string_print p38
+ p16 <- Cons'i32 3 p15
+ l16 <-  Cons'i32 2 p16
+ p24 <- pure (P1c18 )
+ l124 <-  mapListi32i32' l16 p24
+ p27 <- fetch l124
+ case p27 of
+  (CConsi32 h27 t'28) ->
+   p30 <- _prim_int_str h27
+   _31 <-  _prim_string_print p30
    pure 0
   #default ->
    pure 1
 
-c26 v26 =
- _prim_int_add v26 1
+c18 v18 =
+ _prim_int_add v18 1
 
-apply1_i32 p41 p42 =
- case p41 of
-  (P1c26) ->
-   c26 p42
+foldRightListi32Listi32' as32 z33 f''34 =
+ p37 <- fetch as32
+ case p37 of
+  (CConsi32 x37 xs'38) ->
+   p40'' <- apply2_List_i32 f''34 x37
+   p41 <- foldRightListi32Listi32' xs'38 z33 f''34
+   p42 <- apply1_List_i32 p40'' p41
+   pure p42
+  #default ->
+   pure z33
 
-apply1_i32_T4 p43 p44 =
+apply1_List_i32 p43 p44 =
  case p43 of
-  (P1c16 p45 p46) ->
-   c16 p45 p46 p44
+  (P1c6 p45 p46) ->
+   c6 p45 p46 p44
 
-apply2_i32_T4 p47 p48 =
+apply1_i32 p47 p48 =
  case p47 of
-  (P2c16 p49) ->
-   pure (P1c16 p49 p48)
+  (P1c18) ->
+   c18 p48
+
+apply2_List_i32 p49 p50 =
+ case p49 of
+  (P2c6 p51) ->
+   pure (P1c6 p51 p50)
 """)
     )
   }
@@ -2790,14 +3279,7 @@ mapwithmapperListi32i32' self2 mapper''3 =
  p6 <- fetch self2
  case p6 of
   (CConsi32 h6 t'7) ->
-   p9 <- do
-     case mapper''3 of
-      (P1c37) ->
-       apply1_i32 mapper''3 h6
-      (P1c45) ->
-       apply1_i32 mapper''3 h6
-      (P1c53) ->
-       apply1_i32 mapper''3 h6
+   p9 <- apply1_i32 mapper''3 h6
    p10 <- Nil'i32
    p11 <- Cons'i32 p9 p10
    pure p11
@@ -2809,14 +3291,7 @@ mapwithtransformListi32i32' self12 transform''13 =
  p16 <- fetch self12
  case p16 of
   (CConsi32 h16 t'17) ->
-   p19 <- do
-     case transform''13 of
-      (P1c37) ->
-       apply1_i32 transform''13 h16
-      (P1c45) ->
-       apply1_i32 transform''13 h16
-      (P1c53) ->
-       apply1_i32 transform''13 h16
+   p19 <- apply1_i32 transform''13 h16
    p20 <- Nil'i32
    p21 <- Cons'i32 p19 p20
    pure p21
@@ -2828,14 +3303,7 @@ mapwithcallbackListi32i32' self22 callback''23 =
  p26 <- fetch self22
  case p26 of
   (CConsi32 h26 t'27) ->
-   p29 <- do
-     case callback''23 of
-      (P1c37) ->
-       apply1_i32 callback''23 h26
-      (P1c45) ->
-       apply1_i32 callback''23 h26
-      (P1c53) ->
-       apply1_i32 callback''23 h26
+   p29 <- apply1_i32 callback''23 h26
    p30 <- Nil'i32
    p31 <- Cons'i32 p29 p30
    pure p31
@@ -2907,42 +3375,43 @@ fun main() -> i32
 Nil'i32 =  store (CNili32)
 
 map2Listi32i32' self2 f''3 =
- p17 <- Nil'i32
- iter5 f''3 self2 p17
+ p18 <- Nil'i32
+ iter5 f''3 self2 p18
 
-iter5 f''36 l6 acc7 =
- p10 <- fetch l6
- case p10 of
-  (CConsi32 h10 t'11) ->
-   p13 <- apply1_i32 f''36 h10
-   p14 <- Cons'i32 p13 acc7
-   p15 <- iter5 f''36 t'11 p14
-   pure p15
+iter5 f''36 l7 acc8 =
+ f''367 <- fetch f''36
+ p11 <- fetch l7
+ case p11 of
+  (CConsi32 h11 t'12) ->
+   p14 <- apply1_i32 f''367 h11
+   p15 <- Cons'i32 p14 acc8
+   p16 <- iter5 f''36 t'12 p15
+   pure p16
   #default ->
-   pure acc7
+   pure acc8
 
-grinMain _17 =
- p19 <- Nil'i32
- p20 <- Cons'i32 3 p19
- l20 <-  Cons'i32 2 p20
- p28 <- pure (P1c22 )
- l128 <-  map2Listi32i32' l20 p28
- p31 <- fetch l128
- case p31 of
-  (CConsi32 h31 t'32) ->
-   p34 <- _prim_int_str h31
-   _35 <-  _prim_string_print p34
+grinMain _18 =
+ p20 <- Nil'i32
+ p21 <- Cons'i32 3 p20
+ l21 <-  Cons'i32 2 p21
+ p29 <- pure (P1c23 )
+ l129 <-  map2Listi32i32' l21 p29
+ p32 <- fetch l129
+ case p32 of
+  (CConsi32 h32 t'33) ->
+   p35 <- _prim_int_str h32
+   _36 <-  _prim_string_print p35
    pure 0
   #default ->
    pure 1
 
-c22 v22 =
- _prim_int_add v22 1
+c23 v23 =
+ _prim_int_add v23 1
 
-apply1_i32 p37 p38 =
- case p37 of
-  (P1c22) ->
-   c22 p38
+apply1_i32 p38 p39 =
+ case p38 of
+  (P1c23) ->
+   c23 p39
 """)
     )
   }
@@ -2976,115 +3445,444 @@ Cons'Unit h2 t3 =
 
 Nil'i32 =  store (CNili32)
 
-foldrightListi32i32' as4 z5 f''6 =
- p9 <- fetch as4
- case p9 of
-  (CConsi32 x9 xs'10) ->
-   p12'' <- do
-     case f''6 of
-      (P2c28 _f''6_c28_0) ->
-       apply2_i32_T5 f''6 x9
-      (P2c37 _f''6_c37_0) ->
-       apply2_i32_T6 f''6 x9
-   p13 <- foldrightListi32i32' xs'10 z5 f''6
-   p14 <- do
-     case p12'' of
-      (P1c28 _p12''_c28_0 _p12''_c28_1) ->
-       apply1_i32_T5 p12'' p13
-      (P1c37 _p12''_c37_0 _p12''_c37_1) ->
-       apply1_i32_T6 p12'' p13
-   pure p14
+mapListi32i32' self4 f''5 =
+ p7 <- Nil'i32
+ p14 <- store f''5
+ p15 <- pure (P2c8 p14)
+ foldrightListi32Listi32' self4 p7 p15
+
+c8 f''59 h10 t11 =
+ f''5910 <- fetch f''59
+ p13 <- apply1_i32 f''5910 h10
+ Cons'i32 p13 t11
+
+mapListi32Unit' self15 f''16 =
+ p18 <- Nil'i32
+ p25 <- store f''16
+ p26 <- pure (P2c19 p25)
+ foldrightListi32ListUnit' self15 p18 p26
+
+c19 f''1620 h21 t22 =
+ f''162021 <- fetch f''1620
+ p24 <- apply1_unit f''162021 h21
+ Cons'Unit p24 t22
+
+grinMain _26 =
+ p28 <- Nil'i32
+ p29 <- Cons'i32 3 p28
+ l29 <-  Cons'i32 2 p29
+ p37 <- pure (P1c31 )
+ l137 <-  mapListi32i32' l29 p37
+ p46 <- pure (P1c39 )
+ _46 <-  mapListi32Unit' l137 p46
+ pure 0
+
+c31 v31 =
+ _prim_int_add v31 1
+
+c39 r39 =
+ p41 <- _prim_int_str r39
+ _prim_string_print p41
+
+foldrightListi32Listi32' as47 z48 f''49 =
+ p52 <- fetch as47
+ case p52 of
+  (CConsi32 x52 xs'53) ->
+   p55'' <- apply2_List_i32 f''49 x52
+   p56 <- foldrightListi32Listi32' xs'53 z48 f''49
+   p57 <- apply1_List_i32 p55'' p56
+   pure p57
   #default ->
-   pure z5
+   pure z48
 
-foldrightListi32Unit' as14 z15 f''16 =
- p19 <- fetch as14
- case p19 of
-  (CConsi32 x19 xs'20) ->
-   p22'' <- do
-     case f''16 of
-      (P2c28 _f''16_c28_0) ->
-       apply2_i32_T5 f''16 x19
-      (P2c37 _f''16_c37_0) ->
-       apply2_i32_T6 f''16 x19
-   p23 <- foldrightListi32Unit' xs'20 z15 f''16
-   p24 <- do
-     case p22'' of
-      (P1c28 _p22''_c28_0 _p22''_c28_1) ->
-       apply1_i32_T5 p22'' p23
-      (P1c37 _p22''_c37_0 _p22''_c37_1) ->
-       apply1_i32_T6 p22'' p23
-   pure p24
+foldrightListi32ListUnit' as57 z58 f''59 =
+ p62 <- fetch as57
+ case p62 of
+  (CConsi32 x62 xs'63) ->
+   p65'' <- apply2_List_unit f''59 x62
+   p66 <- foldrightListi32ListUnit' xs'63 z58 f''59
+   p67 <- apply1_List_unit p65'' p66
+   pure p67
   #default ->
-   pure z15
+   pure z58
 
-mapListi32i32' self24 f''25 =
- p27 <- Nil'i32
- p33 <- pure (P2c28 f''25)
- foldrightListi32i32' self24 p27 p33
+apply1_List_i32 p68 p69 =
+ case p68 of
+  (P1c8 p70 p71) ->
+   c8 p70 p71 p69
 
-c28 f''2529 h29 t30 =
- p32 <- apply1_i32 f''2529 h29
- Cons'i32 p32 t30
+apply1_List_unit p72 p73 =
+ case p72 of
+  (P1c19 p74 p75) ->
+   c19 p74 p75 p73
 
-mapListi32Unit' self33 f''34 =
- p36 <- Nil'i32
- p42 <- pure (P2c37 f''34)
- foldrightListi32Unit' self33 p36 p42
+apply1_i32 p76 p77 =
+ case p76 of
+  (P1c31) ->
+   c31 p77
 
-c37 f''3438 h38 t39 =
- p41 <- apply1_unit f''3438 h38
- Cons'Unit p41 t39
+apply1_unit p78 p79 =
+ case p78 of
+  (P1c39) ->
+   c39 p79
 
-grinMain _42 =
- p44 <- Nil'i32
- p45 <- Cons'i32 3 p44
- l45 <-  Cons'i32 2 p45
- p53 <- pure (P1c47 )
- l153 <-  mapListi32i32' l45 p53
- p62 <- pure (P1c55 )
- _62 <-  mapListi32Unit' l153 p62
+apply2_List_i32 p80 p81 =
+ case p80 of
+  (P2c8 p82) ->
+   pure (P1c8 p82 p81)
+
+apply2_List_unit p83 p84 =
+ case p83 of
+  (P2c19 p85) ->
+   pure (P1c19 p85 p84)
+""")
+    )
+  }
+
+  test("build generic list with fold right using flat_map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun append[A](l1: List[A], l2: List[A]) -> List[A]
+        List::fold_right(l1, l2, (h, t) => Cons(h, t))
+
+    fun flat_map[B](self, f: A -> List[B]) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => List::append(f(h), t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+fun main() -> i32
+    let l = Cons(1, Cons(2, Cons(3, Nil)))
+    let l1 = l.flat_map(v => Cons(v, Cons(v * 10, Nil)))
+    let s = List::sum(l1)
+    print(int_to_str(s))
+    0
+        """,
+      BuildOutput("""Cons'i32 h0 t1 =
+ store (CConsi32 h0 t1)
+
+Nil'i32 =  store (CNili32)
+
+foldrightListi32i32' as2 z3 f''4 =
+ p7 <- fetch as2
+ case p7 of
+  (CConsi32 x7 xs'8) ->
+   p10'' <- apply2_i32 f''4 x7
+   p11 <- foldrightListi32i32' xs'8 z3 f''4
+   p12 <- apply1_i32 p10'' p11
+   pure p12
+  #default ->
+   pure z3
+
+appendListi32' l112 l213 =
+ p18 <- pure (P2c15 )
+ foldrightListi32Listi32' l112 l213 p18
+
+c15 h15 t16 =
+ Cons'i32 h15 t16
+
+flatmapListi32i32' self18 f''19 =
+ p21 <- Nil'i32
+ p28 <- store f''19
+ p29 <- pure (P2c22 p28)
+ foldrightListi32Listi32' self18 p21 p29
+
+c22 f''1923 h24 t25 =
+ f''192324 <- fetch f''1923
+ p27 <- c47 h24
+ appendListi32' p27 t25
+
+sumList' l29 =
+ p41 <- pure (P2c31 )
+ foldrightListi32i32' l29 0 p41
+
+c31 acc31 b32 =
+ _prim_int_add acc31 b32
+
+grinMain _41 =
+ p43 <- Nil'i32
+ p44 <- Cons'i32 3 p43
+ p45 <- Cons'i32 2 p44
+ l45 <-  Cons'i32 1 p45
+ p56 <- pure (P1c47 )
+ l156 <-  flatmapListi32i32' l45 p56
+ s58 <-  sumList' l156
+ p60 <- _prim_int_str s58
+ _61 <-  _prim_string_print p60
  pure 0
 
 c47 v47 =
- _prim_int_add v47 1
+ p49 <- _prim_int_mul v47 10
+ p50 <- Nil'i32
+ p51 <- Cons'i32 p49 p50
+ Cons'i32 v47 p51
 
-c55 r55 =
- p57 <- _prim_int_str r55
- _prim_string_print p57
+foldrightListi32Listi32' as62 z63 f''64 =
+ p67 <- fetch as62
+ case p67 of
+  (CConsi32 x67 xs'68) ->
+   p70'' <- apply2_List_i32 f''64 x67
+   p71 <- foldrightListi32Listi32' xs'68 z63 f''64
+   p72 <- apply1_List_i32 p70'' p71
+   pure p72
+  #default ->
+   pure z63
 
-apply1_i32 p64 p65 =
- case p64 of
+apply1_List_i32 p73 p74 =
+ case p73 of
+  (P1c15 p75) ->
+   c15 p75 p74
+  (P1c22 p76 p77) ->
+   c22 p76 p77 p74
   (P1c47) ->
-   c47 p65
+   c47 p74
 
-apply1_i32_T5 p66 p67 =
+apply1_i32 p78 p79 =
+ case p78 of
+  (P1c31 p80) ->
+   c31 p80 p79
+
+apply2_List_i32 p81 p82 =
+ case p81 of
+  (P2c15) ->
+   pure (P1c15 p82)
+  (P2c22 p83) ->
+   pure (P1c22 p83 p82)
+
+apply2_i32 p84 p85 =
+ case p84 of
+  (P2c31) ->
+   pure (P1c31 p85)
+""")
+    )
+  }
+  test("build list filter with comparison") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+    fun filter[A](self, f: A -> bool) -> List[A]
+        List::fold_right(self, Nil[A], (h, t) => {
+            match f(h):
+                true => Cons(h, t)
+                false => t
+        })
+
+fun main() -> i32
+    let l = Cons(1, Cons(2, Cons(3, Nil)))
+    let l2 = l.filter(e => e > 1)
+    let s = List::sum(l2)
+    print(int_to_str(s))
+    0
+        """,
+      BuildOutput("""Cons'i32 h0 t1 =
+ store (CConsi32 h0 t1)
+
+Nil'i32 =  store (CNili32)
+
+foldrightListi32i32' as2 z3 f''4 =
+ p7 <- fetch as2
+ case p7 of
+  (CConsi32 x7 xs'8) ->
+   p10'' <- apply2_i32 f''4 x7
+   p11 <- foldrightListi32i32' xs'8 z3 f''4
+   p12 <- apply1_i32 p10'' p11
+   pure p12
+  #default ->
+   pure z3
+
+sumList' l12 =
+ p24 <- pure (P2c14 )
+ foldrightListi32i32' l12 0 p24
+
+c14 acc14 b15 =
+ _prim_int_add acc14 b15
+
+filterListi32' self24 f''25 =
+ p27 <- Nil'i32
+ p36 <- store f''25
+ p37 <- pure (P2c28 p36)
+ foldrightListi32Listi32' self24 p27 p37
+
+c28 f''2529 h30 t31 =
+ f''252930 <- fetch f''2529
+ p34 <- apply1_bool f''252930 h30
+ case p34 of
+  #True ->
+   p35 <- Cons'i32 h30 t31
+   pure p35
+  #False ->
+   pure t31
+
+grinMain _37 =
+ p39 <- Nil'i32
+ p40 <- Cons'i32 3 p39
+ p41 <- Cons'i32 2 p40
+ l41 <-  Cons'i32 1 p41
+ p49 <- pure (P1c43 )
+ l249 <-  filterListi32' l41 p49
+ s51 <-  sumList' l249
+ p53 <- _prim_int_str s51
+ _54 <-  _prim_string_print p53
+ pure 0
+
+c43 e43 =
+ _prim_int_gt e43 1
+
+foldrightListi32Listi32' as55 z56 f''57 =
+ p60 <- fetch as55
+ case p60 of
+  (CConsi32 x60 xs'61) ->
+   p63'' <- apply2_List_i32 f''57 x60
+   p64 <- foldrightListi32Listi32' xs'61 z56 f''57
+   p65 <- apply1_List_i32 p63'' p64
+   pure p65
+  #default ->
+   pure z56
+
+apply1_List_i32 p66 p67 =
  case p66 of
   (P1c28 p68 p69) ->
    c28 p68 p69 p67
 
-apply1_i32_T6 p70 p71 =
+apply1_bool p70 p71 =
  case p70 of
-  (P1c37 p72 p73) ->
-   c37 p72 p73 p71
+  (P1c43) ->
+   c43 p71
 
-apply1_unit p74 p75 =
- case p74 of
-  (P1c55) ->
-   c55 p75
+apply1_i32 p72 p73 =
+ case p72 of
+  (P1c14 p74) ->
+   c14 p74 p73
 
-apply2_i32_T5 p76 p77 =
- case p76 of
-  (P2c28 p78) ->
-   pure (P1c28 p78 p77)
+apply2_List_i32 p75 p76 =
+ case p75 of
+  (P2c28 p77) ->
+   pure (P1c28 p77 p76)
 
-apply2_i32_T6 p79 p80 =
- case p79 of
-  (P2c37 p81) ->
-   pure (P1c37 p81 p80)
-""")
+apply2_i32 p78 p79 =
+ case p78 of
+  (P2c14) ->
+   pure (P1c14 p79)""")
     )
   }
+
+  test("build monad trait flat_map with nested map") {
+    fuse(
+      """
+trait Monad[A]:
+  fun unit[A](a: A) -> Self[A];
+  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
+  fun map[B](self, f: A -> B) -> Self[B];
+
+type Option[T]:
+  Some(T)
+  None
+
+impl Monad for Option[A]:
+  fun unit[A](a: A) -> Option[A]
+    Some(a)
+  fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
+    match self:
+      Some(v) => f(v)
+      _ => None
+  fun map[B](self, f: A -> B) -> Option[B]
+    match self:
+      Some(v) => Some(f(v))
+      _ => None
+
+fun main() -> i32
+  let x = Some(1)
+  let y = Some(2)
+  let result = x.flat_map(i => y.map(j => i + j))
+  match result:
+    Some(v) => {
+      print(int_to_str(v))
+      0
+    }
+    _ => 1
+    """,
+      BuildOutput("""
+Some'i32 t10 =
+ store (CSomei32 t10)
+
+None'i32 =  store (CNonei32)
+
+flatmapOptionMonadi32i32' self1 f''2 =
+ p5 <- fetch self1
+ case p5 of
+  (CSomei32 v5) ->
+   p7 <- apply1_Option_i32 f''2 v5
+   pure p7
+  #default ->
+   p8 <- None'i32
+   pure p8
+
+mapOptionMonadi32i32' self8 f''9 =
+ p12 <- fetch self8
+ case p12 of
+  (CSomei32 v12) ->
+   p14 <- apply1_i32 f''9 v12
+   p15 <- Some'i32 p14
+   pure p15
+  #default ->
+   p16 <- None'i32
+   pure p16
+
+grinMain _16 =
+ x17 <-  Some'i32 1
+ y18 <-  Some'i32 2
+ p39 <- pure (P1c20 y18)
+ result39 <-  flatmapOptionMonadi32i32' x17 p39
+ p42 <- fetch result39
+ case p42 of
+  (CSomei32 v42) ->
+   p44 <- _prim_int_str v42
+   _45 <-  _prim_string_print p44
+   pure 0
+  #default ->
+   pure 1
+
+c20 y1821 i22 =
+ p31 <- pure (P1c24 i22)
+ mapOptionMonadi32i32' y1821 p31
+
+c24 i2225 j25 =
+ _prim_int_add i2225 j25
+
+apply1_Option_i32 p47 p48 =
+ case p47 of
+  (P1c20 p49) ->
+   c20 p49 p48
+
+apply1_i32 p50 p51 =
+ case p50 of
+  (P1c24 p52) ->
+   c24 p52 p51""")
+    )
+  }
+
 }
 
 class CompilerExecTests extends CompilerTests {
@@ -3636,13 +4434,16 @@ impl Functor for Option[A]:
       Some(v) => Some(f(v))
       _ => None
 
+fun fmap[A, B, F: Functor](f: A -> B, c: F[A]) -> F[B]
+    c.map(f)
+
 fun main() -> i32
     let o = Some(5)
-    let o1 = o.map(a => a + 1)
-    print("0")
+    fmap(a => a + 1, o)
+    print("ok")
     0
         """,
-      ExecutableOutput("0")
+      ExecutableOutput("ok")
     )
   }
   test("execute minimal generic option") {
@@ -3817,6 +4618,546 @@ fun main() -> i32
     0
       """,
       ExecutableOutput("43")
+    )
+  }
+
+  test("execute generic list with fold_right using map and sum") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    let s = List::sum(l1)
+    print(int_to_str(s))
+    0
+        """,
+      ExecutableOutput("7")
+    )
+  }
+
+  test("execute generic list with append map sum product") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun fold_left[A, B](l: List[A], acc: B, f: (B, A) -> B) -> B
+        match l:
+            Cons(h, t) => List::fold_left(t, f(acc, h), f)
+            Nil => acc
+
+    fun append[A](l1: List[A], l2: List[A]) -> List[A]
+        List::fold_right(l1, l2, (h, t) => Cons(h, t))
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+    fun product(l: List[i32]) -> i32
+        List::fold_left(l, 1, (acc, b) => acc * b)
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    let l2 = Cons(7, Nil)
+    let l3 = List::append(l1, l2)
+    let s = List::sum(l3)
+    let p = List::product(l3)
+    print(int_to_str(s + p))
+    0
+        """,
+      ExecutableOutput("98")
+    )
+  }
+
+  test("execute list.fuse with all list operations") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun fold_left[A, B](l: List[A], acc: B, f: (B, A) -> B) -> B
+        match l:
+            Cons(h, t) => List::fold_left(t, f(acc, h), f)
+            Nil => acc
+
+    fun append[A](l1: List[A], l2: List[A]) -> List[A]
+        List::fold_right(l1, l2, (h, t) => Cons(h, t))
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+    fun flat_map[B](self, f: A -> List[B]) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => List::append(f(h), t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+    fun product(l: List[i32]) -> i32
+        List::fold_left(l, 1, (acc, b) => acc * b)
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = l.map(v => v + 1)
+    let l2 = Cons(7, Nil)
+    let l3 = List::append(l1, l2)
+    let s = List::sum(l3)
+    let p = List::product(l3)
+    print(int_to_str(s + p))
+    0
+        """,
+      ExecutableOutput("98")
+    )
+  }
+
+  test("execute generic list with fold_right using flat_map") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun append[A](l1: List[A], l2: List[A]) -> List[A]
+        List::fold_right(l1, l2, (h, t) => Cons(h, t))
+
+    fun flat_map[B](self, f: A -> List[B]) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => List::append(f(h), t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+fun main() -> i32
+    let l = Cons(1, Cons(2, Cons(3, Nil)))
+    let l1 = l.flat_map(v => Cons(v, Cons(v * 10, Nil)))
+    let s = List::sum(l1)
+    print(int_to_str(s))
+    0
+        """,
+      ExecutableOutput("66")
+    )
+  }
+  test("exec list filter with comparison") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+    fun filter[A](self, f: A -> bool) -> List[A]
+        List::fold_right(self, Nil[A], (h, t) => {
+            match f(h):
+                true => Cons(h, t)
+                false => t
+        })
+
+fun main() -> i32
+    let l = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
+    let l2 = l.filter(e => e > 2)
+    let s = List::sum(l2)
+    print(int_to_str(s))
+    0
+        """,
+      ExecutableOutput("7")
+    )
+  }
+  test("execute nested match in case arm") {
+    fuse(
+      """
+type Animal:
+    Dog(age: i32)
+    Cat
+
+fun describe(a: Animal) -> i32
+    match a:
+        Dog(age) => {
+            match age > 5:
+                true => 1
+                false => 0
+        }
+        Cat => 2
+
+fun main() -> i32
+    print(int_to_str(describe(Dog(10))))
+    0
+      """,
+      ExecutableOutput("1")
+    )
+  }
+  test("execute untyped lambda calculus") {
+    fuse(
+      """
+type Term:
+    Var(index: i32, ctxlen: i32)
+    Abs(hint: str, body: Term)
+    App(t1: Term, t2: Term)
+
+type MaybeTerm:
+    Nothing
+    Just(Term)
+
+fun term_shift_above(d: i32, c: i32, t: Term) -> Term
+    match t:
+        Abs(hint, body) => Abs(hint, term_shift_above(d, c + 1, body))
+        App(t1, t2) => App(term_shift_above(d, c, t1), term_shift_above(d, c, t2))
+        Var(x, n) => {
+            match x >= c:
+                true => Var(x + d, n + d)
+                false => Var(x, n + d)
+        }
+
+fun term_shift(d: i32, t: Term) -> Term
+    term_shift_above(d, 0, t)
+
+fun term_subst(j: i32, s: Term, t: Term) -> Term
+    match t:
+        Abs(hint, body) => Abs(hint, term_subst(j + 1, s, body))
+        App(t1, t2) => App(term_subst(j, s, t1), term_subst(j, s, t2))
+        Var(x, n) => {
+            match x == j:
+                true => term_shift(j, s)
+                false => Var(x, n)
+        }
+
+fun term_subst_top(s: Term, t: Term) -> Term
+    term_shift(0 - 1, term_subst(0, term_shift(1, s), t))
+
+fun is_val(t: Term) -> bool
+    match t:
+        Abs(h, b) => true
+        _ => false
+
+fun eval1(t: Term) -> MaybeTerm
+    match t:
+        App(t1, t2) => {
+            match t1:
+                Abs(hint, body) => {
+                    match is_val(t2):
+                        true => Just(term_subst_top(t2, body))
+                        false => {
+                            match eval1(t2):
+                                Just(t2p) => Just(App(t1, t2p))
+                                Nothing => Nothing
+                        }
+                }
+                _ => {
+                    match eval1(t1):
+                        Just(t1p) => Just(App(t1p, t2))
+                        Nothing => Nothing
+                }
+        }
+        _ => Nothing
+
+fun eval(t: Term) -> Term
+    match eval1(t):
+        Just(tp) => eval(tp)
+        Nothing => t
+
+fun term_to_str(t: Term) -> str
+    match t:
+        Var(x, n) => int_to_str(x)
+        Abs(hint, body) => "(\\" + hint + ". " + term_to_str(body) + ")"
+        App(t1, t2) => "(" + term_to_str(t1) + " " + term_to_str(t2) + ")"
+
+fun println(s: str) -> Unit
+    print(s + "\n")
+    ()
+
+fun main() -> i32
+    let id = Abs("x", Var(0, 1))
+    let app_id = App(Abs("x", Var(0, 1)), Abs("y", Var(0, 1)))
+    println("id = " + term_to_str(id))
+    println("(id id) = " + term_to_str(eval(app_id)))
+    0
+      """,
+      ExecutableOutput("id = (\\x. 0)\n(id id) = (\\y. 0)")
+    )
+  }
+  test("execute untyped lambda with eval") {
+    fuse(
+      """
+type Option[T]:
+    None
+    Some(T)
+
+type Term:
+    Var(index: i32, ctxlen: i32)
+    Abs(hint: str, body: Term)
+    App(t1: Term, t2: Term)
+
+fun term_shift_above(d: i32, c: i32, t: Term) -> Term
+    match t:
+        Abs(hint, body) => Abs(hint, term_shift_above(d, c + 1, body))
+        App(t1, t2) => App(term_shift_above(d, c, t1), term_shift_above(d, c, t2))
+        Var(x, n) => {
+            match x >= c:
+                true => Var(x + d, n + d)
+                false => Var(x, n + d)
+        }
+
+fun term_shift(d: i32, t: Term) -> Term
+    term_shift_above(d, 0, t)
+
+fun term_subst(j: i32, s: Term, t: Term) -> Term
+    match t:
+        Abs(hint, body) => Abs(hint, term_subst(j + 1, s, body))
+        App(t1, t2) => App(term_subst(j, s, t1), term_subst(j, s, t2))
+        Var(x, n) => {
+            match x == j:
+                true => term_shift(j, s)
+                false => Var(x, n)
+        }
+
+fun term_subst_top(s: Term, t: Term) -> Term
+    term_shift(0 - 1, term_subst(0, term_shift(1, s), t))
+
+fun is_val(t: Term) -> bool
+    match t:
+        Abs(h, b) => true
+        _ => false
+
+fun eval1(t: Term) -> Option[Term]
+    match t:
+        App(t1, t2) => {
+            match t1:
+                Abs(hint, body) => {
+                    match is_val(t2):
+                        true => Some(term_subst_top(t2, body))
+                        false => {
+                            match eval1(t2):
+                                Some(t2p) => Some(App(t1, t2p))
+                                None => None[Term]
+                        }
+                }
+                _ => {
+                    match eval1(t1):
+                        Some(t1p) => Some(App(t1p, t2))
+                        None => None[Term]
+                }
+        }
+        _ => None[Term]
+
+fun eval(t: Term) -> Term
+    match eval1(t):
+        Some(tp) => eval(tp)
+        None => t
+
+fun term_to_str(t: Term) -> str
+    match t:
+        Var(x, n) => int_to_str(x)
+        Abs(hint, body) => "(\\" + hint + ". " + term_to_str(body) + ")"
+        App(t1, t2) => "(" + term_to_str(t1) + " " + term_to_str(t2) + ")"
+
+fun main() -> i32
+    let app_id = App(Abs("x", Var(0, 1)), Abs("y", Var(0, 1)))
+    print(term_to_str(eval(app_id)))
+    0
+      """,
+      ExecutableOutput("(\\y. 0)")
+    )
+  }
+  test("execute untyped lambda subst only") {
+    fuse(
+      """
+type Term:
+    Var(index: i32, ctxlen: i32)
+    Abs(hint: str, body: Term)
+    App(t1: Term, t2: Term)
+
+fun term_shift_above(d: i32, c: i32, t: Term) -> Term
+    match t:
+        Abs(hint, body) => Abs(hint, term_shift_above(d, c + 1, body))
+        App(t1, t2) => App(term_shift_above(d, c, t1), term_shift_above(d, c, t2))
+        Var(x, n) => {
+            match x >= c:
+                true => Var(x + d, n + d)
+                false => Var(x, n + d)
+        }
+
+fun term_shift(d: i32, t: Term) -> Term
+    term_shift_above(d, 0, t)
+
+fun term_subst(j: i32, s: Term, t: Term) -> Term
+    match t:
+        Abs(hint, body) => Abs(hint, term_subst(j + 1, s, body))
+        App(t1, t2) => App(term_subst(j, s, t1), term_subst(j, s, t2))
+        Var(x, n) => {
+            match x == j:
+                true => term_shift(j, s)
+                false => Var(x, n)
+        }
+
+fun term_subst_top(s: Term, t: Term) -> Term
+    term_shift(0 - 1, term_subst(0, term_shift(1, s), t))
+
+fun term_to_str(t: Term) -> str
+    match t:
+        Var(x, n) => int_to_str(x)
+        Abs(hint, body) => "(\\" + hint + ". " + term_to_str(body) + ")"
+        App(t1, t2) => "(" + term_to_str(t1) + " " + term_to_str(t2) + ")"
+
+fun main() -> i32
+    let body = Var(0, 1)
+    let arg = Abs("y", Var(0, 1))
+    let result = term_subst_top(arg, body)
+    print(term_to_str(result))
+    0
+      """,
+      ExecutableOutput("(\\y. 0)")
+    )
+  }
+  test("execute comparison operator in standalone function") {
+    fuse(
+      """
+fun gte(a: i32, b: i32) -> i32
+    match a >= b:
+        true => 1
+        false => 0
+
+fun main() -> i32
+    print(int_to_str(gte(5, 3)))
+    0
+      """,
+      ExecutableOutput("1")
+    )
+  }
+
+  test("execute multi-param lambda unused") {
+    fuse(
+      """
+fun main() -> i32
+    let f = a => a + 1
+    let g = (x, y) => x + y
+    print(int_to_str(f(5)))
+    0
+        """,
+      ExecutableOutput("6")
+    )
+  }
+
+  test("execute method call chaining") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+    fun filter[A](self, f: A -> bool) -> List[A]
+        List::fold_right(self, Nil[A], (h, t) => {
+            match f(h):
+                true => Cons(h, t)
+                false => t
+        })
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let result = l.map(v => v + 1).filter(e => e > 3)
+    let s = List::sum(result)
+    print(int_to_str(s))
+    0
+        """,
+      ExecutableOutput("4")
+    )
+  }
+
+  test("execute do expr with option monad") {
+    fuse(
+      """
+trait Monad[A]:
+  fun unit[A](a: A) -> Self[A];
+  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
+  fun map[B](self, f: A -> B) -> Self[B]
+    self.flat_map(a => Self::unit(f(a)))
+
+type Option[T]:
+  Some(T)
+  None
+
+impl Monad for Option[A]:
+  fun unit[A](a: A) -> Option[A]
+    Some(a)
+  fun flat_map[B](self, f: A -> Option[B]) -> Option[B]
+    match self:
+      Some(v) => f(v)
+      _ => None
+
+fun main() -> i32
+  let x = Some(1)
+  let y = Some(2)
+  let z = Some(3)
+  let result = {
+    do:
+      i <- x
+      j <- y
+      k <- z
+      i + j + k
+  }
+  match result:
+    Some(v) => {
+      print(int_to_str(v))
+      0
+    }
+    _ => 1
+        """,
+      ExecutableOutput("6")
     )
   }
 }

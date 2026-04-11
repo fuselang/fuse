@@ -49,7 +49,18 @@ object Representation {
         EitherT(State.inspect { ctx =>
           Context
             .indexToName(ctx, idx)
-            .toRight("Repr: Type variable not found.")
+            .orElse(
+              // Fallback for TypeVars with out-of-range indices (e.g., negative
+              // from over-shifting). Use placeholder to avoid crashing during
+              // bind name generation.
+              (idx < 0 || idx >= ctx._1.length) match {
+                case true  => Some(s"_T${n - idx}")
+                case false => None
+              }
+            )
+            .toRight(
+              s"Repr: Type variable not found. idx=$idx, n=$n, ctxLen=${ctx._1.length}"
+            )
         })
       case TypeEVar(_, n, cls) =>
         val typeBounds = cls match {
