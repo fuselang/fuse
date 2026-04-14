@@ -256,6 +256,35 @@ int64_t _prim_char_int(char p1) {
     return (int64_t)p1;
 }
 
+// File I/O primitives
+struct string* _prim_file_read(struct string* path) {
+    char filename[path->length + 1];
+    cstring(filename, path);
+    FILE* f = fopen(filename, "r");
+    if (!f) {
+        return create_string_len(0);
+    }
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    struct string* r = create_string_len(len);
+    fread(r->data, 1, len, f);
+    fclose(f);
+    return r;
+}
+
+int64_t _prim_file_write(struct string* path, struct string* content) {
+    char filename[path->length + 1];
+    cstring(filename, path);
+    FILE* f = fopen(filename, "w");
+    if (!f) {
+        return -1;
+    }
+    size_t written = fwrite(content->data, 1, content->length, f);
+    fclose(f);
+    return written == (size_t)content->length ? 0 : -1;
+}
+
 // Additional primitives not in GRIN prelude
 int64_t _prim_int_mod(int64_t p1, int64_t p2) {
     return p1 % p2;

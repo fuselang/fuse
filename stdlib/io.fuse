@@ -1,0 +1,27 @@
+type IO[A]:
+  MkIO(run: () -> A)
+
+impl IO[A]:
+  fun exec(self) -> A
+    match self:
+      MkIO(f) => f(())
+
+impl Monad for IO[A]:
+  fun flat_map[B](self, f: A -> IO[B]) -> IO[B]
+    MkIO(_ => {
+      let a = self.exec()
+      let b = f(a)
+      b.exec()
+    })
+
+  fun unit[A](a: A) -> IO[A]
+    MkIO(_ => a)
+
+fun print(s: str) -> IO[Unit]
+  MkIO(_ => _print(s))
+
+fun read(path: str) -> IO[str]
+  MkIO(_ => _file_read(path))
+
+fun write(path: str, content: str) -> IO[Unit]
+  MkIO(_ => _file_write(path, content))

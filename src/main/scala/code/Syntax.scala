@@ -62,7 +62,8 @@ object Syntax {
       functionName: String,
       totalParams: Int, // Total parameters the function expects
       capturedVars: Int, // Number of captured free variables
-      returnTypeKey: String // Simplified return type for grouping apply functions
+      returnTypeKey: String, // Return type for grouping apply functions
+      paramTypeKeys: List[String] // Per-level param types for grouping
   )
 
   /** Environment containing all closure-related maps for GRIN code generation.
@@ -72,7 +73,15 @@ object Syntax {
       closureMap: Map[String, List[String]] = Map.empty,
       arityFactsMap: Map[String, ArityFact] = Map.empty,
       closureTypesFromBind: Map[String, Type] = Map.empty,
-      closureTypesFallback: Map[String, Type] = Map.empty
+      closureTypesFallback: Map[String, Type] = Map.empty,
+      // typeInstances maps typeName -> set of trait class names it impls.
+      // Built once over the full bind list so forward references work during
+      // sequential rendering (trait default method specializations can call
+      // impl methods that appear later in the bind list).
+      typeInstances: Map[String, Set[String]] = Map.empty,
+      // typeInstanceMethods maps (typeName, className) -> set of method names
+      // exposed by that instance.
+      typeInstanceMethods: Map[(String, String), Set[String]] = Map.empty
   )
 
   object Env {
@@ -168,6 +177,13 @@ object Syntax {
               case true  => show"$variable =\n${indent(1, expr)}"
               case false => show"$variable =\n$preps\n${indent(1, expr)}"
             }
+          case ClosureValue(f, arity, freeVars, _, _, _) =>
+            val tag = GrinUtils.pTag(arity, f)
+            val body = freeVars match {
+              case Nil  => s"pure ($tag)"
+              case args => s"pure ($tag ${args.mkString(" ")})"
+            }
+            show"$variable =\n${indent(1, body)}"
           case _ =>
             show"$variable =\n${PureExpr(e)}"
         }

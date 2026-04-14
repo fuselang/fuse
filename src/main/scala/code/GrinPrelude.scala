@@ -8,7 +8,12 @@ object GrinPrelude {
     ("_prim_string_print", "_prim_string_print  :: T_String -> T_Int64"),
     ("_prim_read_string", "_prim_read_string   :: T_String"),
     ("_prim_error", "_prim_error         :: T_String -> T_Int64"),
-    ("_prim_ffi_file_eof", "_prim_ffi_file_eof  :: T_Int64 -> T_Int64")
+    ("_prim_ffi_file_eof", "_prim_ffi_file_eof  :: T_Int64 -> T_Int64"),
+    ("_prim_file_read", "_prim_file_read     :: T_String -> T_String"),
+    (
+      "_prim_file_write",
+      "_prim_file_write    :: T_String -> T_String -> T_Int64"
+    )
   )
 
   val ffiPure: List[(String, String)] = List(
@@ -19,11 +24,11 @@ object GrinPrelude {
     ("_prim_string_reverse", "_prim_string_reverse :: T_String -> T_String"),
     (
       "_prim_string_lt",
-      "_prim_string_lt      :: T_String -> T_String -> T_Int64"
+      "_prim_string_lt      :: T_String -> T_String -> T_Bool"
     ),
     (
       "_prim_string_eq",
-      "_prim_string_eq      :: T_String -> T_String -> T_Int64"
+      "_prim_string_eq      :: T_String -> T_String -> T_Bool"
     ),
     ("_prim_string_head", "_prim_string_head    :: T_String -> T_Int64"),
     ("_prim_string_tail", "_prim_string_tail    :: T_String -> T_String"),
@@ -34,7 +39,7 @@ object GrinPrelude {
     ("_prim_string_len", "_prim_string_len     :: T_String -> T_Int64"),
     (
       "_prim_string_ne",
-      "_prim_string_ne      :: T_String -> T_String -> T_Int64"
+      "_prim_string_ne      :: T_String -> T_String -> T_Bool"
     ),
     ("_prim_int_str", "_prim_int_str        :: T_Int64 -> T_String"),
     ("_prim_str_int", "_prim_str_int        :: T_String -> T_Int64"),
@@ -79,6 +84,6 @@ object GrinPrelude {
     ("_prim_float_mod", "_prim_float_mod :: T_Float -> T_Float -> T_Float"),
     ("_prim_bool_and", "_prim_bool_and :: T_Bool -> T_Bool -> T_Bool"),
     ("_prim_bool_or", "_prim_bool_or :: T_Bool -> T_Bool -> T_Bool"),
-    ("_prim_string_ne", "_prim_string_ne :: T_String -> T_String -> T_Int64")
+    ("_prim_string_ne", "_prim_string_ne :: T_String -> T_String -> T_Bool")
   )
 }

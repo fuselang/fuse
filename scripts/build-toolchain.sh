@@ -7,6 +7,7 @@
 # - LLVM 15 (clang, opt, llc) - pre-built binaries
 # - Boehm GC v8.0.6 - built from source
 # - Runtime files (runtime.c, prim_ops.c, prim_ops.h)
+# - Stdlib files (monad.fuse, io.fuse)
 #
 # Usage:
 #   ./scripts/build-toolchain.sh                    # Auto-detect platform
@@ -388,6 +389,17 @@ copy_runtime() {
     say "Runtime files copied"
 }
 
+copy_stdlib() {
+    local toolchain_dir="$1"
+
+    say "Copying stdlib files..."
+
+    mkdir -p "${toolchain_dir}/stdlib"
+    cp "${PROJECT_ROOT}"/stdlib/*.fuse "${toolchain_dir}/stdlib/"
+
+    say "Stdlib files copied"
+}
+
 fix_macos_paths() {
     local toolchain_dir="$1"
 
@@ -494,7 +506,7 @@ build_linux_in_docker() {
 
     local toolchain_dir="/tmp/fuse-build/toolchain"
     rm -rf "/tmp/fuse-build"
-    mkdir -p "$toolchain_dir"/{bin,lib,include,runtime}
+    mkdir -p "$toolchain_dir"/{bin,lib,include,runtime,stdlib}
 
     # Download LLVM first (needed for Fuse build)
     download_llvm "linux-x86_64" "$toolchain_dir"
@@ -524,6 +536,9 @@ build_linux_in_docker() {
     # Copy runtime files
     copy_runtime "$toolchain_dir"
 
+    # Copy stdlib files
+    copy_stdlib "$toolchain_dir"
+
     # Create tarball
     create_tarball "linux-x86_64" "$toolchain_dir" "$output_dir"
 
@@ -545,7 +560,7 @@ build_macos_native() {
 
     local toolchain_dir="/tmp/fuse-build/toolchain"
     rm -rf "/tmp/fuse-build"
-    mkdir -p "$toolchain_dir"/{bin,lib,include,runtime}
+    mkdir -p "$toolchain_dir"/{bin,lib,include,runtime,stdlib}
 
     # Download LLVM first (needed for Fuse build)
     download_llvm "$platform" "$toolchain_dir"
@@ -574,6 +589,9 @@ build_macos_native() {
 
     # Copy runtime
     copy_runtime "$toolchain_dir"
+
+    # Copy stdlib
+    copy_stdlib "$toolchain_dir"
 
     # Fix macOS library paths
     fix_macos_paths "$toolchain_dir"

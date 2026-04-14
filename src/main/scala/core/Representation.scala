@@ -29,9 +29,9 @@ object Representation {
       Context.runE(Representation.typeToString(ty, buildContext = true))
     case TypeAbbBind(_, Some(k)) =>
       Representation.kindToString(k).pure[StateEither]
-    case TypeEMarkBind            => "[mark]".pure
-    case TypeEFreeBind            => s"[free]".pure
-    case TypeESolutionBind(ty, _) =>
+    case TypeEMarkBind               => "[mark]".pure
+    case TypeEFreeBind               => s"[free]".pure
+    case TypeESolutionBind(ty, _, _) =>
       Context
         .runE(Representation.typeToString(ty, buildContext = true))
         .map(s => s"[solution] $s")

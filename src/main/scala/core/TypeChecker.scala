@@ -177,13 +177,34 @@ object TypeChecker {
         for {
           (tyT1, insts) <- pureInfer(term)
           tyT1S <- EitherT.liftF(simplifyType(tyT1))
-          rootTypeVarOption = findRootTypeVar(tyT1)
-          typeBounds <- EitherT.liftF(
-            getTypeBounds(rootTypeVarOption.getOrElse(tyT1S))
-          )
-          // If method is already specialized, extract the base method name
-          baseMethod = SpecializedMethodUtils.extractBaseMethodName(method)
-          methodType <- inferMethod(tyT1, tyT1S, typeBounds, baseMethod, info)
+          specializedType <- SpecializedMethodUtils.isSpecializedMethod(
+            method
+          ) match {
+            case false =>
+              EitherT.rightT[ContextState, Error](Option.empty[Type])
+            case true =>
+              for {
+                idxOpt <- EitherT.liftF(
+                  State.inspect((ctx: Context) => nameToIndex(ctx, method))
+                )
+                ty <- idxOpt.traverse(getType(info, _))
+              } yield ty
+          }
+          methodType <- specializedType match {
+            case Some(ty) => ty.pure[StateEither]
+            case None     =>
+              for {
+                rootTypeVarOption <- EitherT.rightT[ContextState, Error](
+                  findRootTypeVar(tyT1)
+                )
+                typeBounds <- EitherT.liftF(
+                  getTypeBounds(rootTypeVarOption.getOrElse(tyT1S))
+                )
+                baseMethod =
+                  SpecializedMethodUtils.extractBaseMethodName(method)
+                ty <- inferMethod(tyT1, tyT1S, typeBounds, baseMethod, info)
+              } yield ty
+          }
         } yield (methodType, insts)
       case TermAssocProj(info, ty, method) =>
         for {
@@ -259,6 +280,13 @@ object TypeChecker {
                 typeSubstituteTop(ty2, tyT2),
                 InvalidTypeArgumentTypeError(ty2.info, ty2)
               )
+            // After monomorphization, a `TermTApp(TermVar(f), T)` may
+            // reference an already-specialized bind whose type has already
+            // had the TypeAll unwrapped — the TermTApp wrapper is residual.
+            // Return the already-specialized type unchanged instead of
+            // erroring.
+            case _ if !checking =>
+              tyT1.pure[StateEither]
             case _ =>
               TypeError.format(
                 TypeArgumentsNotAllowedTypeError(
@@ -386,7 +414,15 @@ object TypeChecker {
       info: Info
   ): StateEither[Type] = {
     (simplifiedType, findRootTypeVar(ty), typeBounds) match {
-      case (_: TypeRec | _: TypeAbs, Some(rootTypeVar), _) =>
+      case (rec: TypeRec, Some(rootTypeVar), _) =>
+        getTypeMethod(
+          info,
+          ty,
+          rootTypeVar,
+          method,
+          Some(rec.v.stripPrefix("@"))
+        )
+      case (_: TypeAbs, Some(rootTypeVar), _) =>
         getTypeMethod(info, ty, rootTypeVar, method)
       case (_: TypeVar | _: TypeApp, _, cls) =>
         inferTypeClassMethod(info, method, cls, simplifiedType)
@@ -595,8 +631,31 @@ object TypeChecker {
       tyT1 <- computeType(tyT).semiflatMap(simplifyType(_)).getOrElse(tyT)
     } yield tyT1
 
+  /** Recover a `TypeAbb` for a `TypeVar` whose stored `ctxLen` no longer
+    * matches the live context length (typically because a `Context.run` scope
+    * exited and shifted indices). Recomputes the index relative to the current
+    * notes and retries the lookup.
+    *
+    * Triggered when a monadic bind over a non-unit continuation re-checks the
+    * method body at a smaller context than the one that originally stamped the
+    * type variables.
+    */
+  def recoverStaleTypeVar(idx: Int, ctxLen: Int): StateOption[Type] =
+    OptionT
+      .liftF[ContextState, Int](State.inspect { (ctx: Context) =>
+        getNotes(ctx).toList.length
+      })
+      .flatMap { filteredLen =>
+        val adjustedIdx = idx - ctxLen + filteredLen
+        (adjustedIdx != idx && adjustedIdx >= 0) match {
+          case true  => getTypeAbb(adjustedIdx)
+          case false => OptionT.none
+        }
+      }
+
   def computeType(ty: Type): StateOption[Type] = ty match {
-    case TypeVar(_, idx, _)                        => getTypeAbb(idx)
+    case TypeVar(_, idx, ctxLen) =>
+      getTypeAbb(idx).orElse(recoverStaleTypeVar(idx, ctxLen))
     case TypeApp(info, TypeAbs(_, _, tyT12), tyT2) =>
       OptionT.some[ContextState](typeSubstituteTop(tyT2, tyT12))
     case TypeApp(info, TypeId(_, name), tyT2) =>
@@ -876,14 +935,24 @@ object TypeChecker {
           })
           // Build closure instantiation with full arrow type (needed for code gen).
           // The full type enables correct return type inference during code generation.
+          // Normalize TypeVar ctxLens in the arrow type down to the enclosing
+          // method's context. The `apply(redArgT/redExpT)` calls above ran
+          // while the closure's arg was still bound, so any captured TypeVars
+          // carry an inside-closure ctxLen. Unshifting here means downstream
+          // phases see a consistent ctxLen across regular and closure insts.
+          fullArrow = TypeArrow(info, resolvedArgType, resolvedExpType)
+          normalizedArrow <- EitherT.liftF(typeShiftOnContextDiff(fullArrow))
           closureInst = Instantiation(
             i = arg,
             term = TermClosure(info, arg, None, exp),
-            tys = List(TypeArrow(info, resolvedArgType, resolvedExpType)),
+            tys = List(normalizedArrow),
             cls = List(),
             r = Resolution.Closure
           )
-        } yield (insts :+ closureInst, TypeESolutionBind(redArgT) +: sol)
+        } yield (
+          insts :+ closureInst,
+          TypeESolutionBind(redArgT, fromClosurePrepend = true) +: sol
+        )
       // ∀I :: (e, ∀α.A)
       case (exp, TypeAll(_, uA, k, cls, tpe)) =>
         for {
@@ -1219,6 +1288,10 @@ object TypeChecker {
         Context.addName(x1).flatMap(_ => isTypeEqual(tyS1, tyT1))
       case (TypeVar(_, idx1, len1), TypeVar(_, idx2, len2)) =>
         (idx1 == idx2).pure
+      case (TypeVar(_, idx, _), TypeId(_, id)) =>
+        State.inspect(ctx => Context.indexToName(ctx, idx).contains(id))
+      case (TypeId(_, id), TypeVar(_, idx, _)) =>
+        State.inspect(ctx => Context.indexToName(ctx, idx).contains(id))
       case (TypeRecord(_, f1), TypeRecord(_, f2)) if f1.length == f2.length =>
         f1.traverse { case (l1, tyT1) =>
           f2.find(_._1 == l1)

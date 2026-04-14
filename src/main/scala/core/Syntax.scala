@@ -166,6 +166,11 @@ object Terms {
       extends Pattern
   case class PatternDefault(info: Info) extends Pattern
 
+  def patternArity(p: Pattern): Int = p match {
+    case PatternNode(_, _, vars) => vars.length
+    case _                       => 0
+  }
+
   implicit val showTermInfo: ShowInfo[Term] = ShowInfo.info(_ match {
     case TermFloat(info, _)          => info
     case TermInt(info, _)            => info
@@ -225,8 +230,21 @@ object Bindings {
   // contexts (Γ,∆,Θ): · | Γ,α | Γ,x:A | Γ,â | Γ,â = τ | Γ,▶â
   case class VarBind(t: Type) extends Binding
   sealed trait Mark extends Binding
-  case class TypeESolutionBind(t: Type, cls: List[TypeClass] = List())
-      extends Mark
+
+  /** Existential-var solution.
+    *
+    * `fromClosurePrepend = true` marks solutions prepended by the closure
+    * checking rule (∀I / ArrowPrepend at `TypeChecker.check` for
+    * `TermClosure`). These are *not* consumer-facing type arguments — the
+    * consumer's type arity is unchanged — so Instantiations drops them
+    * structurally when a bind's collected solutions exceed its declared arity,
+    * rather than positionally with `takeRight`.
+    */
+  case class TypeESolutionBind(
+      t: Type,
+      cls: List[TypeClass] = List(),
+      fromClosurePrepend: Boolean = false
+  ) extends Mark
   case object TypeEFreeBind extends Mark
   case object TypeEMarkBind extends Mark
 

@@ -81,7 +81,7 @@ object TermFold {
         for {
           sv <- go(d, scrutinee)
           cv <- cases.traverse { case (pattern, body) =>
-            go(d, body).map(bv => (pattern, bv))
+            go(d + patternArity(pattern), body).map(bv => (pattern, bv))
           }
           result <- algebra.onMatch(info, sv, cv, d)
         } yield result
@@ -301,6 +301,148 @@ object TermFold {
     fold[Id, Boolean](algebra, term)
   }
 
+  /** Collect TermVars that refer to bindings outside the current term (idx >=
+    * local binder depth). Pattern-bound and lambda-bound vars are excluded.
+    *
+    * Callers that look up the collected TermVars' names in the Context rely on
+    * this depth filter — a local-param TermVar would resolve to whatever
+    * binding happens to sit at the ctx position of its local depth, not to a
+    * bind.
+    */
+  def collectBindTermVars(term: Term): List[TermVar] = {
+    import cats.Id
+    val algebra = new TermAlgebra[Id, List[TermVar]] {
+      def onVar(
+          info: Info,
+          idx: Int,
+          ctxLen: Int,
+          depth: Int
+      ): List[TermVar] =
+        (idx >= depth) match {
+          case true  => List(TermVar(info, idx, ctxLen))
+          case false => Nil
+        }
+      def onAbs(
+          info: Info,
+          name: String,
+          ty: Type,
+          body: List[TermVar],
+          retTy: Option[Type],
+          depth: Int
+      ): List[TermVar] = body
+      def onClosure(
+          info: Info,
+          name: String,
+          ty: Option[Type],
+          body: List[TermVar],
+          depth: Int
+      ): List[TermVar] = body
+      def onApp(
+          info: Info,
+          f: List[TermVar],
+          arg: List[TermVar],
+          depth: Int
+      ): List[TermVar] = f ++ arg
+      def onFix(
+          info: Info,
+          t: List[TermVar],
+          depth: Int
+      ): List[TermVar] = t
+      def onMatch(
+          info: Info,
+          scrutinee: List[TermVar],
+          cases: List[(Pattern, List[TermVar])],
+          depth: Int
+      ): List[TermVar] =
+        scrutinee ++ cases.flatMap(_._2)
+      def onLet(
+          info: Info,
+          name: String,
+          t1: List[TermVar],
+          t2: List[TermVar],
+          depth: Int
+      ): List[TermVar] = t1 ++ t2
+      def onProj(
+          info: Info,
+          t: List[TermVar],
+          label: String,
+          depth: Int
+      ): List[TermVar] = t
+      def onMethodProj(
+          info: Info,
+          t: List[TermVar],
+          method: String,
+          depth: Int
+      ): List[TermVar] = t
+      def onAssocProj(
+          info: Info,
+          ty: Type,
+          method: String,
+          depth: Int
+      ): List[TermVar] = Nil
+      def onRecord(
+          info: Info,
+          fields: List[(String, List[TermVar])],
+          depth: Int
+      ): List[TermVar] = fields.flatMap(_._2)
+      def onTag(
+          info: Info,
+          label: String,
+          t: List[TermVar],
+          ty: Type,
+          depth: Int
+      ): List[TermVar] = t
+      def onAscribe(
+          info: Info,
+          t: List[TermVar],
+          ty: Type,
+          depth: Int
+      ): List[TermVar] = t
+      def onTAbs(
+          info: Info,
+          name: String,
+          cls: List[TypeClass],
+          body: List[TermVar],
+          depth: Int
+      ): List[TermVar] = body
+      def onTApp(
+          info: Info,
+          t: List[TermVar],
+          ty: Type,
+          depth: Int
+      ): List[TermVar] = t
+      def onLeaf(term: Term, depth: Int): List[TermVar] = Nil
+    }
+    fold[Id, List[TermVar]](algebra, term)
+  }
+
+  /** True if `term` contains a TermVar with both the given Info and idx. */
+  def findVarByInfoAndIdx(
+      term: Term,
+      targetInfo: Info,
+      targetIdx: Int
+  ): Boolean = {
+    def search(t: Term): Boolean = t match {
+      case TermVar(info, idx, _)      => info == targetInfo && idx == targetIdx
+      case TermAbs(_, _, _, body, _)  => search(body)
+      case TermTAbs(_, _, _, body)    => search(body)
+      case TermClosure(_, _, _, body) => search(body)
+      case TermLet(_, _, t1, t2)      => search(t1) || search(t2)
+      case TermFix(_, body)           => search(body)
+      case TermApp(_, f, arg)         => search(f) || search(arg)
+      case TermTApp(_, t, _)          => search(t)
+      case TermMatch(_, scrutinee, cases) =>
+        search(scrutinee) || cases.exists { case (_, body) => search(body) }
+      case TermProj(_, t, _)       => search(t)
+      case TermMethodProj(_, t, _) => search(t)
+      case TermRecord(_, fields)   => fields.exists { case (_, t) => search(t) }
+      case TermTag(_, _, t, _)     => search(t)
+      case TermAscribe(_, t, _)    => search(t)
+      case _                       => false
+    }
+    search(term)
+  }
+
   /** Find the raw De Bruijn index, context length, and depth of a TermVar
     * matching a given Info.
     */
@@ -324,7 +466,9 @@ object TermFold {
       case TermTApp(_, t, _)          => search(t, c)
       case TermMatch(_, scrutinee, cases) =>
         search(scrutinee, c).orElse(
-          cases.view.flatMap { case (_, body) => search(body, c) }.headOption
+          cases.view.flatMap { case (p, body) =>
+            search(body, c + patternArity(p))
+          }.headOption
         )
       case TermProj(_, t, _)       => search(t, c)
       case TermMethodProj(_, t, _) => search(t, c)

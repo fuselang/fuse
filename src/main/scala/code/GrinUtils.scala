@@ -33,14 +33,56 @@ object GrinUtils {
   } yield value
 
   /** Check if a type requires heap allocation (store/fetch semantics).
-    * User-defined types (records, variants, recursive types) are
-    * heap-allocated.
+    * User-defined types are heap-allocated, except variant types whose
+    * constructors contain function-typed fields. Those use pure/inline
+    * allocation to avoid LLVM-backend limitations with closure /
+    * partial-application tag values in heap-allocated constructor nodes.
     */
   def isHeapAllocatedType(ty: Type): Boolean = ty match {
-    case _: TypeRec     => true // Recursive types
-    case _: TypeVariant => true // Sum types
-    case _: TypeRecord  => true // Product types
+    case _: TypeRec     => true
+    case _: TypeVariant => true
+    case _: TypeRecord  => true
     case _              => false
+  }
+
+  /** Check if a constructor's fields contain function types.
+    *
+    * Tries the static `tag.typ` first (works pre-monomorphization when it's a
+    * direct `TypeVariant`). Falls back to type-checking the field terms, which
+    * is needed after monomorphization when `tag.typ` becomes a `TypeApp`.
+    */
+  def hasFieldsWithFunctionTypeS(tag: TermTag): ContextState[Boolean] = {
+    val staticHit = tag.typ match {
+      case TypeVariant(_, variants) =>
+        variants
+          .find(_._1 == tag.i)
+          .exists { case (_, fieldType) => containsFunctionType(fieldType) }
+      case _ => false
+    }
+    staticHit match {
+      case true  => true.pure[ContextState]
+      case false =>
+        tag.t match {
+          case TermRecord(_, fields) =>
+            fields.existsM { case (_, term) =>
+              typeCheck(term).flatMap(isFunctionType(_))
+            }
+          case TermUnit(_) => false.pure[ContextState]
+          case term        => typeCheck(term).flatMap(isFunctionType(_))
+        }
+    }
+  }
+
+  def containsFunctionType(ty: Type): Boolean = ty match {
+    case _: TypeArrow          => true
+    case TypeRecord(_, fields) => fields.exists(f => containsFunctionType(f._2))
+    case TypeVariant(_, vs)    => vs.exists(v => containsFunctionType(v._2))
+    case TypeApp(_, t1, t2)    =>
+      containsFunctionType(t1) || containsFunctionType(t2)
+    case TypeAll(_, _, _, _, t)  => containsFunctionType(t)
+    case TypeAbs(_, _, t)        => containsFunctionType(t)
+    case TypeRec(_, _, _, inner) => containsFunctionType(inner)
+    case _                       => false
   }
 
   def getFunctionArity(ty: Type): Int = ty match {
@@ -119,6 +161,42 @@ object GrinUtils {
           case false => typeKey
         }
     }
+
+  /** Extract the Nth parameter type (0-indexed) from a typeKey string,
+    * splitting on top-level arrows. For an N-ary arrow key, level 0 returns the
+    * first parameter, level 1 the second, and so on; bracketed generic
+    * arguments nested inside a parameter are treated as atomic. Returns "" when
+    * the type has fewer top-level arrows than requested (e.g. a non-arrow type,
+    * or a `level` past the last param).
+    */
+  def extractParamTypeAt(typeKey: String, level: Int): String =
+    typeKey.isEmpty match {
+      case true  => ""
+      case false =>
+        val arrows = topLevelArrowIndices(typeKey)
+        level < arrows.length match {
+          case false => ""
+          case true  =>
+            val start = level match {
+              case 0 => 0
+              case n => arrows(n - 1) + 2
+            }
+            val end = arrows(level)
+            typeKey.substring(start, end)
+        }
+    }
+
+  def topLevelArrowIndices(typeKey: String): List[Int] =
+    typeKey.zipWithIndex
+      .foldLeft((0, List.empty[Int])) {
+        case ((depth, acc), ('[' | '(' | '{', _)) => (depth + 1, acc)
+        case ((depth, acc), (']' | ')' | '}', _)) => (depth - 1, acc)
+        case ((0, acc), ('-', idx))
+            if idx + 1 < typeKey.length && typeKey(idx + 1) == '>' =>
+          (0, acc :+ idx)
+        case (state, _) => state
+      }
+      ._2
 
   /** Get closure arity without type-checking (avoids De Bruijn index issues) */
   def getClosureArity(c: Term): Int = c match {

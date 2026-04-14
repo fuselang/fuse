@@ -255,16 +255,22 @@ object Context {
       info: Info,
       ty: Type,
       rootTypeVar: TypeVar,
-      method: String
+      method: String,
+      typeNameOverride: Option[String] = None
   ): StateEither[Type] = for {
-    optionName <- EitherT.liftF(
-      State.inspect { (ctx: Context) =>
-        indexToName(ctx, rootTypeVar.index)
-      }
-    )
-    typeName <- optionName match {
+    typeName <- typeNameOverride match {
       case Some(name) => name.pure[StateEither]
-      case None       => TypeError.format(NotFoundTypeError(info))
+      case None       =>
+        EitherT
+          .liftF(
+            State.inspect { (ctx: Context) =>
+              indexToName(ctx, rootTypeVar.index)
+            }
+          )
+          .flatMap {
+            case Some(name) => name.pure[StateEither]
+            case None       => TypeError.format(NotFoundTypeError(info))
+          }
     }
     methodOptionIdx <- EitherT.liftF(
       State.inspect { (ctx: Context) =>
@@ -461,7 +467,7 @@ object Context {
     State.inspect { ctx =>
       val notes = getNotes(ctx, withMarks = true)
       val sol = notes.collectFirst {
-        case (v, TypeESolutionBind(ty, cls)) if v == eV.name => (ty, cls)
+        case (v, TypeESolutionBind(ty, cls, _)) if v == eV.name => (ty, cls)
       }
       // NOTE: We are shifting the existential variable solution by the number
       // of "regular" (non-mark) bindings untill its place in the context. This

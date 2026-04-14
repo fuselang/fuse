@@ -107,15 +107,15 @@ object BuiltIn {
     OrOp
   )
 
-  val Binds: List[Bind] = List(
-    Ops.map(buildOperator(_)).flatten,
+  /** User-visible primop binds derived from `Primops.specs` — one source of
+    * truth for the Fuse-level name + type signature of each primop.
+    */
+  val PrimopBinds: List[Bind] = Primops.specs.flatMap(spec =>
     buildBind(
-      "print",
-      TermAbbBind(TermBuiltin(buildFunc(List(TypeString(i)), TypeUnit(i))))
-    ),
-    buildBind(
-      "int_to_str",
-      TermAbbBind(TermBuiltin(buildFunc(List(TypeInt(i)), TypeString(i))))
+      spec.fuseName,
+      TermAbbBind(TermBuiltin(buildFunc(spec.paramTypes, spec.returnType)))
     )
-  ).flatten
+  )
+
+  val Binds: List[Bind] = Ops.flatMap(buildOperator) ::: PrimopBinds
 }
