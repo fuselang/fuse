@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/fuselang/fuse/compare/v0.3.4...v0.4.0) (2026-04-25)
+
+
+### Features
+
+* add stdlib monad/io types ([#15](https://github.com/fuselang/fuse/issues/15)) ([68aa177](https://github.com/fuselang/fuse/commit/68aa177adc88a55597b4d61931ad892904b22091))
+
+
+### Bug Fixes
+
+* monomorphization advanced type constructs ([2b4ac3e](https://github.com/fuselang/fuse/commit/2b4ac3e1878793a1554ba0116219bd4968712aed))
+
 ## [0.3.4](https://github.com/fuselang/fuse/compare/v0.3.3...v0.3.4) (2026-03-29)
 
 
