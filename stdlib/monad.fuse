@@ -1,0 +1,5 @@
+trait Monad[A]:
+  fun unit[A](a: A) -> Self[A];
+  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
+  fun map[B](self, f: A -> B) -> Self[B]
+    self.flat_map(a => Self::unit(f(a)))

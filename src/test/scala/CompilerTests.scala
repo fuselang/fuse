@@ -7,17 +7,17 @@ import java.nio.file.{Files, Path, Paths}
 import scala.sys.process.*
 import cats.effect.ExitCode
 
-class CompilerTests extends FunSuite {
+abstract class CompilerTests extends FunSuite {
   import CompilerTests.*
   override val munitTimeout = Duration(10, "m")
 
   /** Asserts fuse code is type checked. */
   def fuse(code: String, expected: Output = CheckOutput(None)) =
     expected match {
-      case CheckOutput(s)                     => assertCheck(code, s)
-      case BuildOutput(s)                     => assertBuild(code, s)
-      case ExecutableOutput(stdout, exitCode) =>
-        assertExecutable(code, stdout, exitCode)
+      case CheckOutput(s)                             => assertCheck(code, s)
+      case BuildOutput(s)                             => assertBuild(code, s)
+      case ExecutableOutput(stdout, exitCode, stdlib) =>
+        assertExecutable(code, stdout, exitCode, stdlib)
     }
 
   def assertCheck(code: String, expectedError: Option[String]) =
@@ -44,11 +44,12 @@ class CompilerTests extends FunSuite {
   def assertExecutable(
       code: String,
       expectedStdout: String,
-      expectedExitCode: Int = 0
+      expectedExitCode: Int = 0,
+      includeStdlib: Boolean = false
   ) = {
     import cats.effect.unsafe.implicits.global
 
-    execute(code).unsafeRunSync() match {
+    execute(code, includeStdlib).unsafeRunSync() match {
       case Right(result) =>
         assertEquals(
           result.exitCode,
@@ -103,7 +104,7 @@ fun main() -> i32
   test("check unit functions") {
     fuse("""
 fun greetings() -> Unit
-  print("Hello World")
+  _print("Hello World")
 
 fun main() -> Unit
   greetings()
@@ -298,8 +299,8 @@ type Term:
     TermUnit
 
 fun println(s: str) -> Unit
-    print(s)
-    print("\n")
+    _print(s)
+    _print("\n")
     ()
 
 fun type_of(t: Term) -> Option[Type]
@@ -729,11 +730,11 @@ impl Summary for Tweet:
     self.username + ": " + self.content
 
 fun notify[T: Summary](s: T) -> Unit
-  print("Breaking news! " + s.summarize())
+  _print("Breaking news! " + s.summarize())
 
 fun main() -> i32
     let tweet = Tweet("elon", "work!")
-    print(tweet.summarize())
+    _print(tweet.summarize())
     notify(tweet)
     0
         """)
@@ -771,7 +772,7 @@ trait Summary:
   fun summarize() -> str;
 
 fun notify[T: Add](s: T) -> Unit
-  print("Breaking news! " + s.summarize())
+  _print("Breaking news! " + s.summarize())
 
 fun main() -> i32
     0
@@ -795,7 +796,7 @@ impl Summary for Tweet:
     self.username + ": " + self.content
 
 fun notify[T: Summary](s: T) -> Unit
-  print("Breaking news! " + s.summarize())
+  _print("Breaking news! " + s.summarize())
 
 fun main() -> i32
     notify(5)
@@ -815,7 +816,7 @@ trait Collection:
   fun summarize() -> str;
 
 fun notify[T: Summary + Collection](s: T) -> Unit
-  print("Breaking news! " + s.summarize())
+  _print("Breaking news! " + s.summarize())
 
 fun main() -> i32
     0
@@ -839,7 +840,7 @@ type Tweet:
   content: str
 
 fun notify[T: Summary](s: T) -> Unit
-  print("Breaking news! " + s.summarize())
+  _print("Breaking news! " + s.summarize())
 
 fun main() -> i32
     let tweet = Tweet("elon", "work!")
@@ -1490,41 +1491,11 @@ fun main() -> i32
   }
   test("check io type") {
     fuse("""
-trait Monad[A]:
-  fun unit[A](a: A) -> Self[A];
-
-  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
-
-  fun map[B](self, f: A -> B) -> Self[B]
-    self.flat_map(a => Self::unit(f(a)))
-
-type IO[A]:
-  run: () -> A
-
-impl IO[A]:
-  fun exec(self) -> A
-    (self.run)()
-
-impl Monad for IO[A]:
-  fun flat_map[B](self, f: A -> IO[B]) -> IO[B]
-    let r = _ => {
-      let b = f(self.exec())
-      b.exec()
-    }
-    IO(r)
-
-  fun unit[A](a: A) -> IO[A]
-    let r = _ => a
-    IO[A](r)
-
-fun printline(s: str) -> IO[Unit]
-  IO(_ => print(s))
-
 fun greetings() -> IO[Unit]
   do:
-    h <- printline("Hello")
-    s <- printline(" ")
-    v <- printline("World!")
+    h <- print("Hello")
+    s <- print(" ")
+    v <- print("World!")
     ()
 
 fun main() -> Unit
@@ -1547,7 +1518,7 @@ impl List[A]:
 
 fun main() -> i32
     let l = Cons(1, Nil)
-    l.map(x => print(int_to_str(x)))
+    l.map(x => _print(int_to_str(x)))
     0
         """,
       CheckOutput(None)
@@ -1576,7 +1547,7 @@ fun main() -> i32
     let l = Cons(2, Cons(3, Nil))
     let l1 = l.map(v => v + 1)
     let s = List::sum(l1)
-    print(int_to_str(s))
+    _print(int_to_str(s))
     0
         """,
       CheckOutput(None)
@@ -1608,7 +1579,7 @@ fun main() -> i32
     let l = Cons(1, Cons(2, Cons(3, Nil)))
     let l1 = l.flat_map(v => Cons(v, Cons(v * 10, Nil)))
     let s = List::sum(l1)
-    print(int_to_str(s))
+    _print(int_to_str(s))
     0
         """,
       CheckOutput(None)
@@ -1633,7 +1604,7 @@ impl List[A]:
 fun main() -> i32
     let l = Cons(2, Cons(3, Nil))
     let l1 = l.map(v => v + 1)
-    l1.map(r => print(int_to_str(r)))
+    l1.map(r => _print(int_to_str(r)))
     0
         """,
       CheckOutput(None)
@@ -1677,7 +1648,7 @@ fun main() -> i32
     let l3 = List::append(l1, l2)
     let s = List::sum(l3)
     let p = List::product(l3)
-    print(int_to_str(s + p))
+    _print(int_to_str(s + p))
     0
         """,
       CheckOutput(None)
@@ -1706,47 +1677,46 @@ fun main() -> i32
     let l3 = List::append(l1, l2)
     0
         """,
-      BuildOutput("""
-Cons'i32 h0 t1 =
+      BuildOutput("""Cons'i32 h0 t1 =
  store (CConsi32 h0 t1)
 
 Nil'i32 =  store (CNili32)
 
-appendListi32' l12 l23 =
- p8 <- pure (P2c5 )
- foldrightListi32Listi32' l12 l23 p8
+foldrightListi32Listi32' as4 z5 f''6 =
+ p9 <- fetch as4
+ case p9 of
+  (CConsi32 x9 xs'10) ->
+   p12'' <- apply2_i32_to_List_i32 f''6 x9
+   p13 <- foldrightListi32Listi32' xs'10 z5 f''6
+   p14 <- apply1_List_i32_to_List_i32 p12'' p13
+   pure p14
+  #default ->
+   pure z5
 
-c5 h5 t6 =
- Cons'i32 h5 t6
+appendListi32' l114 l215 =
+ p20 <- pure (P2c17 )
+ foldrightListi32Listi32' l114 l215 p20
 
-grinMain _8 =
- p10 <- Nil'i32
- l110 <-  Cons'i32 1 p10
- p12 <- Nil'i32
- l212 <-  Cons'i32 2 p12
- l314 <-  appendListi32' l110 l212
+c17 h17 t18 =
+ Cons'i32 h17 t18
+
+grinMain _20 =
+ p22 <- Nil'i32
+ l122 <-  Cons'i32 1 p22
+ p24 <- Nil'i32
+ l224 <-  Cons'i32 2 p24
+ l326 <-  appendListi32' l122 l224
  pure 0
 
-foldrightListi32Listi32' as15 z16 f''17 =
- p20 <- fetch as15
- case p20 of
-  (CConsi32 x20 xs'21) ->
-   p23'' <- apply2_List_i32 f''17 x20
-   p24 <- foldrightListi32Listi32' xs'21 z16 f''17
-   p25 <- apply1_List_i32 p23'' p24
-   pure p25
-  #default ->
-   pure z16
+apply1_List_i32_to_List_i32 p28 p29 =
+ case p28 of
+  (P1c17 p30) ->
+   c17 p30 p29
 
-apply1_List_i32 p26 p27 =
- case p26 of
-  (P1c5 p28) ->
-   c5 p28 p27
-
-apply2_List_i32 p29 p30 =
- case p29 of
-  (P2c5) ->
-   pure (P1c5 p30)""")
+apply2_i32_to_List_i32 p31 p32 =
+ case p31 of
+  (P2c17) ->
+   pure (P1c17 p32)""")
     )
   }
 
@@ -1787,128 +1757,127 @@ fun main() -> i32
     let l3 = List::append(l1, l2)
     let s = List::sum(l3)
     let p = List::product(l3)
-    print(int_to_str(s + p))
+    _print(int_to_str(s + p))
     0
         """,
-      BuildOutput("""
-Cons'i32 h0 t1 =
+      BuildOutput("""Cons'i32 h0 t1 =
  store (CConsi32 h0 t1)
 
 Nil'i32 =  store (CNili32)
 
-foldrightListi32i32' as2 z3 f''4 =
- p7 <- fetch as2
- case p7 of
-  (CConsi32 x7 xs'8) ->
-   p10'' <- apply2_i32 f''4 x7
-   p11 <- foldrightListi32i32' xs'8 z3 f''4
-   p12 <- apply1_i32 p10'' p11
-   pure p12
+foldrightListi32i32' as4 z5 f''6 =
+ p9 <- fetch as4
+ case p9 of
+  (CConsi32 x9 xs'10) ->
+   p12'' <- apply2_i32_to_i32 f''6 x9
+   p13 <- foldrightListi32i32' xs'10 z5 f''6
+   p14 <- apply1_i32_to_i32 p12'' p13
+   pure p14
   #default ->
-   pure z3
+   pure z5
 
-foldleftListi32i32' l12 acc13 f''14 =
- p17 <- fetch l12
- case p17 of
-  (CConsi32 h17 t'18) ->
-   p20'' <- apply2_i32 f''14 acc13
-   p21 <- apply1_i32 p20'' h17
-   p22 <- foldleftListi32i32' t'18 p21 f''14
-   pure p22
+foldrightListi32Listi32' as14 z15 f''16 =
+ p19 <- fetch as14
+ case p19 of
+  (CConsi32 x19 xs'20) ->
+   p22'' <- apply2_i32_to_List_i32 f''16 x19
+   p23 <- foldrightListi32Listi32' xs'20 z15 f''16
+   p24 <- apply1_List_i32_to_List_i32 p22'' p23
+   pure p24
   #default ->
-   pure acc13
+   pure z15
 
-appendListi32' l122 l223 =
- p28 <- pure (P2c25 )
- foldrightListi32Listi32' l122 l223 p28
+foldleftListi32i32' l24 acc25 f''26 =
+ p29 <- fetch l24
+ case p29 of
+  (CConsi32 h29 t'30) ->
+   p32'' <- apply2_i32_to_i32 f''26 acc25
+   p33 <- apply1_i32_to_i32 p32'' h29
+   p34 <- foldleftListi32i32' t'30 p33 f''26
+   pure p34
+  #default ->
+   pure acc25
 
-c25 h25 t26 =
- Cons'i32 h25 t26
+appendListi32' l134 l235 =
+ p40 <- pure (P2c37 )
+ foldrightListi32Listi32' l134 l235 p40
 
-mapListi32i32' self28 f''29 =
- p31 <- Nil'i32
- p38 <- store f''29
- p39 <- pure (P2c32 p38)
- foldrightListi32Listi32' self28 p31 p39
+c37 h37 t38 =
+ Cons'i32 h37 t38
 
-c32 f''2933 h34 t35 =
- f''293334 <- fetch f''2933
- p37 <- c68 h34
- Cons'i32 p37 t35
+mapListi32i32' self40 f''41 =
+ p43 <- Nil'i32
+ p50 <- store f''41
+ p51 <- pure (P2c44 p50)
+ foldrightListi32Listi32' self40 p43 p51
 
-sumList' l39 =
- p51 <- pure (P2c41 )
- foldrightListi32i32' l39 0 p51
+c44 f''4145 h46 t47 =
+ f''414546 <- fetch f''4145
+ p49 <- c80 h46
+ Cons'i32 p49 t47
 
-c41 acc41 b42 =
- _prim_int_add acc41 b42
-
-productList' l51 =
+sumList' l51 =
  p63 <- pure (P2c53 )
- foldleftListi32i32' l51 1 p63
+ foldrightListi32i32' l51 0 p63
 
 c53 acc53 b54 =
- _prim_int_mul acc53 b54
+ _prim_int_add acc53 b54
 
-grinMain _63 =
- p65 <- Nil'i32
- p66 <- Cons'i32 3 p65
- l66 <-  Cons'i32 2 p66
- p74 <- pure (P1c68 )
- l174 <-  mapListi32i32' l66 p74
- p76 <- Nil'i32
- l276 <-  Cons'i32 7 p76
- l378 <-  appendListi32' l174 l276
- s80 <-  sumList' l378
- p82 <-  productList' l378
- p84 <- _prim_int_add s80 p82
- p85 <- _prim_int_str p84
- _86 <-  _prim_string_print p85
+productList' l63 =
+ p75 <- pure (P2c65 )
+ foldleftListi32i32' l63 1 p75
+
+c65 acc65 b66 =
+ _prim_int_mul acc65 b66
+
+grinMain _75 =
+ p77 <- Nil'i32
+ p78 <- Cons'i32 3 p77
+ l78 <-  Cons'i32 2 p78
+ p86 <- pure (P1c80 )
+ l186 <-  mapListi32i32' l78 p86
+ p88 <- Nil'i32
+ l288 <-  Cons'i32 7 p88
+ l390 <-  appendListi32' l186 l288
+ s92 <-  sumList' l390
+ p94 <-  productList' l390
+ p96 <- _prim_int_add s92 p94
+ p97 <- _prim_int_str p96
+ _98 <-  _prim_string_print p97
  pure 0
 
-c68 v68 =
- _prim_int_add v68 1
+c80 v80 =
+ _prim_int_add v80 1
 
-foldrightListi32Listi32' as87 z88 f''89 =
- p92 <- fetch as87
- case p92 of
-  (CConsi32 x92 xs'93) ->
-   p95'' <- apply2_List_i32 f''89 x92
-   p96 <- foldrightListi32Listi32' xs'93 z88 f''89
-   p97 <- apply1_List_i32 p95'' p96
-   pure p97
-  #default ->
-   pure z88
+apply1_List_i32_to_List_i32 p100 p101 =
+ case p100 of
+  (P1c37 p102) ->
+   c37 p102 p101
+  (P1c44 p103 p104) ->
+   c44 p103 p104 p101
 
-apply1_List_i32 p98 p99 =
- case p98 of
-  (P1c25 p100) ->
-   c25 p100 p99
-  (P1c32 p101 p102) ->
-   c32 p101 p102 p99
+apply1_i32_to_i32 p105 p106 =
+ case p105 of
+  (P1c53 p107) ->
+   c53 p107 p106
+  (P1c65 p108) ->
+   c65 p108 p106
+  (P1c80) ->
+   c80 p106
 
-apply1_i32 p103 p104 =
- case p103 of
-  (P1c41 p105) ->
-   c41 p105 p104
-  (P1c53 p106) ->
-   c53 p106 p104
-  (P1c68) ->
-   c68 p104
+apply2_i32_to_List_i32 p109 p110 =
+ case p109 of
+  (P2c37) ->
+   pure (P1c37 p110)
+  (P2c44 p111) ->
+   pure (P1c44 p111 p110)
 
-apply2_List_i32 p107 p108 =
- case p107 of
-  (P2c25) ->
-   pure (P1c25 p108)
-  (P2c32 p109) ->
-   pure (P1c32 p109 p108)
-
-apply2_i32 p110 p111 =
- case p110 of
-  (P2c41) ->
-   pure (P1c41 p111)
+apply2_i32_to_i32 p112 p113 =
+ case p112 of
   (P2c53) ->
-   pure (P1c53 p111)""")
+   pure (P1c53 p113)
+  (P2c65) ->
+   pure (P1c65 p113)""")
     )
   }
 
@@ -1939,7 +1908,7 @@ fun main() -> i32
   }
 
   test("check do expr build output") {
-    val code = """
+    fuse("""
 trait Monad[A]:
   fun unit[A](a: A) -> Self[A];
   fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
@@ -1967,17 +1936,11 @@ fun main() -> i32
   let result = x.flat_map(i => y.map(j => i + j))
   match result:
     Some(v) => {
-      print(int_to_str(v))
+      _print(int_to_str(v))
       0
     }
     _ => 1
-        """
-    val result = build(code)
-    result match {
-      case Right(grin) => grin.split("\n").foreach(l => println(s"GRIN> $l"))
-      case Left(err)   => println(s"ERR> $err")
-    }
-    assert(result.isRight, s"Build failed: ${result.merge}")
+        """)
   }
 
   test("check multi-param lambda unused") {
@@ -1985,7 +1948,7 @@ fun main() -> i32
 fun main() -> i32
     let f = a => a + 1
     let g = (x, y) => x + y
-    print(int_to_str(f(5)))
+    _print(int_to_str(f(5)))
     0
         """)
   }
@@ -2019,7 +1982,7 @@ fun main() -> i32
     let l = Cons(2, Cons(3, Nil))
     let result = l.map(v => v + 1).filter(e => e > 3)
     let s = List::sum(result)
-    print(int_to_str(s))
+    _print(int_to_str(s))
     0
         """)
   }
@@ -2066,7 +2029,7 @@ class CompilerBuildTests extends CompilerTests {
     fuse(
       """
 fun greetings() -> Unit
-  print("Hello World")
+  _print("Hello World")
 
 fun main() -> Unit
   greetings()
@@ -2223,7 +2186,7 @@ fun main() -> bool
     """,
       BuildOutput("""
 ffi pure
-  _prim_string_ne :: T_String -> T_String -> T_Int64
+  _prim_string_ne :: T_String -> T_String -> T_Bool
 
 grinMain _0 =
  _prim_string_ne #"Hello" #"World"""")
@@ -2335,7 +2298,7 @@ fun identity[T](v: T) -> T
 
 fun main() -> Unit
     let s = identity("Hello World")
-    print(s)
+    _print(s)
         """,
       BuildOutput("""
 identity'str v0 =
@@ -2356,7 +2319,7 @@ fun identity[T](v: T) -> T
 fun main() -> i32
     let s = identity("Hello World")
     let i = identity(1)
-    print(s)
+    _print(s)
     i
         """,
       BuildOutput("""
@@ -2387,7 +2350,7 @@ fun main() -> i32
     let s = id("Hello World")
     let i = id(5)
     let f = id(99.9)
-    print(s)
+    _print(s)
     i
         """,
       BuildOutput("""
@@ -2404,10 +2367,10 @@ id'str a3 =
  identity'str a3
 
 id'i32 a4 =
- identity'str a4
+ identity'i32 a4
 
 id'f32 a5 =
- identity'str a5
+ identity'f32 a5
 
 grinMain _6 =
  s7 <-  id'str #"Hello World"
@@ -2426,7 +2389,7 @@ fun summarize(a: str, b: str) -> str
 
 fun main() -> i32
     let s = summarize("Hello", "World")
-    print(s)
+    _print(s)
     0
         """,
       BuildOutput("""
@@ -2452,7 +2415,7 @@ fun addition[T: Add](a: T, b: T) -> T
 fun main() -> i32
     let s = summarize("Hello", "World")
     let a = addition(2, 3)
-    print(s)
+    _print(s)
     a
         """,
       BuildOutput("""
@@ -2486,11 +2449,11 @@ impl Summary for Tweet:
     self.username + ": " + self.content
 
 fun notify[T: Summary](s: T) -> Unit
-  print("Breaking news! " + s.summarize())
+  _print("Breaking news! " + s.summarize())
 
 fun main() -> i32
     let tweet = Tweet("elon", "work!")
-    print(tweet.summarize())
+    _print(tweet.summarize())
     notify(tweet)
     0
         """,
@@ -2545,7 +2508,7 @@ fun notify[T: Summary](s: T) -> str
 
 fun main() -> i32
     let tweet = Tweet("elon", "work!")
-    print(tweet.summarize())
+    _print(tweet.summarize())
     notify(tweet)
     0
         """,
@@ -2690,12 +2653,12 @@ None =  store (CNone)
 Some t10 =
  store (CSome t10)
 
-grinMain _1 =
- o3 <-  Some 5
- p6 <- fetch o3
- case p6 of
-  (CSome v6) ->
-   pure v6
+grinMain _2 =
+ o4 <-  Some 5
+ p7 <- fetch o4
+ case p7 of
+  (CSome v7) ->
+   pure v7
   #default ->
    pure 1""")
     )
@@ -2719,12 +2682,12 @@ None'i32 =  store (CNonei32)
 Some'i32 t10 =
  store (CSomei32 t10)
 
-grinMain _1 =
- o2 <-  Some'i32 5
- p5 <- fetch o2
- case p5 of
-  (CSomei32 v5) ->
-   pure v5
+grinMain _2 =
+ o3 <-  Some'i32 5
+ p6 <- fetch o3
+ case p6 of
+  (CSomei32 v6) ->
+   pure v6
   #default ->
    pure 1
         """)
@@ -2753,30 +2716,30 @@ fun main() -> i32
 Some'i32 t10 =
  store (CSomei32 t10)
 
-mapOptioni32i32' self1 f''2 =
- p5 <- fetch self1
- case p5 of
-  (CSomei32 v5) ->
-   p7 <- apply1_i32 f''2 v5
-   p8 <- Some'i32 p7
-   pure p8
-  #default ->
-   p9 <- None'i32
+mapOptioni32i32' self2 f''3 =
+ p6 <- fetch self2
+ case p6 of
+  (CSomei32 v6) ->
+   p8 <- apply1_i32_to_i32 f''3 v6
+   p9 <- Some'i32 p8
    pure p9
+  #default ->
+   p10 <- None'i32
+   pure p10
 
-grinMain _9 =
- o10 <-  Some'i32 5
- p18 <- pure (P1c12 )
- _18 <-  mapOptioni32i32' o10 p18
+grinMain _10 =
+ o11 <-  Some'i32 5
+ p19 <- pure (P1c13 )
+ _19 <-  mapOptioni32i32' o11 p19
  pure 0
 
-c12 a12 =
- _prim_int_add a12 1
+c13 a13 =
+ _prim_int_add a13 1
 
-apply1_i32 p20 p21 =
- case p20 of
-  (P1c12) ->
-   c12 p21
+apply1_i32_to_i32 p21 p22 =
+ case p21 of
+  (P1c13) ->
+   c13 p22
 """)
     )
   }
@@ -2809,33 +2772,33 @@ fun main() -> i32
 
 None'i32 =  store (CNonei32)
 
-mapOptionFunctori32i32' self1 f''2 =
- p5 <- fetch self1
- case p5 of
-  (CSomei32 v5) ->
-   p7 <- apply1_i32 f''2 v5
-   p8 <- Some'i32 p7
-   pure p8
-  #default ->
-   p9 <- None'i32
+mapOptionFunctori32i32' self2 f''3 =
+ p6 <- fetch self2
+ case p6 of
+  (CSomei32 v6) ->
+   p8 <- apply1_i32_to_i32 f''3 v6
+   p9 <- Some'i32 p8
    pure p9
+  #default ->
+   p10 <- None'i32
+   pure p10
 
-fmap'i32'i32'Option f''9 c10 =
- mapOptionFunctori32i32' c10 f''9
+fmap'i32'i32'Option f''10 c11 =
+ mapOptionFunctori32i32' c11 f''10
 
-grinMain _11 =
- o12 <-  Some'i32 5
- p20 <- pure (P1c14 )
- _20 <-  fmap'i32'i32'Option p20 o12
+grinMain _12 =
+ o13 <-  Some'i32 5
+ p21 <- pure (P1c15 )
+ _21 <-  fmap'i32'i32'Option p21 o13
  pure 0
 
-c14 a14 =
- _prim_int_add a14 1
+c15 a15 =
+ _prim_int_add a15 1
 
-apply1_i32 p22 p23 =
- case p22 of
-  (P1c14) ->
-   c14 p23
+apply1_i32_to_i32 p23 p24 =
+ case p23 of
+  (P1c15) ->
+   c15 p24
 """)
     )
   }
@@ -2890,35 +2853,35 @@ fun main() -> i32
 Some'i32 t10 =
  store (CSomei32 t10)
 
-mapOptioni32i32' self1 f''2 =
- p5 <- fetch self1
- case p5 of
-  (CSomei32 v5) ->
-   p7 <- apply1_i32 f''2 v5
-   p8 <- Some'i32 p7
-   pure p8
-  #default ->
-   p9 <- None'i32
+mapOptioni32i32' self2 f''3 =
+ p6 <- fetch self2
+ case p6 of
+  (CSomei32 v6) ->
+   p8 <- apply1_i32_to_i32 f''3 v6
+   p9 <- Some'i32 p8
    pure p9
+  #default ->
+   p10 <- None'i32
+   pure p10
 
-grinMain _9 =
- o10 <-  Some'i32 5
- p18 <- pure (P1c12 )
- o118 <-  mapOptioni32i32' o10 p18
- p21 <- fetch o118
- case p21 of
-  (CSomei32 v21) ->
-   pure v21
+grinMain _10 =
+ o11 <-  Some'i32 5
+ p19 <- pure (P1c13 )
+ o119 <-  mapOptioni32i32' o11 p19
+ p22 <- fetch o119
+ case p22 of
+  (CSomei32 v22) ->
+   pure v22
   #default ->
    pure 0
 
-c12 a12 =
- _prim_int_add a12 1
+c13 a13 =
+ _prim_int_add a13 1
 
-apply1_i32 p23 p24 =
- case p23 of
-  (P1c12) ->
-   c12 p24
+apply1_i32_to_i32 p24 p25 =
+ case p24 of
+  (P1c13) ->
+   c13 p25
 """)
     )
   }
@@ -2981,63 +2944,63 @@ fun main() -> i32
 Some'i32 t10 =
  store (CSomei32 t10)
 
-Some'str t11 =
- store (CSomestr t11)
+Some'str t12 =
+ store (CSomestr t12)
 
-mapOptioni32str' self2 f''3 =
- p6 <- fetch self2
- case p6 of
-  (CSomei32 v6) ->
-   p8 <- apply1_str f''3 v6
-   p9 <- Some'str p8
-   pure p9
+mapOptioni32str' self4 f''5 =
+ p8 <- fetch self4
+ case p8 of
+  (CSomei32 v8) ->
+   p10 <- apply1_i32_to_str f''5 v8
+   p11 <- Some'str p10
+   pure p11
   #default ->
-   p10 <- None'i32
-   pure p10
+   p12 <- None'i32
+   pure p12
 
-flatmapOptioni32i32' self10 f''11 =
- p14 <- fetch self10
- case p14 of
-  (CSomei32 a14) ->
-   p16 <- apply1_Option_i32 f''11 a14
-   pure p16
+flatmapOptioni32i32' self12 f''13 =
+ p16 <- fetch self12
+ case p16 of
+  (CSomei32 a16) ->
+   p18 <- apply1_i32_to_Option_i32 f''13 a16
+   pure p18
   #default ->
-   p17 <- None'i32
-   pure p17
+   p19 <- None'i32
+   pure p19
 
-tostrOption' v17 =
- s18 <-  Some'i32 v17
- p26 <- pure (P1c20 )
- mapOptioni32str' s18 p26
+tostrOption' v19 =
+ s20 <-  Some'i32 v19
+ p28 <- pure (P1c22 )
+ mapOptioni32str' s20 p28
 
-c20 a20 =
- _prim_int_str a20
+c22 a22 =
+ _prim_int_str a22
 
-grinMain _26 =
- o27 <-  Some'i32 5
- p36 <- pure (P1c29 )
- o136 <-  flatmapOptioni32i32' o27 p36
- l38 <-  tostrOption' 5
- p41 <- fetch l38
- case p41 of
-  (CSomestr v41) ->
+grinMain _28 =
+ o29 <-  Some'i32 5
+ p38 <- pure (P1c31 )
+ o138 <-  flatmapOptioni32i32' o29 p38
+ l40 <-  tostrOption' 5
+ p43 <- fetch l40
+ case p43 of
+  (CSomestr v43) ->
    pure 0
   #default ->
    pure 1
 
-c29 t29 =
- p31 <- _prim_int_add t29 1
- Some'i32 p31
+c31 t31 =
+ p33 <- _prim_int_add t31 1
+ Some'i32 p33
 
-apply1_Option_i32 p43 p44 =
- case p43 of
-  (P1c29) ->
-   c29 p44
-
-apply1_str p45 p46 =
+apply1_i32_to_Option_i32 p45 p46 =
  case p45 of
-  (P1c20) ->
-   c20 p46
+  (P1c31) ->
+   c31 p46
+
+apply1_i32_to_str p47 p48 =
+ case p47 of
+  (P1c22) ->
+   c22 p48
 """)
     )
   }
@@ -3068,7 +3031,7 @@ value a6 =
    case p9 of
     (CState p10) ->
      pure p10
- t13 <-  apply1_Tuple_i32__i32 p11'' 1
+ t13 <-  apply1_i32_to_Tuple_i32__i32 p11'' 1
  p16 <- fetch t13
  p19 <- do
    case p16 of
@@ -3091,7 +3054,7 @@ c26 a26 =
  p29 <- _prim_int_add a26 2
  Tuple'i32'i32 p28 p29
 
-apply1_Tuple_i32__i32 p36 p37 =
+apply1_i32_to_Tuple_i32__i32 p36 p37 =
  case p36 of
   (P1c26) ->
    c26 p37
@@ -3119,7 +3082,7 @@ fun main() -> i32
     let l1 = l.map(v => v + 1)
     match l1:
         Cons(h, t) => {
-            print(int_to_str(h))
+            _print(int_to_str(h))
             0
         }
         Nil => 1
@@ -3129,61 +3092,60 @@ fun main() -> i32
 
 Nil'i32 =  store (CNili32)
 
-mapListi32i32' self2 f''3 =
- p5 <- Nil'i32
- p12 <- store f''3
- p13 <- pure (P2c6 p12)
- foldRightListi32Listi32' self2 p5 p13
+foldRightListi32Listi32' as4 z5 f''6 =
+ p9 <- fetch as4
+ case p9 of
+  (CConsi32 x9 xs'10) ->
+   p12'' <- apply2_i32_to_List_i32 f''6 x9
+   p13 <- foldRightListi32Listi32' xs'10 z5 f''6
+   p14 <- apply1_List_i32_to_List_i32 p12'' p13
+   pure p14
+  #default ->
+   pure z5
 
-c6 f''37 h8 t9 =
- f''378 <- fetch f''37
- p11 <- apply1_i32 f''378 h8
- Cons'i32 p11 t9
+mapListi32i32' self14 f''15 =
+ p17 <- Nil'i32
+ p24 <- store f''15
+ p25 <- pure (P2c18 p24)
+ foldRightListi32Listi32' self14 p17 p25
 
-grinMain _13 =
- p15 <- Nil'i32
- p16 <- Cons'i32 3 p15
- l16 <-  Cons'i32 2 p16
- p24 <- pure (P1c18 )
- l124 <-  mapListi32i32' l16 p24
- p27 <- fetch l124
- case p27 of
-  (CConsi32 h27 t'28) ->
-   p30 <- _prim_int_str h27
-   _31 <-  _prim_string_print p30
+c18 f''1519 h20 t21 =
+ f''151920 <- fetch f''1519
+ p23 <- apply1_i32_to_i32 f''151920 h20
+ Cons'i32 p23 t21
+
+grinMain _25 =
+ p27 <- Nil'i32
+ p28 <- Cons'i32 3 p27
+ l28 <-  Cons'i32 2 p28
+ p36 <- pure (P1c30 )
+ l136 <-  mapListi32i32' l28 p36
+ p39 <- fetch l136
+ case p39 of
+  (CConsi32 h39 t'40) ->
+   p42 <- _prim_int_str h39
+   _43 <-  _prim_string_print p42
    pure 0
   #default ->
    pure 1
 
-c18 v18 =
- _prim_int_add v18 1
+c30 v30 =
+ _prim_int_add v30 1
 
-foldRightListi32Listi32' as32 z33 f''34 =
- p37 <- fetch as32
- case p37 of
-  (CConsi32 x37 xs'38) ->
-   p40'' <- apply2_List_i32 f''34 x37
-   p41 <- foldRightListi32Listi32' xs'38 z33 f''34
-   p42 <- apply1_List_i32 p40'' p41
-   pure p42
-  #default ->
-   pure z33
+apply1_List_i32_to_List_i32 p45 p46 =
+ case p45 of
+  (P1c18 p47 p48) ->
+   c18 p47 p48 p46
 
-apply1_List_i32 p43 p44 =
- case p43 of
-  (P1c6 p45 p46) ->
-   c6 p45 p46 p44
-
-apply1_i32 p47 p48 =
- case p47 of
-  (P1c18) ->
-   c18 p48
-
-apply2_List_i32 p49 p50 =
+apply1_i32_to_i32 p49 p50 =
  case p49 of
-  (P2c6 p51) ->
-   pure (P1c6 p51 p50)
-""")
+  (P1c30) ->
+   c30 p50
+
+apply2_i32_to_List_i32 p51 p52 =
+ case p51 of
+  (P2c18 p53) ->
+   pure (P1c18 p53 p52)""")
     )
   }
   test("build generic list with simple map") {
@@ -3209,33 +3171,33 @@ fun main() -> i32
 
 Nil'i32 =  store (CNili32)
 
-simplemapListi32i32' self2 f''3 =
- p6 <- fetch self2
- case p6 of
-  (CConsi32 h6 t'7) ->
-   p9 <- apply1_i32 f''3 h6
-   p10 <- Nil'i32
-   p11 <- Cons'i32 p9 p10
-   pure p11
-  #default ->
+simplemapListi32i32' self4 f''5 =
+ p8 <- fetch self4
+ case p8 of
+  (CConsi32 h8 t'9) ->
+   p11 <- apply1_i32_to_i32 f''5 h8
    p12 <- Nil'i32
-   pure p12
+   p13 <- Cons'i32 p11 p12
+   pure p13
+  #default ->
+   p14 <- Nil'i32
+   pure p14
 
-grinMain _12 =
- p14 <- Nil'i32
- p15 <- Cons'i32 3 p14
- l15 <-  Cons'i32 2 p15
- p23 <- pure (P1c17 )
- l123 <-  simplemapListi32i32' l15 p23
+grinMain _14 =
+ p16 <- Nil'i32
+ p17 <- Cons'i32 3 p16
+ l17 <-  Cons'i32 2 p17
+ p25 <- pure (P1c19 )
+ l125 <-  simplemapListi32i32' l17 p25
  pure 0
 
-c17 v17 =
- _prim_int_add v17 1
+c19 v19 =
+ _prim_int_add v19 1
 
-apply1_i32 p25 p26 =
- case p25 of
-  (P1c17) ->
-   c17 p26
+apply1_i32_to_i32 p27 p28 =
+ case p27 of
+  (P1c19) ->
+   c19 p28
 """)
     )
   }
@@ -3275,71 +3237,71 @@ fun main() -> i32
 
 Nil'i32 =  store (CNili32)
 
-mapwithmapperListi32i32' self2 mapper''3 =
- p6 <- fetch self2
- case p6 of
-  (CConsi32 h6 t'7) ->
-   p9 <- apply1_i32 mapper''3 h6
-   p10 <- Nil'i32
-   p11 <- Cons'i32 p9 p10
-   pure p11
-  #default ->
+mapwithmapperListi32i32' self4 mapper''5 =
+ p8 <- fetch self4
+ case p8 of
+  (CConsi32 h8 t'9) ->
+   p11 <- apply1_i32_to_i32 mapper''5 h8
    p12 <- Nil'i32
-   pure p12
-
-mapwithtransformListi32i32' self12 transform''13 =
- p16 <- fetch self12
- case p16 of
-  (CConsi32 h16 t'17) ->
-   p19 <- apply1_i32 transform''13 h16
-   p20 <- Nil'i32
-   p21 <- Cons'i32 p19 p20
-   pure p21
+   p13 <- Cons'i32 p11 p12
+   pure p13
   #default ->
+   p14 <- Nil'i32
+   pure p14
+
+mapwithtransformListi32i32' self14 transform''15 =
+ p18 <- fetch self14
+ case p18 of
+  (CConsi32 h18 t'19) ->
+   p21 <- apply1_i32_to_i32 transform''15 h18
    p22 <- Nil'i32
-   pure p22
-
-mapwithcallbackListi32i32' self22 callback''23 =
- p26 <- fetch self22
- case p26 of
-  (CConsi32 h26 t'27) ->
-   p29 <- apply1_i32 callback''23 h26
-   p30 <- Nil'i32
-   p31 <- Cons'i32 p29 p30
-   pure p31
+   p23 <- Cons'i32 p21 p22
+   pure p23
   #default ->
-   p32 <- Nil'i32
-   pure p32
+   p24 <- Nil'i32
+   pure p24
 
-grinMain _32 =
- p34 <- Nil'i32
- p35 <- Cons'i32 3 p34
- l35 <-  Cons'i32 2 p35
- p43 <- pure (P1c37 )
- l143 <-  mapwithmapperListi32i32' l35 p43
- p51 <- pure (P1c45 )
- l251 <-  mapwithtransformListi32i32' l35 p51
- p59 <- pure (P1c53 )
- l359 <-  mapwithcallbackListi32i32' l35 p59
+mapwithcallbackListi32i32' self24 callback''25 =
+ p28 <- fetch self24
+ case p28 of
+  (CConsi32 h28 t'29) ->
+   p31 <- apply1_i32_to_i32 callback''25 h28
+   p32 <- Nil'i32
+   p33 <- Cons'i32 p31 p32
+   pure p33
+  #default ->
+   p34 <- Nil'i32
+   pure p34
+
+grinMain _34 =
+ p36 <- Nil'i32
+ p37 <- Cons'i32 3 p36
+ l37 <-  Cons'i32 2 p37
+ p45 <- pure (P1c39 )
+ l145 <-  mapwithmapperListi32i32' l37 p45
+ p53 <- pure (P1c47 )
+ l253 <-  mapwithtransformListi32i32' l37 p53
+ p61 <- pure (P1c55 )
+ l361 <-  mapwithcallbackListi32i32' l37 p61
  pure 0
 
-c37 x37 =
- _prim_int_add x37 1
+c39 x39 =
+ _prim_int_add x39 1
 
-c45 y45 =
- _prim_int_mul y45 2
+c47 y47 =
+ _prim_int_mul y47 2
 
-c53 z53 =
- _prim_int_add z53 3
+c55 z55 =
+ _prim_int_add z55 3
 
-apply1_i32 p61 p62 =
- case p61 of
-  (P1c37) ->
-   c37 p62
-  (P1c45) ->
-   c45 p62
-  (P1c53) ->
-   c53 p62
+apply1_i32_to_i32 p63 p64 =
+ case p63 of
+  (P1c39) ->
+   c39 p64
+  (P1c47) ->
+   c47 p64
+  (P1c55) ->
+   c55 p64
 """)
     )
   }
@@ -3364,7 +3326,7 @@ fun main() -> i32
     let l1 = l.map_2(v => v + 1)
     match l1:
         Cons(h, t) => {
-            print(int_to_str(h))
+            _print(int_to_str(h))
             0
         }
         Nil => 1
@@ -3374,44 +3336,44 @@ fun main() -> i32
 
 Nil'i32 =  store (CNili32)
 
-map2Listi32i32' self2 f''3 =
- p18 <- Nil'i32
- iter5 f''3 self2 p18
-
-iter5 f''36 l7 acc8 =
- f''367 <- fetch f''36
- p11 <- fetch l7
- case p11 of
-  (CConsi32 h11 t'12) ->
-   p14 <- apply1_i32 f''367 h11
-   p15 <- Cons'i32 p14 acc8
-   p16 <- iter5 f''36 t'12 p15
-   pure p16
-  #default ->
-   pure acc8
-
-grinMain _18 =
+map2Listi32i32' self4 f''5 =
  p20 <- Nil'i32
- p21 <- Cons'i32 3 p20
- l21 <-  Cons'i32 2 p21
- p29 <- pure (P1c23 )
- l129 <-  map2Listi32i32' l21 p29
- p32 <- fetch l129
- case p32 of
-  (CConsi32 h32 t'33) ->
-   p35 <- _prim_int_str h32
-   _36 <-  _prim_string_print p35
+ iter7 f''5 self4 p20
+
+iter7 f''58 l9 acc10 =
+ f''589 <- fetch f''58
+ p13 <- fetch l9
+ case p13 of
+  (CConsi32 h13 t'14) ->
+   p16 <- apply1_i32_to_i32 f''589 h13
+   p17 <- Cons'i32 p16 acc10
+   p18 <- iter7 f''58 t'14 p17
+   pure p18
+  #default ->
+   pure acc10
+
+grinMain _20 =
+ p22 <- Nil'i32
+ p23 <- Cons'i32 3 p22
+ l23 <-  Cons'i32 2 p23
+ p31 <- pure (P1c25 )
+ l131 <-  map2Listi32i32' l23 p31
+ p34 <- fetch l131
+ case p34 of
+  (CConsi32 h34 t'35) ->
+   p37 <- _prim_int_str h34
+   _38 <-  _prim_string_print p37
    pure 0
   #default ->
    pure 1
 
-c23 v23 =
- _prim_int_add v23 1
+c25 v25 =
+ _prim_int_add v25 1
 
-apply1_i32 p38 p39 =
- case p38 of
-  (P1c23) ->
-   c23 p39
+apply1_i32_to_i32 p40 p41 =
+ case p40 of
+  (P1c25) ->
+   c25 p41
 """)
     )
   }
@@ -3434,108 +3396,107 @@ impl List[A]:
 fun main() -> i32
     let l = Cons(2, Cons(3, Nil))
     let l1 = l.map(v => v + 1)
-    l1.map(r => print(int_to_str(r)))
+    l1.map(r => _print(int_to_str(r)))
     0
         """,
       BuildOutput("""Cons'i32 h0 t1 =
  store (CConsi32 h0 t1)
 
-Cons'Unit h2 t3 =
- store (CConsUnit h2 t3)
+Cons'Unit h4 t5 =
+ store (CConsUnit h4 t5)
 
 Nil'i32 =  store (CNili32)
 
-mapListi32i32' self4 f''5 =
- p7 <- Nil'i32
- p14 <- store f''5
- p15 <- pure (P2c8 p14)
- foldrightListi32Listi32' self4 p7 p15
+foldrightListi32Listi32' as8 z9 f''10 =
+ p13 <- fetch as8
+ case p13 of
+  (CConsi32 x13 xs'14) ->
+   p16'' <- apply2_i32_to_List_i32 f''10 x13
+   p17 <- foldrightListi32Listi32' xs'14 z9 f''10
+   p18 <- apply1_List_i32_to_List_i32 p16'' p17
+   pure p18
+  #default ->
+   pure z9
 
-c8 f''59 h10 t11 =
- f''5910 <- fetch f''59
- p13 <- apply1_i32 f''5910 h10
- Cons'i32 p13 t11
+foldrightListi32ListUnit' as18 z19 f''20 =
+ p23 <- fetch as18
+ case p23 of
+  (CConsi32 x23 xs'24) ->
+   p26'' <- apply2_i32_to_List_unit f''20 x23
+   p27 <- foldrightListi32ListUnit' xs'24 z19 f''20
+   p28 <- apply1_List_unit_to_List_unit p26'' p27
+   pure p28
+  #default ->
+   pure z19
 
-mapListi32Unit' self15 f''16 =
- p18 <- Nil'i32
- p25 <- store f''16
- p26 <- pure (P2c19 p25)
- foldrightListi32ListUnit' self15 p18 p26
+mapListi32i32' self28 f''29 =
+ p31 <- Nil'i32
+ p38 <- store f''29
+ p39 <- pure (P2c32 p38)
+ foldrightListi32Listi32' self28 p31 p39
 
-c19 f''1620 h21 t22 =
- f''162021 <- fetch f''1620
- p24 <- apply1_unit f''162021 h21
- Cons'Unit p24 t22
+c32 f''2933 h34 t35 =
+ f''293334 <- fetch f''2933
+ p37 <- apply1_i32_to_i32 f''293334 h34
+ Cons'i32 p37 t35
 
-grinMain _26 =
- p28 <- Nil'i32
- p29 <- Cons'i32 3 p28
- l29 <-  Cons'i32 2 p29
- p37 <- pure (P1c31 )
- l137 <-  mapListi32i32' l29 p37
- p46 <- pure (P1c39 )
- _46 <-  mapListi32Unit' l137 p46
+mapListi32Unit' self39 f''40 =
+ p42 <- Nil'i32
+ p49 <- store f''40
+ p50 <- pure (P2c43 p49)
+ foldrightListi32ListUnit' self39 p42 p50
+
+c43 f''4044 h45 t46 =
+ f''404445 <- fetch f''4044
+ p48 <- apply1_i32_to_unit f''404445 h45
+ Cons'Unit p48 t46
+
+grinMain _50 =
+ p52 <- Nil'i32
+ p53 <- Cons'i32 3 p52
+ l53 <-  Cons'i32 2 p53
+ p61 <- pure (P1c55 )
+ l161 <-  mapListi32i32' l53 p61
+ p70 <- pure (P1c63 )
+ _70 <-  mapListi32Unit' l161 p70
  pure 0
 
-c31 v31 =
- _prim_int_add v31 1
+c55 v55 =
+ _prim_int_add v55 1
 
-c39 r39 =
- p41 <- _prim_int_str r39
- _prim_string_print p41
+c63 r63 =
+ p65 <- _prim_int_str r63
+ _prim_string_print p65
 
-foldrightListi32Listi32' as47 z48 f''49 =
- p52 <- fetch as47
- case p52 of
-  (CConsi32 x52 xs'53) ->
-   p55'' <- apply2_List_i32 f''49 x52
-   p56 <- foldrightListi32Listi32' xs'53 z48 f''49
-   p57 <- apply1_List_i32 p55'' p56
-   pure p57
-  #default ->
-   pure z48
-
-foldrightListi32ListUnit' as57 z58 f''59 =
- p62 <- fetch as57
- case p62 of
-  (CConsi32 x62 xs'63) ->
-   p65'' <- apply2_List_unit f''59 x62
-   p66 <- foldrightListi32ListUnit' xs'63 z58 f''59
-   p67 <- apply1_List_unit p65'' p66
-   pure p67
-  #default ->
-   pure z58
-
-apply1_List_i32 p68 p69 =
- case p68 of
-  (P1c8 p70 p71) ->
-   c8 p70 p71 p69
-
-apply1_List_unit p72 p73 =
+apply1_List_i32_to_List_i32 p72 p73 =
  case p72 of
-  (P1c19 p74 p75) ->
-   c19 p74 p75 p73
+  (P1c32 p74 p75) ->
+   c32 p74 p75 p73
 
-apply1_i32 p76 p77 =
+apply1_List_unit_to_List_unit p76 p77 =
  case p76 of
-  (P1c31) ->
-   c31 p77
+  (P1c43 p78 p79) ->
+   c43 p78 p79 p77
 
-apply1_unit p78 p79 =
- case p78 of
-  (P1c39) ->
-   c39 p79
-
-apply2_List_i32 p80 p81 =
+apply1_i32_to_i32 p80 p81 =
  case p80 of
-  (P2c8 p82) ->
-   pure (P1c8 p82 p81)
+  (P1c55) ->
+   c55 p81
 
-apply2_List_unit p83 p84 =
- case p83 of
-  (P2c19 p85) ->
-   pure (P1c19 p85 p84)
-""")
+apply1_i32_to_unit p82 p83 =
+ case p82 of
+  (P1c63) ->
+   c63 p83
+
+apply2_i32_to_List_i32 p84 p85 =
+ case p84 of
+  (P2c32 p86) ->
+   pure (P1c32 p86 p85)
+
+apply2_i32_to_List_unit p87 p88 =
+ case p87 of
+  (P2c43 p89) ->
+   pure (P1c43 p89 p88)""")
     )
   }
 
@@ -3565,7 +3526,7 @@ fun main() -> i32
     let l = Cons(1, Cons(2, Cons(3, Nil)))
     let l1 = l.flat_map(v => Cons(v, Cons(v * 10, Nil)))
     let s = List::sum(l1)
-    print(int_to_str(s))
+    _print(int_to_str(s))
     0
         """,
       BuildOutput("""Cons'i32 h0 t1 =
@@ -3573,97 +3534,99 @@ fun main() -> i32
 
 Nil'i32 =  store (CNili32)
 
-foldrightListi32i32' as2 z3 f''4 =
- p7 <- fetch as2
- case p7 of
-  (CConsi32 x7 xs'8) ->
-   p10'' <- apply2_i32 f''4 x7
-   p11 <- foldrightListi32i32' xs'8 z3 f''4
-   p12 <- apply1_i32 p10'' p11
-   pure p12
+foldrightListi32i32' as4 z5 f''6 =
+ p9 <- fetch as4
+ case p9 of
+  (CConsi32 x9 xs'10) ->
+   p12'' <- apply2_i32_to_i32 f''6 x9
+   p13 <- foldrightListi32i32' xs'10 z5 f''6
+   p14 <- apply1_i32_to_i32 p12'' p13
+   pure p14
   #default ->
-   pure z3
+   pure z5
 
-appendListi32' l112 l213 =
- p18 <- pure (P2c15 )
- foldrightListi32Listi32' l112 l213 p18
+foldrightListi32Listi32' as14 z15 f''16 =
+ p19 <- fetch as14
+ case p19 of
+  (CConsi32 x19 xs'20) ->
+   p22'' <- apply2_i32_to_List_i32 f''16 x19
+   p23 <- foldrightListi32Listi32' xs'20 z15 f''16
+   p24 <- apply1_List_i32_to_List_i32 p22'' p23
+   pure p24
+  #default ->
+   pure z15
 
-c15 h15 t16 =
- Cons'i32 h15 t16
+appendListi32' l124 l225 =
+ p30 <- pure (P2c27 )
+ foldrightListi32Listi32' l124 l225 p30
 
-flatmapListi32i32' self18 f''19 =
- p21 <- Nil'i32
- p28 <- store f''19
- p29 <- pure (P2c22 p28)
- foldrightListi32Listi32' self18 p21 p29
+c27 h27 t28 =
+ Cons'i32 h27 t28
 
-c22 f''1923 h24 t25 =
- f''192324 <- fetch f''1923
- p27 <- c47 h24
- appendListi32' p27 t25
+flatmapListi32i32' self30 f''31 =
+ p33 <- Nil'i32
+ p40 <- store f''31
+ p41 <- pure (P2c34 p40)
+ foldrightListi32Listi32' self30 p33 p41
 
-sumList' l29 =
- p41 <- pure (P2c31 )
- foldrightListi32i32' l29 0 p41
+c34 f''3135 h36 t37 =
+ f''313536 <- fetch f''3135
+ p39 <- apply1_i32_to_List_i32 f''313536 h36
+ appendListi32' p39 t37
 
-c31 acc31 b32 =
- _prim_int_add acc31 b32
+sumList' l41 =
+ p53 <- pure (P2c43 )
+ foldrightListi32i32' l41 0 p53
 
-grinMain _41 =
- p43 <- Nil'i32
- p44 <- Cons'i32 3 p43
- p45 <- Cons'i32 2 p44
- l45 <-  Cons'i32 1 p45
- p56 <- pure (P1c47 )
- l156 <-  flatmapListi32i32' l45 p56
- s58 <-  sumList' l156
- p60 <- _prim_int_str s58
- _61 <-  _prim_string_print p60
+c43 acc43 b44 =
+ _prim_int_add acc43 b44
+
+grinMain _53 =
+ p55 <- Nil'i32
+ p56 <- Cons'i32 3 p55
+ p57 <- Cons'i32 2 p56
+ l57 <-  Cons'i32 1 p57
+ p68 <- pure (P1c59 )
+ l168 <-  flatmapListi32i32' l57 p68
+ s70 <-  sumList' l168
+ p72 <- _prim_int_str s70
+ _73 <-  _prim_string_print p72
  pure 0
 
-c47 v47 =
- p49 <- _prim_int_mul v47 10
- p50 <- Nil'i32
- p51 <- Cons'i32 p49 p50
- Cons'i32 v47 p51
+c59 v59 =
+ p61 <- _prim_int_mul v59 10
+ p62 <- Nil'i32
+ p63 <- Cons'i32 p61 p62
+ Cons'i32 v59 p63
 
-foldrightListi32Listi32' as62 z63 f''64 =
- p67 <- fetch as62
- case p67 of
-  (CConsi32 x67 xs'68) ->
-   p70'' <- apply2_List_i32 f''64 x67
-   p71 <- foldrightListi32Listi32' xs'68 z63 f''64
-   p72 <- apply1_List_i32 p70'' p71
-   pure p72
-  #default ->
-   pure z63
+apply1_List_i32_to_List_i32 p75 p76 =
+ case p75 of
+  (P1c27 p77) ->
+   c27 p77 p76
+  (P1c34 p78 p79) ->
+   c34 p78 p79 p76
 
-apply1_List_i32 p73 p74 =
- case p73 of
-  (P1c15 p75) ->
-   c15 p75 p74
-  (P1c22 p76 p77) ->
-   c22 p76 p77 p74
-  (P1c47) ->
-   c47 p74
+apply1_i32_to_List_i32 p80 p81 =
+ case p80 of
+  (P1c59) ->
+   c59 p81
 
-apply1_i32 p78 p79 =
- case p78 of
-  (P1c31 p80) ->
-   c31 p80 p79
+apply1_i32_to_i32 p82 p83 =
+ case p82 of
+  (P1c43 p84) ->
+   c43 p84 p83
 
-apply2_List_i32 p81 p82 =
- case p81 of
-  (P2c15) ->
-   pure (P1c15 p82)
-  (P2c22 p83) ->
-   pure (P1c22 p83 p82)
+apply2_i32_to_List_i32 p85 p86 =
+ case p85 of
+  (P2c27) ->
+   pure (P1c27 p86)
+  (P2c34 p87) ->
+   pure (P1c34 p87 p86)
 
-apply2_i32 p84 p85 =
- case p84 of
-  (P2c31) ->
-   pure (P1c31 p85)
-""")
+apply2_i32_to_i32 p88 p89 =
+ case p88 of
+  (P2c43) ->
+   pure (P1c43 p89)""")
     )
   }
   test("build list filter with comparison") {
@@ -3693,7 +3656,7 @@ fun main() -> i32
     let l = Cons(1, Cons(2, Cons(3, Nil)))
     let l2 = l.filter(e => e > 1)
     let s = List::sum(l2)
-    print(int_to_str(s))
+    _print(int_to_str(s))
     0
         """,
       BuildOutput("""Cons'i32 h0 t1 =
@@ -3701,90 +3664,90 @@ fun main() -> i32
 
 Nil'i32 =  store (CNili32)
 
-foldrightListi32i32' as2 z3 f''4 =
- p7 <- fetch as2
- case p7 of
-  (CConsi32 x7 xs'8) ->
-   p10'' <- apply2_i32 f''4 x7
-   p11 <- foldrightListi32i32' xs'8 z3 f''4
-   p12 <- apply1_i32 p10'' p11
-   pure p12
+foldrightListi32i32' as4 z5 f''6 =
+ p9 <- fetch as4
+ case p9 of
+  (CConsi32 x9 xs'10) ->
+   p12'' <- apply2_i32_to_i32 f''6 x9
+   p13 <- foldrightListi32i32' xs'10 z5 f''6
+   p14 <- apply1_i32_to_i32 p12'' p13
+   pure p14
   #default ->
-   pure z3
+   pure z5
 
-sumList' l12 =
- p24 <- pure (P2c14 )
- foldrightListi32i32' l12 0 p24
+foldrightListi32Listi32' as14 z15 f''16 =
+ p19 <- fetch as14
+ case p19 of
+  (CConsi32 x19 xs'20) ->
+   p22'' <- apply2_i32_to_List_i32 f''16 x19
+   p23 <- foldrightListi32Listi32' xs'20 z15 f''16
+   p24 <- apply1_List_i32_to_List_i32 p22'' p23
+   pure p24
+  #default ->
+   pure z15
 
-c14 acc14 b15 =
- _prim_int_add acc14 b15
+sumList' l24 =
+ p36 <- pure (P2c26 )
+ foldrightListi32i32' l24 0 p36
 
-filterListi32' self24 f''25 =
- p27 <- Nil'i32
- p36 <- store f''25
- p37 <- pure (P2c28 p36)
- foldrightListi32Listi32' self24 p27 p37
+c26 acc26 b27 =
+ _prim_int_add acc26 b27
 
-c28 f''2529 h30 t31 =
- f''252930 <- fetch f''2529
- p34 <- apply1_bool f''252930 h30
- case p34 of
-  #True ->
-   p35 <- Cons'i32 h30 t31
-   pure p35
-  #False ->
-   pure t31
-
-grinMain _37 =
+filterListi32' self36 f''37 =
  p39 <- Nil'i32
- p40 <- Cons'i32 3 p39
- p41 <- Cons'i32 2 p40
- l41 <-  Cons'i32 1 p41
- p49 <- pure (P1c43 )
- l249 <-  filterListi32' l41 p49
- s51 <-  sumList' l249
- p53 <- _prim_int_str s51
- _54 <-  _prim_string_print p53
+ p48 <- store f''37
+ p49 <- pure (P2c40 p48)
+ foldrightListi32Listi32' self36 p39 p49
+
+c40 f''3741 h42 t43 =
+ f''374142 <- fetch f''3741
+ p46 <- apply1_i32_to_bool f''374142 h42
+ case p46 of
+  #True ->
+   p47 <- Cons'i32 h42 t43
+   pure p47
+  #False ->
+   pure t43
+
+grinMain _49 =
+ p51 <- Nil'i32
+ p52 <- Cons'i32 3 p51
+ p53 <- Cons'i32 2 p52
+ l53 <-  Cons'i32 1 p53
+ p61 <- pure (P1c55 )
+ l261 <-  filterListi32' l53 p61
+ s63 <-  sumList' l261
+ p65 <- _prim_int_str s63
+ _66 <-  _prim_string_print p65
  pure 0
 
-c43 e43 =
- _prim_int_gt e43 1
+c55 e55 =
+ _prim_int_gt e55 1
 
-foldrightListi32Listi32' as55 z56 f''57 =
- p60 <- fetch as55
- case p60 of
-  (CConsi32 x60 xs'61) ->
-   p63'' <- apply2_List_i32 f''57 x60
-   p64 <- foldrightListi32Listi32' xs'61 z56 f''57
-   p65 <- apply1_List_i32 p63'' p64
-   pure p65
-  #default ->
-   pure z56
+apply1_List_i32_to_List_i32 p68 p69 =
+ case p68 of
+  (P1c40 p70 p71) ->
+   c40 p70 p71 p69
 
-apply1_List_i32 p66 p67 =
- case p66 of
-  (P1c28 p68 p69) ->
-   c28 p68 p69 p67
-
-apply1_bool p70 p71 =
- case p70 of
-  (P1c43) ->
-   c43 p71
-
-apply1_i32 p72 p73 =
+apply1_i32_to_bool p72 p73 =
  case p72 of
-  (P1c14 p74) ->
-   c14 p74 p73
+  (P1c55) ->
+   c55 p73
 
-apply2_List_i32 p75 p76 =
- case p75 of
-  (P2c28 p77) ->
-   pure (P1c28 p77 p76)
+apply1_i32_to_i32 p74 p75 =
+ case p74 of
+  (P1c26 p76) ->
+   c26 p76 p75
 
-apply2_i32 p78 p79 =
- case p78 of
-  (P2c14) ->
-   pure (P1c14 p79)""")
+apply2_i32_to_List_i32 p77 p78 =
+ case p77 of
+  (P2c40 p79) ->
+   pure (P1c40 p79 p78)
+
+apply2_i32_to_i32 p80 p81 =
+ case p80 of
+  (P2c26) ->
+   pure (P1c26 p81)""")
     )
   }
 
@@ -3818,7 +3781,7 @@ fun main() -> i32
   let result = x.flat_map(i => y.map(j => i + j))
   match result:
     Some(v) => {
-      print(int_to_str(v))
+      _print(int_to_str(v))
       0
     }
     _ => 1
@@ -3829,57 +3792,430 @@ Some'i32 t10 =
 
 None'i32 =  store (CNonei32)
 
-flatmapOptionMonadi32i32' self1 f''2 =
- p5 <- fetch self1
- case p5 of
-  (CSomei32 v5) ->
-   p7 <- apply1_Option_i32 f''2 v5
-   pure p7
-  #default ->
-   p8 <- None'i32
+flatmapOptionMonadi32i32' self2 f''3 =
+ p6 <- fetch self2
+ case p6 of
+  (CSomei32 v6) ->
+   p8 <- apply1_i32_to_Option_i32 f''3 v6
    pure p8
-
-mapOptionMonadi32i32' self8 f''9 =
- p12 <- fetch self8
- case p12 of
-  (CSomei32 v12) ->
-   p14 <- apply1_i32 f''9 v12
-   p15 <- Some'i32 p14
-   pure p15
   #default ->
-   p16 <- None'i32
-   pure p16
+   p9 <- None'i32
+   pure p9
 
-grinMain _16 =
- x17 <-  Some'i32 1
- y18 <-  Some'i32 2
- p39 <- pure (P1c20 y18)
- result39 <-  flatmapOptionMonadi32i32' x17 p39
- p42 <- fetch result39
- case p42 of
-  (CSomei32 v42) ->
-   p44 <- _prim_int_str v42
-   _45 <-  _prim_string_print p44
+mapOptionMonadi32i32' self9 f''10 =
+ p13 <- fetch self9
+ case p13 of
+  (CSomei32 v13) ->
+   p15 <- apply1_i32_to_i32 f''10 v13
+   p16 <- Some'i32 p15
+   pure p16
+  #default ->
+   p17 <- None'i32
+   pure p17
+
+grinMain _17 =
+ x18 <-  Some'i32 1
+ y19 <-  Some'i32 2
+ p40 <- pure (P1c21 y19)
+ result40 <-  flatmapOptionMonadi32i32' x18 p40
+ p43 <- fetch result40
+ case p43 of
+  (CSomei32 v43) ->
+   p45 <- _prim_int_str v43
+   _46 <-  _prim_string_print p45
    pure 0
   #default ->
    pure 1
 
-c20 y1821 i22 =
- p31 <- pure (P1c24 i22)
- mapOptionMonadi32i32' y1821 p31
+c21 y1922 i23 =
+ p32 <- pure (P1c25 i23)
+ mapOptionMonadi32i32' y1922 p32
 
-c24 i2225 j25 =
- _prim_int_add i2225 j25
+c25 i2326 j26 =
+ _prim_int_add i2326 j26
 
-apply1_Option_i32 p47 p48 =
- case p47 of
-  (P1c20 p49) ->
-   c20 p49 p48
+apply1_i32_to_Option_i32 p48 p49 =
+ case p48 of
+  (P1c21 p50) ->
+   c21 p50 p49
 
-apply1_i32 p50 p51 =
- case p50 of
-  (P1c24 p52) ->
-   c24 p52 p51""")
+apply1_i32_to_i32 p51 p52 =
+ case p51 of
+  (P1c25 p53) ->
+   c25 p53 p52""")
+    )
+  }
+
+  test("build nested generic ADT List[Opt[i32]]") {
+    fuse(
+      """
+type List[A]:
+  Cons(h: A, t: List[A])
+  Nil
+
+type Opt[A]:
+  MySome(A)
+  MyNone
+
+fun sum_somes(l: List[Opt[i32]]) -> i32
+  match l:
+    Cons(h, t) => {
+      match h:
+        MySome(v) => v + sum_somes(t)
+        MyNone => sum_somes(t)
+    }
+    Nil => 0
+
+fun main() -> i32
+  let l = Cons(MySome(1), Cons(MyNone[i32], Cons(MySome(3), Nil)))
+  _print(int_to_str(sum_somes(l)))
+  0
+      """,
+      BuildOutput("""Cons'Opti32 h0 t1 =
+ store (CConsOpti32 h0 t1)
+
+Nil'Opti32 =  store (CNilOpti32)
+
+MySome'i32 t14 =
+ store (CMySomei32 t14)
+
+MyNone'i32 =  store (CMyNonei32)
+
+sum_somes l6 =
+ p9 <- fetch l6
+ case p9 of
+  (CConsOpti32 h'9 t'10) ->
+   p13 <- fetch h'9
+   p18 <-  case p13 of
+     (CMySomei32 v13) ->
+      p15 <- sum_somes t'10
+      p16 <- _prim_int_add v13 p15
+      pure p16
+     #default ->
+      p17 <- sum_somes t'10
+      pure p17
+   pure p18
+  #default ->
+   pure 0
+
+grinMain _18 =
+ p20 <- MySome'i32 1
+ p21 <- MyNone'i32
+ p22 <- MySome'i32 3
+ p23 <- Nil'Opti32
+ p24 <- Cons'Opti32 p22 p23
+ p25 <- Cons'Opti32 p21 p24
+ l25 <-  Cons'Opti32 p20 p25
+ p27 <- sum_somes l25
+ p28 <- _prim_int_str p27
+ _29 <-  _prim_string_print p28
+ pure 0""")
+    )
+  }
+
+  test("build closure returned from function") {
+    fuse(
+      """
+fun make_adder(n: i32) -> i32 -> i32
+  x => x + n
+
+fun main() -> i32
+  let add5 = make_adder(5)
+  _print(int_to_str(add5(10)))
+  0
+      """,
+      BuildOutput("""make_adder n0 =
+ pure (P1c2 n0)
+
+c2 n03 x3 =
+ _prim_int_add x3 n03
+
+grinMain _8 =
+ add5''10 <-  make_adder 5
+ p12 <- apply1_i32_to_i32 add5''10 10
+ p13 <- _prim_int_str p12
+ _14 <-  _prim_string_print p13
+ pure 0""")
+    )
+  }
+
+  test("build io do notation with heterogeneous continuation param types") {
+    // Regression: the sequenced effect expression produces two
+    // continuations with the same return type but different parameter
+    // types. Before the fix, both were grouped into a single dispatch
+    // function, producing a backend node whose field held a mix of
+    // concrete primitive types and tripping the heap-points-to analysis
+    // with an "illegal node item type" error.
+    fuse(
+      """
+type IO[A]:
+  MkIO(() -> A)
+
+impl IO[A]:
+  fun exec(self) -> A
+    match self:
+      MkIO(f) => f(())
+
+trait Monad[A]:
+  fun unit[A](a: A) -> Self[A];
+  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
+  fun map[B](self, f: A -> B) -> Self[B]
+    self.flat_map(a => Self::unit(f(a)))
+
+impl Monad for IO[A]:
+  fun flat_map[B](self, f: A -> IO[B]) -> IO[B]
+    MkIO(_ => {
+      let a = self.exec()
+      let b = f(a)
+      b.exec()
+    })
+  fun unit[A](a: A) -> IO[A]
+    MkIO(_ => a)
+
+fun main() -> i32
+  let program = {
+    do:
+      s <- MkIO(_ => "hi")
+      _ <- MkIO(_ => _print(s))
+      0
+  }
+  program.exec()
+      """,
+      BuildOutput("""MkIO'str t1''0 =
+ p3 <- store t1''0
+ store (CMkIOstr p3)
+
+MkIO'Unit t1''3 =
+ p6 <- store t1''3
+ store (CMkIOUnit p6)
+
+MkIO'i32 t1''6 =
+ p9 <- store t1''6
+ store (CMkIOi32 p9)
+
+execIOi32' self9 =
+ p12 <- fetch self9
+ case p12 of
+  (CMkIOi32 p14) ->
+   f12 <- fetch p14
+   p15 <- apply1_unit_to_i32 f12 0
+   pure p15
+
+execIOstr' self15 =
+ p18 <- fetch self15
+ case p18 of
+  (CMkIOstr p20) ->
+   f18 <- fetch p20
+   p21 <- apply1_TypeEVar_to_str f18 0
+   pure p21
+
+execIOUnit' self21 =
+ p24 <- fetch self21
+ case p24 of
+  (CMkIOUnit p26) ->
+   f24 <- fetch p26
+   p27 <- apply1_unit_to_unit f24 0
+   pure p27
+
+mapMonadIOUniti32' self27 f''28 =
+ p35 <- store f''28
+ p36 <- pure (P1c30 p35)
+ flatmapIOMonadUniti32' self27 p36
+
+c30 f''2831 a32 =
+ f''283132 <- fetch f''2831
+ p34 <- apply1_unit_to_i32 f''283132 a32
+ unitIOMonadi32' p34
+
+flatmapIOMonadstri32' self36 f''37 =
+ p48 <- store f''37
+ p49 <- pure (P1c39 self36 p48)
+ MkIO'i32 p49
+
+c39 self3640 f''3742 _43 =
+ f''374243 <- fetch f''3742
+ a44 <-  execIOstr' self3640
+ b46 <-  apply1_str_to_IO_i32 f''374243 a44
+ execIOi32' b46
+
+flatmapIOMonadUniti32' self49 f''50 =
+ p61 <- store f''50
+ p62 <- pure (P1c52 self49 p61)
+ MkIO'i32 p62
+
+c52 self4953 f''5055 _56 =
+ f''505556 <- fetch f''5055
+ a57 <-  execIOUnit' self4953
+ b59 <-  apply1_unit_to_IO_i32 f''505556 a57
+ execIOi32' b59
+
+unitIOMonadi32' a62 =
+ p67 <- pure (P1c64 a62)
+ MkIO'i32 p67
+
+c64 a6265 _65 =
+ pure a6265
+
+grinMain _67 =
+ p75 <- pure (P1c69 )
+ p76 <- MkIO'str p75
+ p105 <- pure (P1c77 )
+ program105 <-  flatmapIOMonadstri32' p76 p105
+ execIOi32' program105
+
+c69 _69 =
+ pure #"hi"
+
+c77 s77 =
+ p86 <- pure (P1c79 s77)
+ p87 <- MkIO'Unit p86
+ p94 <- pure (P1c88 )
+ mapMonadIOUniti32' p87 p94
+
+c79 s7780 _80 =
+ _prim_string_print s7780
+
+c88 _88 =
+ pure 0
+
+apply1_TypeEVar_to_str p107 p108 =
+ case p107 of
+  (P1c69) ->
+   c69 p108
+
+apply1_str_to_IO_i32 p109 p110 =
+ case p109 of
+  (P1c77) ->
+   c77 p110
+
+apply1_unit_to_IO_i32 p111 p112 =
+ case p111 of
+  (P1c30 p113) ->
+   c30 p113 p112
+
+apply1_unit_to_i32 p114 p115 =
+ case p114 of
+  (P1c39 p116 p117) ->
+   c39 p116 p117 p115
+  (P1c52 p118 p119) ->
+   c52 p118 p119 p115
+  (P1c64 p120) ->
+   c64 p120 p115
+  (P1c79 p121) ->
+   c79 p121 p115
+  (P1c88) ->
+   c88 p115""")
+    )
+  }
+
+  test("build user-defined generic option with free function") {
+    fuse(
+      """
+type MyOpt[A]:
+  MySome(A)
+  MyNone
+
+fun or_else(o: MyOpt[i32], d: i32) -> i32
+  match o:
+    MySome(v) => v
+    MyNone => d
+
+fun main() -> i32
+  _print(int_to_str(or_else(MySome(7), 0)))
+  0
+      """,
+      BuildOutput("""MySome'i32 t10 =
+ store (CMySomei32 t10)
+
+MyNone'i32 =  store (CMyNonei32)
+
+or_else o2 d3 =
+ p6 <- fetch o2
+ case p6 of
+  (CMySomei32 v6) ->
+   pure v6
+  #default ->
+   pure d3
+
+grinMain _7 =
+ p9 <- MySome'i32 7
+ p10 <- or_else p9 0
+ p11 <- _prim_int_str p10
+ _12 <-  _prim_string_print p11
+ pure 0""")
+    )
+  }
+
+  test("build qualified nullary constructor") {
+    fuse(
+      """
+type MyOpt[A]:
+  MySome(A)
+  MyNone
+
+fun describe(o: MyOpt[i32]) -> str
+  match o:
+    MySome(v) => "some"
+    MyNone => "none"
+
+fun main() -> i32
+  let o = MyNone[i32]
+  _print(describe(o))
+  0
+      """,
+      BuildOutput("""describe o0 =
+ p3 <- fetch o0
+ case p3 of
+  (CMySomei32 v3) ->
+   pure #"some"
+  #default ->
+   pure #"none"
+
+grinMain _4 =
+ o7 <-  store (CMyNonei32)
+ p9 <- describe o7
+ _10 <-  _prim_string_print p9
+ pure 0""")
+    )
+  }
+
+  test("build trait default method") {
+    fuse(
+      """
+trait Greeter:
+  fun hello(self) -> str;
+  fun twice(self) -> str
+    self.hello() + "-" + self.hello()
+
+type Speaker:
+  lang: str
+
+impl Greeter for Speaker:
+  fun hello(self) -> str
+    "hello"
+
+fun main() -> i32
+  let s = Speaker("en")
+  _print(s.twice())
+  0
+      """,
+      BuildOutput("""twiceGreeterSpeakerSpeakerGreeter' self0 =
+ p3 <- helloSpeakerGreeter' self0
+ p4 <- _prim_string_concat p3 #"-"
+ p6 <- helloSpeakerGreeter' self0
+ _prim_string_concat p4 p6
+
+Speaker lang6 =
+ store (CSpeaker lang6)
+
+helloSpeakerGreeter' self8 =
+ pure #"hello"
+
+grinMain _9 =
+ s11 <-  Speaker #"en"
+ p13 <- twiceGreeterSpeakerSpeakerGreeter' s11
+ _15 <-  _prim_string_print p13
+ pure 0""")
     )
   }
 
@@ -3887,6 +4223,58 @@ apply1_i32 p50 p51 =
 
 class CompilerExecTests extends CompilerTests {
   import CompilerTests.*
+
+  test("execute generic phantom in return") {
+    fuse(
+      """
+type MyOpt[A]:
+  MySome(A)
+  MyNone
+
+fun empty[A]() -> MyOpt[A]
+  MyNone[A]
+
+fun main() -> i32
+  let o: MyOpt[i32] = empty[i32]()
+  match o:
+    MySome(v) => v
+    MyNone => {
+      _print("0")
+      0
+    }
+      """,
+      ExecutableOutput("0")
+    )
+  }
+
+  test("execute interpreter with env lookup") {
+    fuse(
+      """
+type List[A]:
+  Cons(h: A, t: List[A])
+  Nil
+
+type Entry:
+  name: str
+  value: i32
+
+fun lookup(env: List[Entry], key: str) -> i32
+  match env:
+    Cons(h, t) => {
+      match h.name == key:
+        true => h.value
+        false => lookup(t, key)
+    }
+    Nil => 0 - 1
+
+fun main() -> i32
+  let env = Cons(Entry("x", 5), Cons(Entry("y", 9), Nil))
+  _print(int_to_str(lookup(env, "x")))
+  0
+      """,
+      ExecutableOutput("5")
+    )
+  }
 
   test("execute generic list with simple map") {
     fuse(
@@ -3906,7 +4294,7 @@ fun main() -> i32
     let l1 = l.simple_map(v => v + 1)
     match l1:
         Cons(h, t) => {
-            print(int_to_str(h))
+            _print(int_to_str(h))
             0
         }
         Nil => 1
@@ -3932,7 +4320,7 @@ fun main() -> i32
     let o1 = o.map(a => a + 1)
     match o1:
         Some(v) => {
-            print(int_to_str(v))
+            _print(int_to_str(v))
             0
         }
         None => 1
@@ -3961,7 +4349,7 @@ fun main() -> i32
     let l1 = l.map_2(v => v + 1)
     match l1:
         Cons(h, t) => {
-            print(int_to_str(h))
+            _print(int_to_str(h))
             0
         }
         Nil => 1
@@ -3974,7 +4362,7 @@ fun main() -> i32
       """
 fun main() -> i32
     let result = 2 + 2
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("4")
@@ -3985,7 +4373,7 @@ fun main() -> i32
       """
 fun main() -> i32
     let result = "Hello" + "World"
-    print(result)
+    _print(result)
     0
         """,
       ExecutableOutput("HelloWorld")
@@ -3996,7 +4384,7 @@ fun main() -> i32
       """
 fun main() -> i32
     let result = 2 - 2
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("0")
@@ -4007,7 +4395,7 @@ fun main() -> i32
       """
 fun main() -> i32
     let result = 10 % 2
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("0")
@@ -4018,7 +4406,7 @@ fun main() -> i32
       """
 fun main() -> i32
     let result = 2 + 3 * 6
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("20")
@@ -4034,7 +4422,7 @@ fun main() -> i32
             true => 1
             false => 0
     }
-    print(int_to_str(output))
+    _print(int_to_str(output))
     0
         """,
       ExecutableOutput("1")
@@ -4050,7 +4438,7 @@ fun main() -> i32
             true => 1
             false => 0
     }
-    print(int_to_str(output))
+    _print(int_to_str(output))
     0
         """,
       ExecutableOutput("1")
@@ -4066,7 +4454,7 @@ fun main() -> i32
             true => 1
             false => 0
     }
-    print(int_to_str(output))
+    _print(int_to_str(output))
     0
         """,
       ExecutableOutput("0")
@@ -4082,7 +4470,7 @@ fun main() -> i32
             true => 1
             false => 0
     }
-    print(int_to_str(output))
+    _print(int_to_str(output))
     0
         """,
       ExecutableOutput("1")
@@ -4092,7 +4480,7 @@ fun main() -> i32
     fuse(
       """
 fun greetings() -> Unit
-  print("Hello World")
+  _print("Hello World")
 
 fun main() -> i32
   greetings()
@@ -4107,7 +4495,7 @@ fun main() -> i32
 fun main() -> i32
     let value = (a: i32) => a + 1
     let result = value(1)
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("2")
@@ -4119,7 +4507,7 @@ fun main() -> i32
 fun main() -> i32
     let value = (a: i32, b: i32) => a + b + 2
     let result = value(1, 2)
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("5")
@@ -4131,7 +4519,7 @@ fun main() -> i32
 fun main() -> i32
     let value = (a) => a + 1
     let result = value(1)
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("2")
@@ -4143,7 +4531,7 @@ fun main() -> i32
 fun main() -> i32
     let value = (a, b) => a + b + 2
     let result = value(1, 2)
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("5")
@@ -4157,7 +4545,7 @@ fun identity[T](v: T) -> T
 
 fun main() -> i32
     let s = identity("Hello World")
-    print(s)
+    _print(s)
     0
         """,
       ExecutableOutput("Hello World")
@@ -4172,7 +4560,7 @@ fun identity[T](v: T) -> T
 fun main() -> i32
     let s = identity("Hello World")
     let i = identity(1)
-    print(s + "\n" + int_to_str(i))
+    _print(s + "\n" + int_to_str(i))
     0
         """,
       ExecutableOutput("Hello World\n1")
@@ -4190,7 +4578,7 @@ fun id[A](a: A) -> A
 fun main() -> i32
     let s = id("Hello World")
     let i = id(5)
-    print(s + "\n" + int_to_str(i))
+    _print(s + "\n" + int_to_str(i))
     0
         """,
       ExecutableOutput("Hello World\n5")
@@ -4204,7 +4592,7 @@ fun summarize(a: str, b: str) -> str
 
 fun main() -> i32
     let s = summarize("Hello", "World")
-    print(s)
+    _print(s)
     0
         """,
       ExecutableOutput("HelloWorld")
@@ -4222,7 +4610,7 @@ fun addition[T: Add](a: T, b: T) -> T
 fun main() -> i32
     let s = summarize("Hello", "World")
     let a = addition(2, 3)
-    print(s + "\n" + int_to_str(a))
+    _print(s + "\n" + int_to_str(a))
     0
         """,
       ExecutableOutput("Hello: World\n5")
@@ -4236,7 +4624,7 @@ fun plus[T: Add](a: T, b: T) -> T
 
 fun main() -> i32
   let result = plus(2, 3)
-  print(int_to_str(result))
+  _print(int_to_str(result))
   0
         """,
       ExecutableOutput("5")
@@ -4257,11 +4645,11 @@ impl Summary for Tweet:
     self.username + ": " + self.content
 
 fun notify[T: Summary](s: T) -> Unit
-  print("Breaking news! " + s.summarize())
+  _print("Breaking news! " + s.summarize())
 
 fun main() -> i32
     let tweet = Tweet("elon", "work!")
-    print(tweet.summarize() + "\n")
+    _print(tweet.summarize() + "\n")
     notify(tweet)
     0
         """,
@@ -4287,7 +4675,7 @@ fun notify[T: Summary](s: T) -> str
 
 fun main() -> i32
     let tweet = Tweet("elon", "work!")
-    print(tweet.summarize())
+    _print(tweet.summarize())
     notify(tweet)
     0
         """,
@@ -4302,7 +4690,7 @@ type X[T]:
 
 fun main() -> i32
   let x = X(1)
-  print(int_to_str(x.v))
+  _print(int_to_str(x.v))
   0
         """,
       ExecutableOutput("1")
@@ -4317,7 +4705,7 @@ type Point[T, V]:
 
 fun main() -> i32
   let p = Point(1, "2")
-  print(int_to_str(p.x))
+  _print(int_to_str(p.x))
   0
         """,
       ExecutableOutput("1")
@@ -4330,7 +4718,7 @@ type Tuple[A, B](A, B)
 
 fun main() -> i32
   let t = Tuple(1, "2")
-  print(int_to_str(t.1))
+  _print(int_to_str(t.1))
   0
         """,
       ExecutableOutput("1")
@@ -4350,7 +4738,7 @@ fun value(a: Animal) -> i32
 
 fun main() -> i32
     let result = value(Dog)
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("0")
@@ -4370,7 +4758,7 @@ fun main() -> i32
             Some(v) => v
             None => 1
     }
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("5")
@@ -4390,7 +4778,7 @@ fun main() -> i32
             Some(v) => v
             None => 1
     }
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("5")
@@ -4412,7 +4800,7 @@ impl Option[A]:
 fun main() -> i32
     let o = Some(5)
     let o1 = o.map(a => a + 1)
-    print("0")
+    _print("0")
     0
         """,
       ExecutableOutput("0")
@@ -4440,7 +4828,7 @@ fun fmap[A, B, F: Functor](f: A -> B, c: F[A]) -> F[B]
 fun main() -> i32
     let o = Some(5)
     fmap(a => a + 1, o)
-    print("ok")
+    _print("ok")
     0
         """,
       ExecutableOutput("ok")
@@ -4465,7 +4853,7 @@ impl Option[A]:
             None => None
 
 fun main() -> i32
-    print("0")
+    _print("0")
     0
         """,
       ExecutableOutput("0")
@@ -4502,7 +4890,7 @@ fun main() -> i32
             Some(v) => 0
             None => 1
     }
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("0")
@@ -4522,7 +4910,7 @@ fun value(a: State[i32, i32]) -> i32
 
 fun main() -> i32
   let result = value(State(a => Tuple(a + 1, a + 2)))
-  print(int_to_str(result))
+  _print(int_to_str(result))
   0
         """,
       ExecutableOutput("5")
@@ -4555,7 +4943,7 @@ fun main() -> i32
             Cons(h, t) => h
             Nil => 0
     }
-    print(int_to_str(result))
+    _print(int_to_str(result))
     0
         """,
       ExecutableOutput("3")
@@ -4589,7 +4977,7 @@ fun main() -> i32
     let l1 = l.map_with_mapper(x => x + 1)
     let l2 = l.map_with_transform(y => y * 2)
     let l3 = l.map_with_callback(z => z + 3)
-    print("0")
+    _print("0")
     0
         """,
       ExecutableOutput("0")
@@ -4614,7 +5002,7 @@ impl List[A]:
 fun main() -> i32
     let l = Cons(2, Cons(3, Nil))
     let l1 = l.map(v => v + 1)
-    l1.map(r => print(int_to_str(r)))
+    l1.map(r => _print(int_to_str(r)))
     0
       """,
       ExecutableOutput("43")
@@ -4644,7 +5032,7 @@ fun main() -> i32
     let l = Cons(2, Cons(3, Nil))
     let l1 = l.map(v => v + 1)
     let s = List::sum(l1)
-    print(int_to_str(s))
+    _print(int_to_str(s))
     0
         """,
       ExecutableOutput("7")
@@ -4688,7 +5076,7 @@ fun main() -> i32
     let l3 = List::append(l1, l2)
     let s = List::sum(l3)
     let p = List::product(l3)
-    print(int_to_str(s + p))
+    _print(int_to_str(s + p))
     0
         """,
       ExecutableOutput("98")
@@ -4735,7 +5123,7 @@ fun main() -> i32
     let l3 = List::append(l1, l2)
     let s = List::sum(l3)
     let p = List::product(l3)
-    print(int_to_str(s + p))
+    _print(int_to_str(s + p))
     0
         """,
       ExecutableOutput("98")
@@ -4768,7 +5156,7 @@ fun main() -> i32
     let l = Cons(1, Cons(2, Cons(3, Nil)))
     let l1 = l.flat_map(v => Cons(v, Cons(v * 10, Nil)))
     let s = List::sum(l1)
-    print(int_to_str(s))
+    _print(int_to_str(s))
     0
         """,
       ExecutableOutput("66")
@@ -4801,7 +5189,7 @@ fun main() -> i32
     let l = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
     let l2 = l.filter(e => e > 2)
     let s = List::sum(l2)
-    print(int_to_str(s))
+    _print(int_to_str(s))
     0
         """,
       ExecutableOutput("7")
@@ -4824,7 +5212,7 @@ fun describe(a: Animal) -> i32
         Cat => 2
 
 fun main() -> i32
-    print(int_to_str(describe(Dog(10))))
+    _print(int_to_str(describe(Dog(10))))
     0
       """,
       ExecutableOutput("1")
@@ -4906,7 +5294,7 @@ fun term_to_str(t: Term) -> str
         App(t1, t2) => "(" + term_to_str(t1) + " " + term_to_str(t2) + ")"
 
 fun println(s: str) -> Unit
-    print(s + "\n")
+    _print(s + "\n")
     ()
 
 fun main() -> i32
@@ -4996,7 +5384,7 @@ fun term_to_str(t: Term) -> str
 
 fun main() -> i32
     let app_id = App(Abs("x", Var(0, 1)), Abs("y", Var(0, 1)))
-    print(term_to_str(eval(app_id)))
+    _print(term_to_str(eval(app_id)))
     0
       """,
       ExecutableOutput("(\\y. 0)")
@@ -5046,7 +5434,7 @@ fun main() -> i32
     let body = Var(0, 1)
     let arg = Abs("y", Var(0, 1))
     let result = term_subst_top(arg, body)
-    print(term_to_str(result))
+    _print(term_to_str(result))
     0
       """,
       ExecutableOutput("(\\y. 0)")
@@ -5061,7 +5449,7 @@ fun gte(a: i32, b: i32) -> i32
         false => 0
 
 fun main() -> i32
-    print(int_to_str(gte(5, 3)))
+    _print(int_to_str(gte(5, 3)))
     0
       """,
       ExecutableOutput("1")
@@ -5074,7 +5462,7 @@ fun main() -> i32
 fun main() -> i32
     let f = a => a + 1
     let g = (x, y) => x + y
-    print(int_to_str(f(5)))
+    _print(int_to_str(f(5)))
     0
         """,
       ExecutableOutput("6")
@@ -5111,7 +5499,7 @@ fun main() -> i32
     let l = Cons(2, Cons(3, Nil))
     let result = l.map(v => v + 1).filter(e => e > 3)
     let s = List::sum(result)
-    print(int_to_str(s))
+    _print(int_to_str(s))
     0
         """,
       ExecutableOutput("4")
@@ -5152,12 +5540,190 @@ fun main() -> i32
   }
   match result:
     Some(v) => {
-      print(int_to_str(v))
+      _print(int_to_str(v))
       0
     }
     _ => 1
         """,
       ExecutableOutput("6")
+    )
+  }
+  test("execute io print") {
+    fuse(
+      """
+fun main() -> i32
+  let action = print("Hello IO!")
+  action.exec()
+  0
+      """,
+      ExecutableOutput("Hello IO!", includeStdlib = true)
+    )
+  }
+  test("execute io unit and flat_map") {
+    fuse(
+      """
+type IO[A]:
+  MkIO(() -> A)
+
+impl IO[A]:
+  fun exec(self) -> A
+    match self:
+      MkIO(f) => f(())
+
+trait Monad[A]:
+  fun unit[A](a: A) -> Self[A];
+  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
+  fun map[B](self, f: A -> B) -> Self[B]
+    self.flat_map(a => Self::unit(f(a)))
+
+impl Monad for IO[A]:
+  fun flat_map[B](self, f: A -> IO[B]) -> IO[B]
+    MkIO(_ => {
+      let a = self.exec()
+      let b = f(a)
+      b.exec()
+    })
+  fun unit[A](a: A) -> IO[A]
+    MkIO(_ => a)
+
+fun main() -> i32
+  let action = MkIO(_ => _print("Hello"))
+  let action2 = action.flat_map(_ => MkIO(_ => _print(" World!")))
+  action2.exec()
+  0
+      """,
+      ExecutableOutput("Hello World!")
+    )
+  }
+
+  test("execute io do notation") {
+    fuse(
+      """
+type IO[A]:
+  MkIO(() -> A)
+
+impl IO[A]:
+  fun exec(self) -> A
+    match self:
+      MkIO(f) => f(())
+
+trait Monad[A]:
+  fun unit[A](a: A) -> Self[A];
+  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
+  fun map[B](self, f: A -> B) -> Self[B]
+    self.flat_map(a => Self::unit(f(a)))
+
+impl Monad for IO[A]:
+  fun flat_map[B](self, f: A -> IO[B]) -> IO[B]
+    MkIO(_ => {
+      let a = self.exec()
+      let b = f(a)
+      b.exec()
+    })
+  fun unit[A](a: A) -> IO[A]
+    MkIO(_ => a)
+
+fun main() -> i32
+  let result = {
+    do:
+      _ <- MkIO(_ => _print("Hello"))
+      _ <- MkIO(_ => _print(" "))
+      _ <- MkIO(_ => _print("World!"))
+      ()
+  }
+  result.exec()
+  0
+      """,
+      ExecutableOutput("Hello World!")
+    )
+  }
+
+  test("execute io do notation with file read and write") {
+    fuse(
+      """
+type IO[A]:
+  MkIO(() -> A)
+
+impl IO[A]:
+  fun exec(self) -> A
+    match self:
+      MkIO(f) => f(())
+
+trait Monad[A]:
+  fun unit[A](a: A) -> Self[A];
+  fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
+  fun map[B](self, f: A -> B) -> Self[B]
+    self.flat_map(a => Self::unit(f(a)))
+
+impl Monad for IO[A]:
+  fun flat_map[B](self, f: A -> IO[B]) -> IO[B]
+    MkIO(_ => {
+      let a = self.exec()
+      let b = f(a)
+      b.exec()
+    })
+  fun unit[A](a: A) -> IO[A]
+    MkIO(_ => a)
+
+fun main() -> i32
+  let program = {
+    do:
+      _ <- MkIO(_ => _file_write("/tmp/fuse_io_test.txt", "Hello from IO!"))
+      _ <- MkIO(_ => {
+        let content = _file_read("/tmp/fuse_io_test.txt")
+        _print(content)
+      })
+      ()
+  }
+  program.exec()
+  0
+      """,
+      ExecutableOutput("Hello from IO!")
+    )
+  }
+
+  test("execute io do notation read write") {
+    fuse(
+      """
+fun rw(file_name: str, content: str) -> IO[i32]
+  do:
+    _ <- write(file_name, content)
+    v <- read(file_name)
+    _ <- print(v)
+    0
+
+fun main() -> i32
+  rw("/tmp/fuse_rw_test.txt", "Hello World!").exec()
+      """,
+      ExecutableOutput("Hello World!", includeStdlib = true)
+    )
+  }
+
+  test("execute io flat_map with non-unit binding") {
+    fuse(
+      """
+type IO[A]:
+  MkIO(() -> A)
+
+impl IO[A]:
+  fun exec(self) -> A
+    match self:
+      MkIO(f) => f(())
+
+  fun flat_map[B](self, f: A -> IO[B]) -> IO[B]
+    MkIO(_ => {
+      let a = self.exec()
+      let b = f(a)
+      b.exec()
+    })
+
+fun main() -> i32
+  let action = MkIO(_ => 42)
+  let result = action.flat_map(x => MkIO(_ => x + 1))
+  _print(int_to_str(result.exec()))
+  0
+      """,
+      ExecutableOutput("43")
     )
   }
 }
@@ -5168,8 +5734,11 @@ object CompilerTests {
   sealed trait Output
   case class CheckOutput(s: Option[String]) extends Output
   case class BuildOutput(s: String) extends Output
-  case class ExecutableOutput(expectedStdout: String, expectedExitCode: Int = 0)
-      extends Output
+  case class ExecutableOutput(
+      expectedStdout: String,
+      expectedExitCode: Int = 0,
+      includeStdlib: Boolean = false
+  ) extends Output
 
   case class ExecutionResult(stdout: String, stderr: String, exitCode: Int)
 
@@ -5216,10 +5785,15 @@ object CompilerTests {
     }
   }
 
-  def execute(code: String): IO[Either[String, ExecutionResult]] = {
+  def execute(
+      code: String,
+      includeStdlib: Boolean = false
+  ): IO[Either[String, ExecutionResult]] = {
     createTempFuseFile(code).use { fusePath =>
       for {
-        buildExitCode <- Fuse.build(BuildFile(fusePath.toString))
+        buildExitCode <- Fuse.build(
+          BuildFile(fusePath.toString, includeStdlib)
+        )
         result <- buildExitCode match {
           case ExitCode.Success =>
             val outPath =
@@ -5236,9 +5810,34 @@ object CompilerTests {
     }
   }
 
-  def check(code: String, fileName: String = s"test.$FuseFileExtension") =
-    Compiler.compile(CheckFile(fileName), code.trim, fileName)
+  /** Synchronously load the pre-parsed library module for the test helpers if
+    * the command requests it. Mirrors `Compiler.run`'s load-then-compile flow
+    * so tests can stay synchronous while `Compiler.compile` itself remains pure
+    * (effects at the boundary).
+    */
+  def loadStdlibSync(command: Command) = {
+    import cats.effect.unsafe.implicits.global
+    command.includeStdlib match {
+      case true  => Compiler.loadStdlib().unsafeRunSync().map(Some(_))
+      case false => Right(None)
+    }
+  }
 
-  def build(code: String, fileName: String = s"test.$FuseFileExtension") =
-    Compiler.compile(BuildFile(fileName), code.trim, fileName)
+  def check(code: String, fileName: String = s"test.$FuseFileExtension") = {
+    val command = CheckFile(fileName)
+    loadStdlibSync(command).flatMap(stdlib =>
+      Compiler.compile(command, code.trim, fileName, stdlib)
+    )
+  }
+
+  def build(
+      code: String,
+      fileName: String = s"test.$FuseFileExtension",
+      includeStdlib: Boolean = false
+  ) = {
+    val command = BuildFile(fileName, includeStdlib)
+    loadStdlibSync(command).flatMap(stdlib =>
+      Compiler.compile(command, code.trim, fileName, stdlib)
+    )
+  }
 }

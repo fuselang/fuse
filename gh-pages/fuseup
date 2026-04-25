@@ -156,6 +156,7 @@ export GRIN_LLC="$FUSE_TOOLCHAIN/bin/llc"
 export GC_INCLUDE="$FUSE_TOOLCHAIN/include"
 export GC_LIB="$FUSE_TOOLCHAIN/lib"
 export FUSE_RUNTIME="$FUSE_TOOLCHAIN/runtime"
+export FUSE_STDLIB="$FUSE_TOOLCHAIN/stdlib"
 
 # On macOS, set SDKROOT so bundled clang can find system headers
 if [ "$(uname -s)" = "Darwin" ] && command -v xcrun >/dev/null 2>&1; then
@@ -203,6 +204,7 @@ set -gx GRIN_LLC "$FUSE_TOOLCHAIN/bin/llc"
 set -gx GC_INCLUDE "$FUSE_TOOLCHAIN/include"
 set -gx GC_LIB "$FUSE_TOOLCHAIN/lib"
 set -gx FUSE_RUNTIME "$FUSE_TOOLCHAIN/runtime"
+set -gx FUSE_STDLIB "$FUSE_TOOLCHAIN/stdlib"
 EOF
     else
         _source_line='. "$HOME/.local/share/fuse/env"'
@@ -286,6 +288,7 @@ This will install the complete toolchain (~370MB):
   - LLVM 15 (clang, opt, llc)
   - Boehm GC
   - Runtime files
+  - Stdlib files
 
 Location: $FUSE_HOME
 

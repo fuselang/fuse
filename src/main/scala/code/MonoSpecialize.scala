@@ -35,7 +35,8 @@ object MonoSpecialize {
       regularTypeVarIndices: List[Int],
       deferredDataConstrSpecializations: Map[Instantiation, List[Type]],
       originalBindName: String,
-      allBindNames: Set[String] = Set.empty
+      allBindNames: Set[String] = Set.empty,
+      referenceBaseCtxLen: Option[Int] = None
   )
 
   case class DataConstrContext(
@@ -51,7 +52,12 @@ object MonoSpecialize {
       numParentTypeParams: Int = 0
   )
 
-  /** Unwrap a TermTAbs and substitute the type variable at index 0. */
+  /** Unwrap a TermTAbs and substitute the type variable at index 0. When called
+    * with more types than the term has outer TermTAbs wrappers (e.g. a
+    * type-class default method body whose inst carries extra receiver-type
+    * arguments beyond the term's actual TypeAbs depth), the extra types land
+    * here and leave the term unchanged.
+    */
   def specializeTerm(
       term: Term,
       typeVarIndex: Int,
@@ -61,7 +67,7 @@ object MonoSpecialize {
       case TermTAbs(_, _, _, body) =>
         termSubstituteType(tyS, 0, body)
       case _ =>
-        throw new RuntimeException(s"can't specialize term ${term}")
+        term
     }
 
   def hasNegativeTypeVarIndex(ty: Type): Boolean = ty match {
@@ -122,7 +128,7 @@ object MonoSpecialize {
   def specializeType(ty: Type, tys: List[Type], ctxLength: Int): Type =
     tys.zipWithIndex.foldLeft(ty) {
       case (TypeAll(_, _, _, _, tyT), (tyS, _)) =>
-        typeSubstitute(tyS, 0, tyT)
+        typeSubstituteTop(tyS, tyT)
       case (tyT: TypeVar, (tyS, idx)) =>
         tyS
       case (tyT @ TypeApp(info, ctor, param), (tyS, idx)) =>
@@ -154,34 +160,81 @@ object MonoSpecialize {
       instTys: List[Type],
       parentTys: List[Type],
       ctxLength: Int,
-      referenceTypeVarIndices: List[Int] = List()
+      referenceTypeVarIndices: List[Int] = List(),
+      referenceBaseCtxLen: Option[Int] = None
   ): List[Type] = {
-    val allInstTypeVarIndices =
-      instTys.flatMap(extractTypeParamIndices(_)).distinct
-    val allIndices =
-      (referenceTypeVarIndices ++ allInstTypeVarIndices).distinct.sorted.reverse
-    val indexToParentType: Map[Int, Type] =
-      allIndices.zipWithIndex.collect {
-        case (tvIdx, parentPos) if parentPos < parentTys.length =>
-          tvIdx -> parentTys(parentPos)
-      }.toMap
-    instTys.map(ty => substituteTypeVarsWithMapping(ty, indexToParentType))
+    // One tagged walk over instTys yields both views:
+    //   - `instTypeVarPairs`: skips TypeApp constructor positions; used for
+    //     the primary ordering.
+    //   - `allInstTypeVarPairs`: includes TypeApp constructor positions;
+    //     needed so the substitution mapping covers the receiver-type
+    //     parameter in closure captures of type-class default method bodies
+    //     where the receiver constructor itself is a type variable.
+    val tagged = instTys.flatMap(collectTypeParamPairs(_))
+    val instTypeVarPairs =
+      tagged.collect { case (p, false) => p }.distinct
+    val allInstTypeVarPairs = tagged.map(_._1).distinct
+    referenceTypeVarIndices match {
+      case Nil =>
+        val allInstTypeVarIndices = instTypeVarPairs.map(_._1).distinct
+        val allIndices = allInstTypeVarIndices.distinct.sorted.reverse
+        val indexToParentType: Map[Int, Type] =
+          allIndices.zipWithIndex.collect {
+            case (tvIdx, parentPos) if parentPos < parentTys.length =>
+              tvIdx -> parentTys(parentPos)
+          }.toMap
+        instTys.map(ty => substituteTypeVarsWithMapping(ty, indexToParentType))
+      case refIndices =>
+        // Primary: map TypeVars that normalize into refIndices (cross-capture-
+        // context case — an inner closure nested inside a monadic
+        // continuation needs this when its TypeVars carry a deeper ctxLen
+        // than the bind's regular insts).
+        // Fallback: rawIdx-based ordering for TypeVars that only appear in
+        // `instTys` (receiver/type-parameter TypeVars in a type-class
+        // default method's closure body). Both paths are necessary.
+        val refIndexToPos = refIndices.zipWithIndex.toMap
+        val instOwnIndices = instTypeVarPairs.map(_._1).distinct.sorted.reverse
+        val instOwnIndexToPos = instOwnIndices.zipWithIndex.toMap
+        val indexToParentType: Map[Int, Type] = allInstTypeVarPairs.flatMap {
+          case (rawIdx, tvCtxLen) =>
+            val normalizedIdx = referenceBaseCtxLen match {
+              case Some(base) => rawIdx - (tvCtxLen - base)
+              case None       => rawIdx
+            }
+            refIndexToPos
+              .get(normalizedIdx)
+              .flatMap(pos => parentTys.lift(pos).map(rawIdx -> _))
+              .orElse {
+                instOwnIndexToPos
+                  .get(rawIdx)
+                  .flatMap(pos => parentTys.lift(pos).map(rawIdx -> _))
+              }
+        }.toMap
+        instTys.map(ty => substituteTypeVarsWithMapping(ty, indexToParentType))
+    }
   }
 
-  def extractFromTypeParams[T](ty: Type)(f: (Integer, Integer) => T): List[T] =
-    ty match {
-      case TypeVar(_, idx, n)   => List(f(idx, n))
-      case TypeApp(_, _, t2)    => extractFromTypeParams(t2)(f)
-      case TypeArrow(_, t1, t2) =>
-        extractFromTypeParams(t1)(f) ::: extractFromTypeParams(t2)(f)
-      case _ => Nil
-    }
-
-  def extractTypeParamIndices(ty: Type): List[Int] =
-    extractFromTypeParams(ty)((idx, _) => idx.intValue)
+  /** Collect `(idx, ctxLen)` pairs for every TypeVar in `ty`, tagged with
+    * `inCtor = true` when the TypeVar appears in a TypeApp constructor
+    * position. Constructor-position pairs are only relevant when the
+    * constructor itself is a type parameter (e.g. a type-class default method
+    * body where the receiver constructor is a type variable).
+    */
+  def collectTypeParamPairs(
+      ty: Type,
+      inCtor: Boolean = false
+  ): List[((Int, Int), Boolean)] = ty match {
+    case TypeVar(_, idx, n) =>
+      List(((idx.intValue, n.intValue), inCtor))
+    case TypeApp(_, t1, t2) =>
+      collectTypeParamPairs(t1, true) ::: collectTypeParamPairs(t2, false)
+    case TypeArrow(_, t1, t2) =>
+      collectTypeParamPairs(t1, false) ::: collectTypeParamPairs(t2, false)
+    case _ => Nil
+  }
 
   def extractTypeParamPairs(ty: Type): List[(Int, Int)] =
-    extractFromTypeParams(ty)((idx, n) => (idx.intValue, n.intValue))
+    collectTypeParamPairs(ty).collect { case (p, false) => p }
 
   def substituteTypeVarsWithMapping(
       ty: Type,
@@ -204,31 +257,28 @@ object MonoSpecialize {
     case _ => ty
   }
 
-  def isDataConstrName(name: String): Boolean =
-    name.headOption.exists(_.isUpper) && !name.contains(BindTypeSeparator)
-
   def specializeDataConstrInstTys(
       dataConstrInst: Instantiation,
       parentTys: List[Type],
       ctxLength: Int,
-      dcCtx: DataConstrContext
+      dataConstrCtx: DataConstrContext
   ): List[Type] = {
     val dataConstrCtxLen = dataConstrInst.tys.collectFirst { case tv: TypeVar =>
       tv.length.intValue
     }
-    val contextShift = (dcCtx.regularCtxLen, dataConstrCtxLen) match {
+    val contextShift = (dataConstrCtx.regularCtxLen, dataConstrCtxLen) match {
       case (Some(regLen), Some(dataConstrLen)) => dataConstrLen - regLen
       case _                                   => dataConstrInst.tys.length
     }
-    val referenceIndices = dcCtx.regularTypeVarIndices match {
+    val referenceIndices = dataConstrCtx.regularTypeVarIndices match {
       case Nil =>
         val typeVarIndices = dataConstrInst.tys.collect { case tv: TypeVar =>
           tv.index.intValue
         }
         typeVarIndices.headOption match {
           case Some(knownIdx) =>
-            (0 until dcCtx.numParentTypeParams)
-              .map(i => knownIdx + (dcCtx.numParentTypeParams - 1 - i))
+            (0 until dataConstrCtx.numParentTypeParams)
+              .map(i => knownIdx + (dataConstrCtx.numParentTypeParams - 1 - i))
               .toList
               .sorted
               .reverse
@@ -314,7 +364,8 @@ object MonoSpecialize {
             inst.tys,
             ctx.parentTys,
             ctx.specCtxLength,
-            ctx.regularTypeVarIndices
+            ctx.regularTypeVarIndices,
+            ctx.referenceBaseCtxLen
           )
       }
       trimmedTys = (
@@ -362,16 +413,21 @@ object MonoSpecialize {
             .map(idx => Resolution.Resolved(idx + 1))
             .getOrElse(Resolution.Unresolved)
       }
-      val actualTerm: Term = (inst.r, inst.term) match {
-        case (Resolution.DeferredDataConstr, tv: TermVar) =>
+      // Align inst.term with the specialized body: specializeTerm shifts
+      // body TermVars down by 1 per peeled TypeTAbs. Look up the actual
+      // idx/n in the specialized body by info so replaceVar's
+      // tC.i1 == x match succeeds; fall back to a -1 shift when the info
+      // is not present in the specialized body.
+      val actualTerm: Term = inst.term match {
+        case tv: TermVar =>
           TermFold.findVarByInfo(ctx.specializedTerm, tv.info) match {
             case Some((actualIdx, actualN, _)) =>
               TermVar(tv.info, actualIdx, actualN)
             case None =>
               termShiftAbove(-1, ctx.shiftCtxLength, tv)
           }
-        case _ =>
-          termShiftAbove(-1, ctx.shiftCtxLength, inst.term)
+        case other =>
+          termShiftAbove(-1, ctx.shiftCtxLength, other)
       }
       Instantiation(concreteInstId, actualTerm, trimmedTys, resolvedCls, newR)
     }
@@ -401,6 +457,10 @@ object MonoSpecialize {
           )
           regularTypeVarPairs = regularInsts
             .flatMap(i => i.tys.flatMap(extractTypeParamPairs(_)))
+          // Normalize regular insts' TypeVar indices relative to the shallowest
+          // ctxLen among them. This keeps the index ordering stable when a
+          // regular inst was captured at a slightly deeper ctxLen than another
+          // (e.g. two TermApp layers at different depths in the same body).
           baseCtxLen = regularTypeVarPairs.map(_._2).minOption
           regularTypeVarIndices = baseCtxLen match {
             case Some(base) =>
@@ -417,7 +477,8 @@ object MonoSpecialize {
               cInst.tys,
               shiftedInst.tys,
               ctxlen - idx,
-              regularTypeVarIndices
+              regularTypeVarIndices,
+              baseCtxLen
             )
             cInst.copy(tys = specializedTys)
           }
@@ -427,9 +488,7 @@ object MonoSpecialize {
           )
           specializedTerm = shiftedInst.tys.foldLeft(
             termWithClosureTypes: Term
-          ) { case (t, ty) =>
-            specializeTerm(t, idx, ty)
-          }
+          )(specializeTerm(_, idx, _))
           deferredDataConstrInsts = bind.insts.filter(
             _.r == Resolution.DeferredDataConstr
           )
@@ -437,18 +496,18 @@ object MonoSpecialize {
           regularCtxLen = regularInsts
             .flatMap(i => i.tys.flatMap(getTypeContextLength(_)))
             .headOption
-          dcCtx = DataConstrContext(
+          dataConstrCtx = DataConstrContext(
             regularTypeVarIndices,
             regularCtxLen,
             numParentTypeParams
           )
           deferredDataConstrSpecializations = deferredDataConstrInsts.map {
-            dcInst =>
-              dcInst -> specializeDataConstrInstTys(
-                dcInst,
+            dataConstrInst =>
+              dataConstrInst -> specializeDataConstrInstTys(
+                dataConstrInst,
                 shiftedInst.tys,
                 ctxlen - idx,
-                dcCtx
+                dataConstrCtx
               )
           }.toMap
           binding = TermAbbBind(
@@ -465,15 +524,21 @@ object MonoSpecialize {
             regularTypeVarIndices,
             deferredDataConstrSpecializations,
             bind.i,
-            allBindNames
+            allBindNames,
+            baseCtxLen
           )
           insts <- bind.insts.traverse(i =>
             resolveInstSpecialization(i, specCtx)
           )
+          syntheticDataConstrInsts <- synthesizeBareDataConstrInsts(
+            specializedTerm,
+            insts,
+            shiftedInst.tys
+          )
         } yield finalizeSpecializedBind(
           name,
           binding,
-          insts,
+          insts ::: syntheticDataConstrInsts,
           bind.i,
           inst.tys,
           specializedClosureInsts
@@ -482,6 +547,77 @@ object MonoSpecialize {
         throw new RuntimeException(
           s"can't build specialized binding ${inst.i}"
         )
+    }
+
+  /** Synthesize insts for bare TermVars in the specialized body that resolve
+    * (via ctx lookup) to an already-specialized data-constructor bind but have
+    * no existing `Instantiation` covering them.
+    *
+    * Source of the gap: `Instantiations.build` early-returns on empty type
+    * solutions. Bare data-constructor references inside a type-class default
+    * method body carry no local solutions, so no inst is recorded — leaving the
+    * TermVar's idx stale when MonoRewrite reorders the bind list, and the
+    * backend's codegen resolves to a wrong position.
+    *
+    * Fix: at specialization time (when `parentTys` is concrete), find bare
+    * data-constructor TermVars not yet covered and emit a
+    * `BareSpecializedDataConstr` inst whose `bindName()` reconstructs the
+    * specialized target. The list-based rewrite path in `replaceInstantiations`
+    * then fixes the idx.
+    */
+  def synthesizeBareDataConstrInsts(
+      specializedTerm: Term,
+      existingInsts: List[Instantiation],
+      parentTys: List[Type]
+  ): ContextState[List[Instantiation]] = {
+    val coveredInfos = existingInsts.collect {
+      case Instantiation(_, tv: TermVar, _, _, _) => tv.info
+    }.toSet
+    val candidates = TermFold
+      .collectBindTermVars(specializedTerm)
+      .distinctBy(_.info)
+      .filterNot(tv => coveredInfos.contains(tv.info))
+    State.inspect { (ctx: Context) =>
+      candidates.flatMap(tv =>
+        indexToName(ctx, tv.i1.intValue)
+          .flatMap(synthesizeForName(tv, _, parentTys))
+      )
+    }
+  }
+
+  /** Build a `BareSpecializedDataConstr` inst for a TermVar whose resolved name
+    * has shape `<BaseName>#<ty1>[#<ty2>...]` where BaseName is a
+    * data-constructor (starts uppercase, no `#` inside — excludes specialized
+    * method names and class-qualifier-only names).
+    *
+    * `bindName()` of the synthesized inst reconstructs the specialized target
+    * from `BaseName` + `parentTys.takeRight(dataConstrArity)`, so list-based
+    * rewriting in `replaceInstantiations` finds the right bind.
+    *
+    * Bare generic data-constructors (name without `#`): not synthesized —
+    * existing `DeferredDataConstr` insts from `Instantiations.build` handle
+    * those.
+    */
+  def synthesizeForName(
+      tv: TermVar,
+      name: String,
+      parentTys: List[Type]
+  ): Option[Instantiation] =
+    name.split(BindTypeSeparatorChar).toList match {
+      case baseName :: typeParts
+          if typeParts.nonEmpty
+            && Instantiations.isDataConstrName(baseName)
+            && parentTys.length >= typeParts.length =>
+        Some(
+          Instantiation(
+            i = baseName,
+            term = tv,
+            tys = parentTys.takeRight(typeParts.length),
+            cls = Nil,
+            r = Resolution.BareSpecializedDataConstr
+          )
+        )
+      case _ => None
     }
 
   def finalizeSpecializedBind(
@@ -495,7 +631,10 @@ object MonoSpecialize {
     val filteredInsts = insts.filter(inst =>
       !inst.tys.exists(ty => getTypeContextLength(ty).isDefined)
     )
-    val dedupedInsts = Instantiations.distinct(filteredInsts)
+    // Preserve multiple call sites (different term.info) for the same
+    // method+types — each one needs its own replacement in
+    // replaceInstantiations (which matches by info).
+    val dedupedInsts = Instantiations.distinct(filteredInsts, byTerm = true)
     val selfInstantiation =
       containsAssocProjInBinding(binding, originalBindName) match {
         case true =>
@@ -510,7 +649,8 @@ object MonoSpecialize {
           )
         case false => List()
       }
-    val finalInsts = Instantiations.distinct(selfInstantiation ::: dedupedInsts)
+    val finalInsts = (selfInstantiation ::: dedupedInsts)
+      .distinctBy(inst => (inst.i, inst.tys, inst.term))
     val closureTypesMap = specializedClosureInsts
       .flatMap(cInst => cInst.tys.headOption.map(ty => cInst.i -> ty))
       .toMap
@@ -597,17 +737,17 @@ object MonoSpecialize {
   ): Map[Instantiation, List[Type]] = {
     val deferredDataConstrInsts =
       bindInsts.filter(_.r == Resolution.DeferredDataConstr)
-    val dcCtx = DataConstrContext(
+    val dataConstrCtx = DataConstrContext(
       typeVarInfo.regularTypeVarIndices,
       typeVarInfo.regularCtxLen,
       parentTys.length
     )
-    deferredDataConstrInsts.map { dcInst =>
-      dcInst -> specializeDataConstrInstTys(
-        dcInst,
+    deferredDataConstrInsts.map { dataConstrInst =>
+      dataConstrInst -> specializeDataConstrInstTys(
+        dataConstrInst,
         parentTys,
         ctxLength,
-        dcCtx
+        dataConstrCtx
       )
     }.toMap
   }

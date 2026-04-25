@@ -1,0 +1,9 @@
+fun rw(file_name: str, content: str) -> IO[i32]
+  do:
+    _ <- write(file_name, content)
+    v <- read(file_name)
+    _ <- print(v)
+    0
+
+fun main() -> i32
+  rw("/tmp/test.txt", "Hello World!").exec()

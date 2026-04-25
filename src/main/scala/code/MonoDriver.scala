@@ -75,7 +75,7 @@ object MonoDriver {
             newSavedGenericBinds
           )
           modifiedBinds <- bindsWithDeferredSpecs.traverse(
-            replaceInstantiations(_)
+            replaceInstantiations(_, bindsWithDeferredSpecs)
           )
           newItems <- MonoDiscovery.discoverItems(
             modifiedBinds,

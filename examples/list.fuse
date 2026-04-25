@@ -47,6 +47,7 @@ fun main() -> i32
     let l4 = l3.filter(e => e > 3)
     let s = List::sum(l4)
     let p = List::product(l4)
-    print(int_to_str(s + p))
+    let io = print(int_to_str(s + p))
+    io.exec()
     0
       

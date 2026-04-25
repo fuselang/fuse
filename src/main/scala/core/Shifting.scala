@@ -33,15 +33,19 @@ object Shifting {
     )
 
   def bindingShift(d: Int, b: Binding, c: Int = 0): Binding = b match {
-    case NameBind                 => NameBind
-    case TypeEMarkBind            => TypeEMarkBind
-    case TypeEFreeBind            => TypeEFreeBind
-    case TempVarBind              => TempVarBind
-    case TypeESolutionBind(ty, _) => TypeESolutionBind(typeShiftAbove(d, c, ty))
-    case t @ TypeVarBind(_, _)    => t
-    case VarBind(ty)              => VarBind(typeShiftAbove(d, c, ty))
-    case TypeAbbBind(ty, k)       => TypeAbbBind(typeShiftAbove(d, c, ty), k)
-    case c: TypeClassBind         => c
+    case NameBind                              => NameBind
+    case TypeEMarkBind                         => TypeEMarkBind
+    case TypeEFreeBind                         => TypeEFreeBind
+    case TempVarBind                           => TempVarBind
+    case TypeESolutionBind(ty, _, fromClosure) =>
+      TypeESolutionBind(
+        typeShiftAbove(d, c, ty),
+        fromClosurePrepend = fromClosure
+      )
+    case t @ TypeVarBind(_, _) => t
+    case VarBind(ty)           => VarBind(typeShiftAbove(d, c, ty))
+    case TypeAbbBind(ty, k)    => TypeAbbBind(typeShiftAbove(d, c, ty), k)
+    case c: TypeClassBind      => c
     case TypeClassInstanceBind(cls, ty, m) =>
       TypeClassInstanceBind(cls, typeShiftAbove(d, c, ty), m)
     case TermAbbBind(term, Some(ty)) =>
@@ -157,7 +161,11 @@ object Shifting {
       case TermApp(info, t1, t2)     => TermApp(info, iter(c, t1), iter(c, t2))
       case TermFix(info, t)          => TermFix(info, iter(c, t))
       case TermMatch(info, t, cases) =>
-        TermMatch(info, iter(c, t), cases.map((p, e) => (p, iter(c, e))))
+        TermMatch(
+          info,
+          iter(c, t),
+          cases.map((p, e) => (p, iter(c + patternArity(p), e)))
+        )
       case TermLet(info, i, t1, t2) =>
         TermLet(info, i, iter(c, t1), iter(c + 1, t2))
       case TermProj(info, t, i) => TermProj(info, iter(c, t), i)

@@ -32,15 +32,16 @@ object SpecializedMethodUtils {
   def isSpecializedMethod(methodName: String): Boolean =
     methodName.startsWith(Desugar.MethodNamePrefix)
 
-  /** Extract the base method name from a specialized method name */
-  def extractBaseMethodName(specializedName: String): String = {
-    if (isSpecializedMethod(specializedName)) {
-      // Remove the prefix and extract the method name before the first '#'
-      specializedName.stripPrefix(Desugar.MethodNamePrefix).takeWhile(_ != '#')
-    } else {
-      specializedName
+  /** Extract the base method name from a specialized method name. Strips all
+    * leading method prefixes (`!`) — trait default method specializations stack
+    * the prefix multiple times when the instantiation's originating class is
+    * populated.
+    */
+  def extractBaseMethodName(specializedName: String): String =
+    isSpecializedMethod(specializedName) match {
+      case true  => specializedName.dropWhile(_ == '!').takeWhile(_ != '#')
+      case false => specializedName
     }
-  }
 
   /** Check if a term contains any specialized method projections */
   def containsSpecializedMethod(term: Term): Boolean = term match {

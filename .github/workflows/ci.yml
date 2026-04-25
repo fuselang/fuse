@@ -24,7 +24,7 @@ jobs:
         run: scalafmt --check .
 
   test:
-    name: Check & Build Tests
+    name: Tests
     runs-on: ubuntu-latest
     needs: format
     steps:
@@ -33,43 +33,16 @@ jobs:
       - uses: coursier/setup-action@v2
         with:
           jvm: temurin:17
-          apps: sbt bloop
-      - name: Setup Bloop
-        run: sbt bloopInstall
-      - name: Run check tests
-        run: bloop test fuse-test -- 'fuse.CompilerCheckTests.*'
-      - name: Run build tests
-        run: bloop test fuse-test -- 'fuse.CompilerBuildTests.*'
-
-  test-exec:
-    name: Executable Tests
-    runs-on: ubuntu-latest
-    needs: format
-    steps:
-      - uses: actions/checkout@v6
-
-      # Install Nix with haskell.nix binary cache for pre-built GHC
-      - uses: cachix/install-nix-action@v31
+          apps: sbt
+      - name: Run tests with coverage
+        run: |
+          curl -fsSL https://fuselang.github.io/fuse/fuseup | sh -s -- -y --no-modify-path
+          . ~/.local/share/fuse/env
+          export FUSE_RUNTIME="$GITHUB_WORKSPACE/grin"
+          export FUSE_STDLIB="$GITHUB_WORKSPACE/stdlib"
+          sbt clean coverage fuse/test fuse/coverageReport
+      - uses: codecov/codecov-action@v5
         with:
-          nix_path: nixpkgs=channel:nixos-unstable
-          extra_nix_config: |
-            extra-substituters = https://cache.iog.io
-            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
-
-      - uses: nix-community/cache-nix-action@v7
-        with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', 'flake.lock') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
-          gc-max-store-size-linux: 2G
-
-      - uses: coursier/cache-action@v6
-      - uses: coursier/setup-action@v2
-        with:
-          jvm: temurin:17
-          apps: sbt bloop
-
-      - name: Setup Bloop
-        run: sbt bloopInstall
-
-      - name: Run exec tests
-        run: nix-shell --run "bloop test fuse-test -- 'fuse.CompilerExecTests.*'"
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./.jvm/target/scala-3.6.4/scoverage-report/scoverage.xml
+          fail_ci_if_error: false

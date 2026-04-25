@@ -17,9 +17,13 @@ import java.io.{
 import java.nio.file.{Files, Path, Paths}
 import parser.Info.UnknownInfo
 
-sealed trait Command
-case class BuildFile(file: String) extends Command
-case class CheckFile(file: String) extends Command
+sealed trait Command {
+  val includeStdlib: Boolean
+}
+case class BuildFile(file: String, includeStdlib: Boolean = true)
+    extends Command
+case class CheckFile(file: String, includeStdlib: Boolean = true)
+    extends Command
 
 /** Build pipeline errors. */
 sealed trait BuildError
@@ -60,12 +64,12 @@ object Fuse
 
   val buildCommand: Opts[BuildFile] =
     Opts.subcommand("build", "Compile fuse source code file.") {
-      fileOpts.map(BuildFile.apply)
+      fileOpts.map(f => BuildFile(f))
     }
 
   val checkCommand: Opts[CheckFile] =
     Opts.subcommand("check", "Checks fuse source code file for type errors.") {
-      fileOpts.map(CheckFile.apply)
+      fileOpts.map(f => CheckFile(f))
     }
 
   val compilerCommand: Opts[Command] = buildCommand `orElse` checkCommand

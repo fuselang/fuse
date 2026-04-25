@@ -58,6 +58,11 @@ object Grin {
   // targeting them and creating undefined specialized versions (e.g., eval.0).
   val GrinReservedFunctionNames: Set[String] = Set("eval", "apply")
 
+  // Built-in identifiers that map directly to GRIN runtime primops.
+  // Derived from `core.Primops.specs` — the single source of truth for
+  // user-visible primop names.
+  val BuiltInPrimopNames: Map[String, String] = core.Primops.fuseToGrinName
+
   // Two-pass code generation.
   // Pass 1: Collect all partial functions to build type-to-closure map
   // Pass 2: Generate code with P-tag inference
@@ -94,41 +99,100 @@ object Grin {
 
   /** Build Env by collecting partial functions from bindings and constructing
     * all closure-related maps.
+    *
+    * Two-pass scan: the first pass primes partial-function names with an env
+    * that has no closureMap/arityFactsMap; the second re-collects using the
+    * populated maps so env-driven branches (direct call vs dispatch) match
+    * final codegen. Without this, temp-variable counters diverge between the
+    * collect pass and codegen, and lifted closure names in closureMap don't
+    * appear in emitted output.
     */
   def buildEnv(bindings: List[Bind]): Env = {
-    val collectPass = for {
+    val typeInstancesMap = buildTypeInstancesMap(bindings)
+    val typeInstanceMethodsMap = buildTypeInstanceMethodsMap(bindings)
+    val primingEnv = Env(
+      typeInstances = typeInstancesMap,
+      typeInstanceMethods = typeInstanceMethodsMap
+    )
+    val primingFunctions = collectPartialFunctions(bindings, primingEnv)
+    val primingEnvWithFunctions =
+      envWithPartialFunctions(primingEnv, primingFunctions)
+    val partialFunctions =
+      collectPartialFunctions(bindings, primingEnvWithFunctions)
+    envWithPartialFunctions(primingEnvWithFunctions, partialFunctions)
+  }
+
+  def collectPartialFunctions(
+      bindings: List[Bind],
+      env: Env
+  ): List[PartialFunValue] = {
+    val pass = for {
       values <- bindings.traverse(bind =>
         for {
-          value <- toLambdaBinding(bind)(Env.empty)
+          value <- toLambdaBinding(bind)(env)
           _ <- Context.addBinding(bind.i, bind.b)
         } yield value
       )
     } yield values.flatten.flatMap(_._2)
-    val partialFunctions = collectPass.run(Context.emptyContext).value._2
+    pass.run(Context.emptyContext).value._2
+  }
 
-    // Build type-to-closure map for P-tag inference
-    // Map from typeKey -> list of closure names with that type signature
+  def envWithPartialFunctions(
+      env: Env,
+      partialFunctions: List[PartialFunValue]
+  ): Env = {
     val closureMap: Map[String, List[String]] = partialFunctions
       .filter(_.typeKey.nonEmpty)
       .groupBy(_.typeKey)
       .map { case (typeKey, pfs) => (typeKey, pfs.map(_.f).distinct) }
-
-    val arityFactsMap: Map[String, ArityFact] = partialFunctions
-      .map(pf =>
-        pf.f -> ArityFact(
-          pf.f,
-          pf.arity,
-          pf.numOfAppliedVars,
-          extractReturnType(pf.typeKey)
-        )
+    // Per-closure facts store raw parameter and return types. Merging of
+    // unresolved parameter types into concrete sibling groups happens in
+    // buildGroupedApply (via duplication) and in applyFnForClosure (at
+    // call sites); the env is just the structural source of truth.
+    val arityFactsMap: Map[String, ArityFact] = partialFunctions.map { pf =>
+      pf.f -> ArityFact(
+        pf.f,
+        pf.arity,
+        pf.numOfAppliedVars,
+        extractReturnType(pf.typeKey),
+        (0 until pf.arity).toList.map(i => extractParamTypeAt(pf.typeKey, i))
       )
-      .toMap
-
-    Env(
+    }.toMap
+    env.copy(
       closureMap = closureMap,
       arityFactsMap = arityFactsMap
     )
   }
+
+  /** Scan all bindings to build a map from a concrete type name to the set of
+    * type-class names that the type implements. Matches on names of the form
+    * `#<typeClass>#<typeName>` (see [[Desugar.toTypeInstanceBindID]]).
+    */
+  def buildTypeInstancesMap(bindings: List[Bind]): Map[String, Set[String]] =
+    bindings.foldLeft(Map.empty[String, Set[String]]) { (acc, bind) =>
+      bind.i match {
+        case Desugar.TypeInstancePattern(cls, typeName) =>
+          acc.updated(typeName, acc.getOrElse(typeName, Set.empty) + cls)
+        case _ => acc
+      }
+    }
+
+  /** Scan all bindings to build a map from `(typeName, className)` to the set
+    * of method names exposed. Matches on bind names for instance methods
+    * (`!<method>#<typeName>#<className>`) and for type-class default methods
+    * (`!<method>#<className>`) prior to specialization.
+    */
+  def buildTypeInstanceMethodsMap(
+      bindings: List[Bind]
+  ): Map[(String, String), Set[String]] =
+    bindings.foldLeft(Map.empty[(String, String), Set[String]]) { (acc, bind) =>
+      bind.i match {
+        case Desugar.TypeInstanceMethodPattern(method, typeName, cls) =>
+          val key = (typeName, cls)
+          acc.updated(key, acc.getOrElse(key, Set.empty) + method)
+        case _ => acc
+      }
+    }
 
   def generateMissingFFI(grinCode: String): String = {
     val usedOps = GrinPrelude.missingFFI.filter { case (opName, _) =>
@@ -165,64 +229,165 @@ object Grin {
     sections.mkString("\n\n")
   }
 
-  // Generate return-type-grouped apply functions following GHC-GRIN pattern.
-  // Closures are grouped by (arity, return type) to ensure HPT type homogeneity.
-  // Each apply function handles all closures with the same return type at a given arity.
-  def buildApply(partialFun: List[PartialFunValue]): ContextState[String] =
-    partialFun.isEmpty match {
-      case false =>
-        for {
-          // Group by (remaining arity, return type) for return-type-grouped apply functions
-          groupedApplies <- buildReturnTypeGroupedApply(partialFun)
-        } yield groupedApplies
-      case true => "".pure[ContextState]
+  // Generate apply functions one per (arity, paramType, returnType) bucket.
+  // Closures whose parameter type is unresolved (a bare type-variable
+  // placeholder produced by type erasure) are duplicated into every
+  // concrete-param sibling group that shares the same (arity, returnType).
+  // This keeps the backend's heap-points-to type environments monomorphic
+  // (no mixed-type fields) while still dispatching the erased-type lambdas
+  // from whichever concrete call site they actually reach.
+  def buildApply(
+      partialFun: List[PartialFunValue]
+  )(implicit env: Env): ContextState[String] =
+    partialFun match {
+      case Nil => "".pure[ContextState]
+      case pfs => buildGroupedApply(pfs)
     }
 
-  // Build return-type-grouped apply functions
-  def buildReturnTypeGroupedApply(
-      partialFuns: List[PartialFunValue]
-  ): ContextState[String] = {
-    // Step 1: Group by (remaining arity, return type)
-    // Use "unknown" as fallback when return type is empty
-    val byArityAndReturnType: Map[(Int, String), List[PartialFunValue]] =
-      partialFuns
-        .flatMap { pf =>
-          // For each closure, generate entries for all arity levels 1..pf.arity
-          (1 to pf.arity).map { remaining =>
-            val returnType = getPartialFunReturnType(pf)
-            ((remaining, returnType), pf)
-          }
-        }
-        .groupBy(_._1)
-        .map { case (key, pairs) =>
-          (key, pairs.map(_._2).distinctBy(_.f))
-        }
+  case class ApplyKey(remaining: Int, paramType: String, returnType: String)
 
-    // Step 2: Generate one apply function per (arity, return type) combination
-    byArityAndReturnType.toList
-      .sortBy(_._1)
-      .traverse { case ((remaining, retType), closures) =>
-        buildApplyForArityAndReturnType(remaining, retType, closures)
+  def buildGroupedApply(
+      partialFuns: List[PartialFunValue]
+  )(implicit env: Env): ContextState[String] = {
+    val entries: List[(ApplyKey, PartialFunValue)] =
+      partialFuns.flatMap(pf => pfApplyKeys(pf).map(_ -> pf))
+
+    val concretesByRR: Map[(Int, String), List[String]] = entries
+      .collect {
+        case (k, _) if !isUnresolvedParamType(k.paramType) =>
+          ((k.remaining, k.returnType), k.paramType)
       }
+      .groupBy(_._1)
+      .map { case (k, v) => (k, v.map(_._2).distinct) }
+
+    val expanded: List[(ApplyKey, PartialFunValue)] = entries.flatMap {
+      case (k, pf) if !isUnresolvedParamType(k.paramType) => List(k -> pf)
+      case (k, pf)                                        =>
+        concretesByRR.getOrElse((k.remaining, k.returnType), Nil) match {
+          case Nil       => List(k -> pf)
+          case concretes => concretes.map(pt => k.copy(paramType = pt) -> pf)
+        }
+    }
+
+    expanded
+      .groupBy(_._1)
+      .view
+      .mapValues(_.map(_._2).distinctBy(_.f))
+      .toList
+      .sortBy { case (k, _) => (k.remaining, k.paramType, k.returnType) }
+      .traverse { case (k, pfs) => buildApplyForGroup(k, pfs) }
       .map(_.mkString("\n\n"))
   }
 
-  // Get return type for a PartialFunValue
-  // Tries resolvedType first, then typeKey, then falls back to "unknown"
-  def getPartialFunReturnType(pf: PartialFunValue): String = {
-    // First try resolvedType if available
-    val fromResolvedType = pf.resolvedType.map(typeToKey).map(extractReturnType)
-    fromResolvedType match {
-      case Some(rt) if rt.nonEmpty => rt
-      case _                       =>
-        // Fall back to typeKey
-        val fromTypeKey = extractReturnType(pf.typeKey)
-        fromTypeKey.isEmpty match {
-          case true  => "unknown"
-          case false => fromTypeKey
-        }
+  // Per-level ApplyKey list for a PartialFunValue. Pulls raw param/return
+  // types from the already-populated ArityFact so grouping matches what
+  // applyFnForClosure picks at call sites.
+  def pfApplyKeys(pf: PartialFunValue)(implicit env: Env): List[ApplyKey] = {
+    val fact = env.arityFactsMap.get(pf.f)
+    val returnType =
+      fact
+        .map(_.returnTypeKey)
+        .filter(_.nonEmpty)
+        .getOrElse(getPartialFunReturnType(pf))
+    (1 to pf.arity).toList.map { remaining =>
+      val level = pf.arity - remaining
+      val paramType = fact
+        .flatMap(_.paramTypeKeys.lift(level))
+        .filter(_.nonEmpty)
+        .getOrElse(getPartialFunParamType(pf, level))
+      ApplyKey(remaining, paramType, returnType)
     }
   }
+
+  // A param type is "unresolved" if it's a bare type-variable placeholder
+  // produced by the key encoder (any indexed type-variable name, or the
+  // existential-variable fallback). These shouldn't split apply groups
+  // since they'd accept any concrete type at runtime.
+  def isUnresolvedParamType(paramType: String): Boolean =
+    paramType.isEmpty ||
+      paramType == "unknown" ||
+      paramType == "TypeEVar" ||
+      paramType.matches("T\\d+")
+
+  // Choose the apply-function name to emit for a call on `closureName`
+  // at `remaining` args-to-go. The name must match a dispatch table
+  // produced by buildGroupedApply: we pick the param type that actually
+  // keys a table in the same (arity, returnType) bucket.
+  //
+  // When the closure is known (fact present): use its raw param type, but
+  // if that's unresolved prefer a concrete sibling (buildGroupedApply
+  // duplicated the closure's dispatch clause into every concrete group).
+  // When the closure is unknown (empty name): use any sibling's param
+  // type from the same (arity, returnType) bucket, falling back to the
+  // supplied typeKey only if there are no siblings.
+  def applyFnForClosure(
+      closureName: String,
+      remaining: Int,
+      typeKeyFallback: String
+  )(implicit env: Env): String = {
+    val fact = env.arityFactsMap.get(closureName)
+    val returnType = fact
+      .map(_.returnTypeKey)
+      .filter(_.nonEmpty)
+      .orElse(Some(extractReturnType(typeKeyFallback)).filter(_.nonEmpty))
+      .getOrElse("unknown")
+    val paramType = fact match {
+      case Some(af) =>
+        val level = af.totalParams - remaining
+        val raw = af.paramTypeKeys
+          .lift(level)
+          .filter(_.nonEmpty)
+          .getOrElse("unknown")
+        isUnresolvedParamType(raw) match {
+          case false => raw
+          case true  => pickConcreteParam(remaining, returnType).getOrElse(raw)
+        }
+      case None =>
+        siblingParam(remaining, returnType).getOrElse {
+          val p = extractParamTypeAt(typeKeyFallback, 0)
+          p.isEmpty match { case true => "unknown"; case false => p }
+        }
+    }
+    applyFnName(remaining, paramType, returnType)
+  }
+
+  // Param type to use when emitting an apply call that targets the
+  // (remaining, returnType) dispatch bucket: prefer a concrete sibling
+  // (buildGroupedApply duplicates into every concrete group), falling back
+  // to any sibling's raw param otherwise. `None` if no sibling exists.
+  def siblingParam(remaining: Int, returnType: String)(implicit
+      env: Env
+  ): Option[String] = {
+    val params = env.arityFactsMap.values.view
+      .filter(af =>
+        af.totalParams >= remaining && af.returnTypeKey == returnType
+      )
+      .flatMap(af => af.paramTypeKeys.lift(af.totalParams - remaining))
+      .filter(_.nonEmpty)
+      .toList
+      .distinct
+    params.filterNot(isUnresolvedParamType).headOption.orElse(params.headOption)
+  }
+
+  def pickConcreteParam(remaining: Int, returnType: String)(implicit
+      env: Env
+  ): Option[String] =
+    siblingParam(remaining, returnType).filterNot(isUnresolvedParamType)
+
+  def getPartialFunReturnType(pf: PartialFunValue): String =
+    extractFromPF(pf, extractReturnType)
+
+  def getPartialFunParamType(pf: PartialFunValue, level: Int): String =
+    extractFromPF(pf, extractParamTypeAt(_, level))
+
+  // Apply an extractor to a PartialFunValue's resolvedType (if any) then
+  // fall back to its raw typeKey; both empty results collapse to "unknown".
+  def extractFromPF(pf: PartialFunValue, f: String => String): String =
+    pf.resolvedType
+      .map(typeToKey andThen f)
+      .filter(_.nonEmpty)
+      .orElse(Some(f(pf.typeKey)).filter(_.nonEmpty))
+      .getOrElse("unknown")
 
   /** Resolve TypeVar type constructors (in TypeApp t1 position) to TypeId using
     * adjusted De Bruijn indices to account for context growth since the TypeVar
@@ -271,23 +436,34 @@ object Grin {
       .replace("|", "_")
       .stripSuffix("_")
 
-  // Build a unified apply function for all closures with given arity and return type
-  def buildApplyForArityAndReturnType(
-      remaining: Int,
-      returnType: String,
+  // Emit a single unified apply function for a dispatch group.
+  def buildApplyForGroup(
+      key: ApplyKey,
       closures: List[PartialFunValue]
   ): ContextState[String] = {
-    val sanitizedRetType = sanitizeTypeName(returnType)
+    val applyName = applyFnName(key.remaining, key.paramType, key.returnType)
     for {
       ptagParam <- addTempVariable()
       argParam <- addTempVariable()
       clauses <- closures.traverse(pf =>
-        buildUnifiedClause(pf, remaining, argParam)
+        buildUnifiedClause(pf, key.remaining, argParam)
       )
-    } yield {
-      // Function name includes arity and return type: apply1_i32, apply1_unit, apply2_List_i32_
-      s"apply${remaining}_$sanitizedRetType $ptagParam $argParam =\n case $ptagParam of\n${clauses.mkString("\n")}"
-    }
+    } yield s"$applyName $ptagParam $argParam =\n case $ptagParam of\n${clauses.mkString("\n")}"
+  }
+
+  // Build the dispatch function name. Param type is required so that
+  // closures with the same return type but different input types don't
+  // collide in the HPT type environment.
+  def applyFnName(
+      remaining: Int,
+      paramType: String,
+      returnType: String
+  ): String =
+    s"apply${remaining}_${sanitizeTypeName(orUnknown(paramType))}_to_${sanitizeTypeName(orUnknown(returnType))}"
+
+  def orUnknown(s: String): String = s.isEmpty match {
+    case true  => "unknown"
+    case false => s
   }
 
   // Build a single case clause for a unified apply function
@@ -446,11 +622,7 @@ object Grin {
       case TermBuiltin(_)       => StateT.pure(Value(""))
       case TermAscribe(_, t, _) => toExpr(t)
       case TermFix(_, body)     => pureToExpr(body)
-      case TermAbs(_, variable, variableType, c: TermClosure, _) =>
-        Context
-          .addBinding("c", VarBind(variableType))
-          .flatMap(name => toClosureValue(name, name, c))
-      case c: TermClosure =>
+      case c: TermClosure       =>
         addTempVariable("c").flatMap(name => toClosureValue(name, name, c))
       case TermAbs(_, variable, variableType, body, _) =>
         for {
@@ -459,10 +631,18 @@ object Grin {
           b <- pureToExpr(body)
         } yield Abs(toParamVariable(variable2), b)
       case TermApp(_, TermFold(_, ty), tag: TermTag) =>
-        // Constructor application with TermFold - use store for heap allocation
+        // Constructor application with TermFold.
+        // For constructors whose fields contain function types, use double
+        // indirection: store each closure-valued field on the heap first, then
+        // store the constructor with the heap pointer. This ensures:
+        // 1. Heap-points-to analysis can track closure types through fields
+        // 2. The LLVM backend avoids illegal partial-application tags in
+        //    struct fields
+        // All other constructors use direct store (heap allocation).
         for {
           tyD <- typeShiftOnContextDiff(ty)
           typeName <- getNameFromType(tyD)
+          hasFuncFields <- hasFieldsWithFunctionTypeS(tag)
           // Use tag.typ for type arg suffix - it preserves concrete types from monomorphization
           // while TermFold's ty has broken TypeVar references after specialization
           tagTyD <- typeShiftOnContextDiff(tag.typ)
@@ -474,8 +654,6 @@ object Grin {
               val constr = show"store (${cTag(tag.i)}${typeArgSuffix})"
               State.pure(MultiLineExpr(List(), AppExpr(constr)))
             case TermRecord(_, fields) =>
-              // Constructor with record fields - fields are already values/pointers,
-              // no extra store needed (avoids double indirection in GRIN)
               for {
                 params <- fields.traverse { case (_, term) =>
                   for {
@@ -485,17 +663,68 @@ object Grin {
                 }
                 prepExprs = params.flatMap(_._1)
                 parameters = params.map(_._2).mkString(" ")
-                constr =
-                  show"store (${cTag(tag.i)}${typeArgSuffix} $parameters)"
-              } yield MultiLineExpr(prepExprs, AppExpr(constr))
+                // For function-typed fields: store each field on heap first
+                result <- hasFuncFields match {
+                  case true =>
+                    params
+                      .map(_._2)
+                      .traverse { param =>
+                        addTempVariable().map { storeVar =>
+                          (
+                            BindExpr(
+                              s"$storeVar <- store $param",
+                              storeVar,
+                              List()
+                            ),
+                            storeVar
+                          )
+                        }
+                      }
+                      .map { storeResults =>
+                        val storeExprs = storeResults.map(_._1)
+                        val storeVars =
+                          storeResults.map(_._2).mkString(" ")
+                        val constr =
+                          show"store (${cTag(tag.i)}${typeArgSuffix} $storeVars)"
+                        MultiLineExpr(
+                          prepExprs ++ storeExprs,
+                          AppExpr(constr)
+                        )
+                      }
+                  case false =>
+                    val constr =
+                      show"store (${cTag(tag.i)}${typeArgSuffix} $parameters)"
+                    State.pure(MultiLineExpr(prepExprs, AppExpr(constr)))
+                }
+              } yield result
             case _ =>
               // Constructor with non-record body
               for {
                 tagExpr <- pureToExpr(tag.t)
                 (prepExprs, parameters) <- prepParameters(tagExpr)
-                constr =
-                  show"store (${cTag(tag.i)}${typeArgSuffix} $parameters)"
-              } yield MultiLineExpr(prepExprs, AppExpr(constr))
+                // For function-typed fields: store the closure on heap first,
+                // then store the constructor with the heap pointer
+                result <- hasFuncFields match {
+                  case true =>
+                    addTempVariable().map { storeVar =>
+                      val storeExpr = BindExpr(
+                        s"$storeVar <- store $parameters",
+                        storeVar,
+                        List()
+                      )
+                      val constr =
+                        show"store (${cTag(tag.i)}${typeArgSuffix} $storeVar)"
+                      MultiLineExpr(
+                        prepExprs :+ storeExpr,
+                        AppExpr(constr)
+                      )
+                    }
+                  case false =>
+                    val constr =
+                      show"store (${cTag(tag.i)}${typeArgSuffix} $parameters)"
+                    State.pure(MultiLineExpr(prepExprs, AppExpr(constr)))
+                }
+              } yield result
           }
         } yield result
       case TermApp(_, TermFold(_, ty), r: TermRecord) =>
@@ -522,27 +751,21 @@ object Grin {
               )
               resolvedTag match {
                 case Some(tag) =>
-                  // When the resolved closure has zero captured fields at this
-                  // arity level, call the closure function directly instead of
-                  // going through apply. This prevents mixing dead and live
-                  // closures in shared apply functions (GRIN T_Dead issue).
                   val closureName = closureFromTag(tag)
                   val capturedFields =
                     env.arityFactsMap.get(closureName) match {
                       case Some(af) => af.totalParams - arity + af.capturedVars
                       case None     => -1
                     }
-                  // When a zero-captured-field closure would share an apply
-                  // function with other closures (via return-type grouping),
-                  // call it directly to avoid dead dispatch branches in GRIN.
-                  // Only applies at final application (arity == 1).
-                  // Count closures in the same apply group (same remaining arity + return type)
-                  val closureRetType = env.arityFactsMap
-                    .get(closureName)
-                    .map(_.returnTypeKey)
-                    .getOrElse("")
-                  val applyGroupSize = env.arityFactsMap.count { case (_, af) =>
-                    af.totalParams >= arity && af.returnTypeKey == closureRetType
+                  val closureApplyFn =
+                    applyFnForClosure(closureName, arity, tKey)
+                  val applyGroupSize = env.arityFactsMap.values.count { af =>
+                    af.totalParams >= arity &&
+                    applyFnForClosure(
+                      af.functionName,
+                      arity,
+                      ""
+                    ) == closureApplyFn
                   }
                   (capturedFields == 0 && arity == 1 && applyGroupSize > 1) match {
                     case true =>
@@ -556,7 +779,6 @@ object Grin {
                         )
                       )
                     case false =>
-                      // Pass tKey to makeApplyCall for return-type-based apply function selection
                       State.pure(
                         makeApplyCall(tag, result.show, parameter, arity, tKey)
                       )
@@ -564,14 +786,17 @@ object Grin {
                 case None =>
                   lookupClosures(tKey, arity) match {
                     case cs if cs.nonEmpty =>
-                      // Pass tKey to makeDispatch for return-type-based apply function selection
                       makeDispatch(f, cs, arity, parameter, tKey)
                     case _ =>
-                      State.pure(
-                        AppExpr(s"apply $result $parameter", arity - 1, 1, None)
-                      )
+                      State.pure(applyFnCall(f, parameter, arity, tKey))
                   }
               }
+            case FunctionValue(f, arity, _, tKey)
+                if tKey.nonEmpty && !env.arityFactsMap.contains(f) &&
+                  !isKnownFunction(f) =>
+              // Closure variable from pattern match (VarBind with tKey set).
+              // Not a known top-level function, must route through apply.
+              State.pure(applyFnCall(f, parameter, arity, tKey))
             case _ =>
               State.pure(AppExpr(show"$result $parameter".strip()))
           }
@@ -627,7 +852,14 @@ object Grin {
                 .orElse(closureType)
                 .fold(typeCheck(t1))(State.pure)
               variableType <- typeShiftOnContextDiff(variableTypeRaw)
-              fVar <- Context.addBinding(variable, VarBind(variableType))
+              variableWithSuffix <- includeFunctionSuffix(
+                variable,
+                variableType
+              )
+              fVar <- Context.addBinding(
+                variableWithSuffix,
+                VarBind(variableType)
+              )
               prepExprs2 = prepExprs :+ BindExpr(
                 show"$fVar <- ${PureExpr(result)}".strip(),
                 fVar,
@@ -803,15 +1035,29 @@ object Grin {
               tyT1D <- typeShiftOnContextDiff(tyT1)
               tyT1S <- TypeChecker.simplifyType(tyT1D)
               typeName <- getNameFromType(tyT1D)
-              instances <- getTypeInstances(typeName)
-              cls <- instances.findM(c =>
-                getAllTypeClassMethods(c.name).map(_.exists(_ == m))
-              )
-              f = cls match {
-                case Some(value) =>
-                  Desugar.toTypeInstanceMethodID(m, typeName, value.name)
-                case None => Desugar.toMethodID(m, typeName)
+              // Prefer the env-level lookup so forward references resolve — a
+              // trait-default specialization rendered before the impl it
+              // depends on won't yet have the impl in the ContextState.
+              envClassName = env.typeInstances
+                .getOrElse(typeName, Set.empty)
+                .find(cls =>
+                  env.typeInstanceMethods
+                    .getOrElse((typeName, cls), Set.empty)
+                    .contains(m)
+                )
+              className <- envClassName match {
+                case Some(cls) => State.pure(Some(cls))
+                case None      =>
+                  for {
+                    instances <- getTypeInstances(typeName)
+                    r <- instances.findM(c =>
+                      getAllTypeClassMethods(c.name).map(_.exists(_ == m))
+                    )
+                  } yield r.map(_.name)
               }
+              f = className.fold(Desugar.toMethodID(m, typeName))(
+                Desugar.toTypeInstanceMethodID(m, typeName, _)
+              )
             } yield Value(s"${methodToName(f)}")
         }
       case TermFold(_, _)   => StateT.pure(Value("pure "))
@@ -829,10 +1075,29 @@ object Grin {
         // This can happen when a generic function is defined but never used with concrete types
         // Return a placeholder to avoid match errors during processing
         State.pure(Value("#UNINSTANTIATED_GENERIC"))
-      case TermTApp(_, t, _) =>
-        // Type applications like Nil[B] reach here as TermTApp nodes
-        // Process the underlying term (the constructor/variable)
-        toExpr(t)
+      case TermTApp(_, tv @ TermVar(_, idx, _), tyArg) =>
+        // Type application over a nullary data constructor: if the inner
+        // term is a constructor reference (uppercase TermVar), emit the
+        // type-suffixed store form to match the producer site's naming
+        // (`store (C<ctor><typeArgs>)` from the Fold path at
+        // TermApp(TermFold(_, ty), TermTag(...))).
+        // Without this, the reference emits the unsuffixed constructor name
+        // while the definition stores the suffixed one, and the backend
+        // rejects with `illegal code`.
+        for {
+          optName <- State.inspect((ctx: Context) => indexToName(ctx, idx))
+          result <- optName match {
+            case Some(name) if core.Instantiations.isDataConstrName(name) =>
+              typeArgToString(tyArg).map(suffix =>
+                MultiLineExpr(
+                  List(),
+                  AppExpr(s"store (${cTag(name)}${suffix})")
+                ): Expr
+              )
+            case _ => toExpr(tv)
+          }
+        } yield result
+      case TermTApp(_, inner, _)        => toExpr(inner)
       case TermAssocProj(_, ty, method) =>
         // Associated function projections (like List::foldRight when used as a value)
         method match {
@@ -908,6 +1173,24 @@ object Grin {
       case n => Some(pTag(n, closureFromTag(tag)))
     }
 
+  // Helper: Build a plain `applyN_<paramType>_to_<retType> f x` AppExpr
+  // when no specific closure tag is available (unresolved FunctionValue
+  // paths). Passes an empty closure name so applyFnForClosure falls back
+  // to parsing tKey directly, and then routes through the usual concrete-
+  // sibling preference.
+  def applyFnCall(
+      f: String,
+      parameter: String,
+      arity: Int,
+      tKey: String
+  )(implicit env: Env): AppExpr =
+    AppExpr(
+      s"${applyFnForClosure("", arity, tKey)} $f $parameter",
+      arity - 1,
+      1,
+      None
+    )
+
   // Helper: Build return-type-based apply call (e.g., "apply1_i32 f x")
   // Uses return type from typeKey to determine the correct apply function
   def makeApplyCall(
@@ -929,14 +1212,7 @@ object Grin {
     // Use closure name to look up typeKey, which contains the accurate type info
     // This ensures we use the same typeKey that was used to generate the apply function
     val effectiveTKey = closureToTypeKey.getOrElse(closureName, tKey)
-
-    val rawReturnType = extractReturnType(effectiveTKey)
-    val returnType = rawReturnType.isEmpty match {
-      case true  => "unknown"
-      case false => rawReturnType
-    }
-    val sanitizedRetType = sanitizeTypeName(returnType)
-    val applyFn = s"apply${arity}_$sanitizedRetType"
+    val applyFn = applyFnForClosure(closureName, arity, effectiveTKey)
     AppExpr(
       s"$applyFn $result $param",
       arity - 1,
@@ -975,21 +1251,8 @@ object Grin {
         .getOrElse(0)
       val fieldStr = (0 until numFields).map(i => s" _${f}_${cn}_$i").mkString
       val pattern = s"($tag$fieldStr)"
-      // Get the closure's actual return type by finding its typeKey
-      val closureReturnType = closureToTypeKey
-        .get(cn)
-        .map(extractReturnType)
-        .filter(_.nonEmpty)
-        .getOrElse {
-          // Fallback to tKey's return type if closure not found
-          val raw = extractReturnType(tKey)
-          raw.isEmpty match {
-            case true  => "unknown"
-            case false => raw
-          }
-        }
-      val sanitizedRetType = sanitizeTypeName(closureReturnType)
-      val applyFn = s"apply${arity}_$sanitizedRetType"
+      val closureTypeKey = closureToTypeKey.getOrElse(cn, tKey)
+      val applyFn = applyFnForClosure(cn, arity, closureTypeKey)
       (cn, tag, pattern, applyFn)
     }
     // When all closures dispatch to the same apply function, skip the do-case dispatch
@@ -1013,7 +1276,7 @@ object Grin {
             1
           )
         }
-        State.pure(DoExpr(CaseExpr(Value(f), clauses)))
+        State.pure(CaseExpr(Value(f), clauses))
     }
   }
 
@@ -1214,9 +1477,38 @@ object Grin {
         (_, bindVariables, _) <- toContextState(
           TypeChecker.inferPattern(p, matchExprType)(checking = false)
         )
-        cpat = s"(${cTag(node)}${typeArgSuffix} ${bindVariables.mkString(" ")})"
-        caseClause <- buildCaseClause(cpat, e)
-      } yield caseClause
+        // For constructors whose fields contain function types, the fields
+        // are stored via double indirection (heap pointer). Generate temp
+        // names for the pattern and add fetch bindings to retrieve the
+        // actual closure values. `containsFunctionType` unwraps recursive
+        // type wrappers so recursive variants carrying closures are also
+        // handled.
+        variantHasFuncFields = containsFunctionType(matchExprType)
+        (patternVars, fetchBindings) <- variantHasFuncFields match {
+          case true =>
+            bindVariables
+              .traverse { varName =>
+                addTempVariable().map { ptrName =>
+                  (
+                    ptrName,
+                    BindExpr(s"$varName <- fetch $ptrName", varName, List())
+                  )
+                }
+              }
+              .map(pairs => (pairs.map(_._1), pairs.map(_._2)))
+          case false =>
+            (bindVariables, List.empty[BindExpr]).pure[ContextState]
+        }
+        cpat = s"(${cTag(node)}${typeArgSuffix} ${patternVars.mkString(" ")})"
+        caseExpr <- pureToExpr(e)
+        (prepExprs, parameter) <- prepParameters(caseExpr)
+      } yield CaseClause(
+        cpat,
+        MultiLineExpr(
+          fetchBindings ++ prepExprs,
+          PureExpr(Value(parameter))
+        )
+      )
     case PatternDefault(_) => buildCaseClause("#default", e)
     case t: Term => pureToExpr(t).flatMap(cpat => buildCaseClause(cpat.show, e))
   }
@@ -1352,18 +1644,14 @@ object Grin {
     case e: AppExpr => State.pure(List(), e)
     case d: DoExpr  =>
       // Extract arity and closure names from DoExpr if it contains a dispatch with partial applications
-      // New format: "apply2_T8_i32 f x" or "apply1_i32 f x"
       val dispatchInfo = d.expr match {
         case CaseExpr(_, clauses, _) =>
-          // Extract arity and closure names from case clause patterns
-          // Pattern like "(P2c28)" indicates closure c28 at arity 2
           val clauseInfo = clauses.flatMap {
             case CaseClause(pattern, AppExpr(repr, arity, _, _, closures), _)
                 if arity > 0 =>
-              // Extract closure name from pattern like "(P2c28)"
               val ptagPattern = """\(P(\d+)(\w+)""".r
               ptagPattern.findFirstMatchIn(pattern).map { m =>
-                val closureName = m.group(2) // e.g., "c28"
+                val closureName = m.group(2)
                 (arity, closureName)
               }
             case _ => None
@@ -1374,24 +1662,22 @@ object Grin {
           }
         case _ => None
       }
-      addTempVariable().flatMap(p => {
-        dispatchInfo match {
-          case Some((arity, closures)) if arity > 0 =>
-            // Result is a partial application - use FunctionValue with '' suffix
-            // Use closure names as tKey for correct subsequent dispatch
+      dispatchInfo match {
+        case Some((arity, closures)) if arity > 0 =>
+          // Result is a partial application - use FunctionValue with '' suffix
+          addTempVariable().map(p => {
             val varName = toPartialFunVariable(p)
             val tKey = closures.mkString(",")
-            State.pure(
-              (
-                List(BindExpr(show"$varName <- $d", varName, List(d))),
-                FunctionValue(varName, arity, None, tKey)
-              )
+            (
+              List(BindExpr(show"$varName <- $d", varName, List(d))),
+              FunctionValue(varName, arity, None, tKey)
             )
-          case _ =>
-            // Result is a value, not a partial application
-            getResult(BindExpr(show"$p <- $d", p, List(d)))
-        }
-      })
+          })
+        case _ =>
+          // Final application (arity 0) - treat like AppExpr with arity 0.
+          // Don't allocate a temp variable to keep counter in sync with pass 1.
+          State.pure(List.empty[BindExpr], d: Expr)
+      }
     case c: CaseExpr =>
       c.expr match {
         case MultiLineExpr(preps, result) =>
@@ -1412,6 +1698,23 @@ object Grin {
     case s if s.startsWith(Desugar.RecursiveFunctionParamPrefix) => ""
     case _                                                       => v
   }
+
+  /** Distinguish a pattern-matched closure variable (which lives on the heap
+    * and must go through `apply<N>_<retType>`) from a top-level / user-named
+    * function (which can be called directly). `arityFactsMap` only tracks
+    * closures, so top-level functions appear as `FunctionValue` with a
+    * non-empty `tKey` but no entry — yet they must NOT route through apply.
+    *
+    * Temp/closure variables are produced by `pickFreshName` with a single
+    * letter prefix + digits (e.g. `p5`, `f4`, `c12`, `_8`); user-defined
+    * function names break that shape.
+    *
+    * TODO: replace this name-shape check with a binding-type lookup once
+    * `Context.getBinding` is plumbed through to the use site.
+    */
+  def isKnownFunction(name: String): Boolean =
+    name.length > 2 && name.exists(_.isLetter) &&
+      !name.matches("^[a-z_]\\d+$")
 
   def includeFunctionSuffix(v: String, ty: Type): ContextState[String] =
     isFunctionType(ty).map(_ match {
@@ -1451,9 +1754,8 @@ object Grin {
 
   def toVariable(idx: Integer): ContextState[String] =
     getNameFromIndex(idx).map(_ match {
-      case PrimOp(ty, op) => mapPrimitiveToGrin(ty, op)
-      case "print"        => "_prim_string_print"
-      case "int_to_str"   => "_prim_int_str"
+      case PrimOp(ty, op)                      => mapPrimitiveToGrin(ty, op)
+      case v if BuiltInPrimopNames.contains(v) => BuiltInPrimopNames(v)
       case v if v.startsWith(Desugar.RecursiveFunctionParamPrefix) =>
         val stripped = v.stripPrefix(Desugar.RecursiveFunctionParamPrefix)
         GrinReservedFunctionNames.contains(stripped) match {

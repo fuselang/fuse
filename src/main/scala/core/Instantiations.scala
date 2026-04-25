@@ -22,10 +22,19 @@ object Instantiations {
   val BindTypeSeparator = "#"
   val BindTypeSeparatorChar = '#'
 
+  def isDataConstrName(name: String): Boolean =
+    name.headOption.exists(_.isUpper) && !name.contains(BindTypeSeparator)
+
   def getTypeArrity(ty: Type): Int = ty match {
     case TypeAll(_, _, _, _, a: TypeAll) => 1 + getTypeArrity(a)
     case TypeAll(_, _, _, _, _)          => 1
     case _                               => 0
+  }
+
+  def getValueArity(ty: Type): Int = ty match {
+    case TypeAll(_, _, _, _, t) => getValueArity(t)
+    case TypeArrow(_, _, t2)    => 1 + getValueArity(t2)
+    case _                      => 0
   }
 
   def isAllPureTypeVars(tys: List[Type]): Boolean = tys.forall {
@@ -33,11 +42,57 @@ object Instantiations {
     case _          => false
   }
 
+  /** Find the trait instance whose method set contains `method` for the
+    * concrete type `typeName`, if any.
+    */
+  def findMethodTrait(
+      typeName: String,
+      method: String
+  ): StateEither[Option[TypeClass]] = for {
+    typeInstances <- EitherT.liftF(getTypeInstances(typeName))
+    matching <- EitherT.liftF(
+      typeInstances.findM(instance =>
+        getAllTypeClassMethods(instance.name).map(_.exists(_ == method))
+      )
+    )
+  } yield matching
+
+  /** Resolve `typeName.method` to a concrete method id. When `traitOpt` is
+    * given, prefer a type-specific override and fall back to the trait default.
+    * Returns `(methodID, isTraitDefault)` — the second field is true when we
+    * fell back to the trait default, which requires Self-prepending later.
+    */
+  def resolveMethodId(
+      typeName: String,
+      method: String,
+      traitOpt: Option[TypeClass]
+  ): StateEither[(String, Boolean)] = traitOpt match {
+    case Some(traitInstance) =>
+      val typeSpecificID =
+        Desugar.toTypeInstanceMethodID(method, typeName, traitInstance.name)
+      val traitDefaultID = Desugar.toMethodID(method, traitInstance.name)
+      EitherT.liftF(State.inspect { (ctx: Context) =>
+        nameToIndex(ctx, typeSpecificID)
+          .map(_ => (typeSpecificID, false))
+          .getOrElse((traitDefaultID, true))
+      })
+    case None =>
+      (Desugar.toMethodID(method, typeName), false).pure[StateEither]
+  }
+
   enum Resolution {
     case Unresolved
     case Closure
     case DeferredDataConstr
     case Resolved(index: Int)
+    // Synthesized marker for bare TermVars that resolve (via ctx lookup) to
+    // an already-specialized data-constructor bind. The inst carries the
+    // generic base name and the DataConstr's concrete tys so that
+    // `bindName()` reconstructs the specialized target. Only the list-based
+    // rewrite path in `replaceInstantiations` is valid for these — there is
+    // no meaningful ctx-based index to fall back to, so the inst is dropped
+    // when list-based lookup fails.
+    case BareSpecializedDataConstr
   }
 
   case class Instantiation(
@@ -87,6 +142,19 @@ object Instantiations {
       case (app: TermApp, assocProj @ TermAssocProj(_, ty, method), Nil) =>
         // Static method calls without type solutions - no instantiation needed
         acc.pure[StateEither]
+      // Explicit type application carries its inst ty directly — handle before
+      // the generic Nil-solutions early return so phantom-only type params
+      // (generic functions whose type parameter does not flow through any
+      // value argument) still get collected when value-arg unification
+      // yields no solutions.
+      case (TermTApp(info, termVar @ TermVar(_, idx, c), typ), _, _) =>
+        for {
+          optionName <- EitherT.liftF(State.inspect(indexToName(_, idx)))
+          name <- optionName match {
+            case Some(name) => name.pure[StateEither]
+            case None       => TypeError.format(NotFoundTypeError(info))
+          }
+        } yield acc :+ Instantiation(name, termVar, List(typ), cls)
       case (_, _, Nil) =>
         acc.pure[StateEither]
       case (assocProj @ TermAssocProj(_, ty, method), _, _) if tys.nonEmpty =>
@@ -97,49 +165,66 @@ object Instantiations {
           methodID = Desugar.toMethodID(method, typeName)
           resolvedTys <- tys.traverse(resolveTypeConstructorsInType(_))
         } yield acc :+ Instantiation(methodID, assocProj, resolvedTys, cls)
+      case (
+            methodTerm @ TermMethodProj(_, obj, method),
+            _: TermMethodProj,
+            _
+          ) if tys.nonEmpty =>
+        // Direct method projection with type solutions (not wrapped in
+        // TermApp). Only fires for method calls with a single value
+        // argument: multi-argument method calls are caught by the outer
+        // `TermApp`/`TermMethodProj` case below, so collecting here would
+        // double-add them.
+        for {
+          (objType, _) <- pureInfer(obj)
+          typeName <- EitherT.liftF(getNameFromType(objType))
+          traitOpt <- findMethodTrait(typeName, method)
+          (methodID, isTraitDefault) <- resolveMethodId(
+            typeName,
+            method,
+            traitOpt
+          )
+          methodIdx <- EitherT.liftF(
+            State.inspect { (ctx: Context) => nameToIndex(ctx, methodID) }
+          )
+          methodArity <- methodIdx match {
+            case None      => Option.empty[Int].pure[StateEither]
+            case Some(idx) =>
+              getType(UnknownInfo, idx).map(t => Some(getValueArity(t)))
+          }
+          result <- methodArity.contains(1) match {
+            case false => acc.pure[StateEither]
+            case true  =>
+              for {
+                resolvedTys <- tys.traverse(resolveTypeConstructorsInType(_))
+                finalTys = isTraitDefault match {
+                  case true  => TypeId(UnknownInfo, typeName) +: resolvedTys
+                  case false => resolvedTys
+                }
+              } yield acc :+ Instantiation(methodID, methodTerm, finalTys, cls)
+          }
+        } yield result
       case (_: TermApp, methodTerm @ TermMethodProj(_, obj, method), _) =>
         for {
-          (objType, _) <- pureInfer(
-            obj
-          ) // Infer type of the object, not the method
+          (objType, _) <- pureInfer(obj) // type of the object, not the method
           typeName <- EitherT.liftF(getNameFromType(objType))
-          // Enhanced: Detect if this is a trait method vs direct type method
-          // Use getAllTypeClassMethods to include default implementations too
-          typeInstances <- EitherT.liftF(getTypeInstances(typeName))
-          matchingTraitOpt <- EitherT.liftF(
-            typeInstances.findM(instance =>
-              getAllTypeClassMethods(instance.name).map(_.exists(_ == method))
-            )
+          traitOpt <- findMethodTrait(typeName, method)
+          (methodID, isTraitDefault) <- resolveMethodId(
+            typeName,
+            method,
+            traitOpt
           )
-          // Choose method ID: prefer type-specific override, fall back to trait default
-          // Also track whether we're using a trait default (needs Self type prepended)
-          (methodID, isTraitDefault) <- matchingTraitOpt match {
-            case Some(traitInstance) =>
-              val typeSpecificID = Desugar.toTypeInstanceMethodID(
-                method,
-                typeName,
-                traitInstance.name
-              )
-              val traitDefaultID =
-                Desugar.toMethodID(method, traitInstance.name)
-              EitherT.liftF(State.inspect { (ctx: Context) =>
-                nameToIndex(ctx, typeSpecificID)
-                  .map(idx => (typeSpecificID, false))
-                  .getOrElse((traitDefaultID, true))
-              })
-            case None =>
-              (Desugar.toMethodID(method, typeName), false).pure[StateEither]
-          }
-          // For bounded type parameter method calls (e.g., c.map(f) where c: F[A]
-          // and F: Functor), extract the type argument from the object type to include
-          // in the inst types. Without this, the inst would only capture the outer
-          // TermApp's solution (B) but miss the inner TermApp's solution (A).
-          // Skip when: matchingTraitOpt found, or typeName is "Self" (trait default
-          // context where Self methods are handled by resolveAbstractMethodId).
-          objTypeArg <- (matchingTraitOpt, typeName) match {
+          // For method calls whose receiver has a bounded-generic type
+          // (a type variable constrained by a type class), extract the
+          // type argument from the object type to include in the inst
+          // types. Without this, the inst would only capture the outer
+          // application's type solution and miss the inner application's
+          // solution. Skip when a trait matched (handled by the
+          // isTraitDefault path) or when the object type name is the
+          // trait receiver placeholder.
+          objTypeArg <- (traitOpt, typeName) match {
             case (None, name) if name != SelfTypeName =>
-              val rootTV = findRootTypeVar(objType)
-              rootTV match {
+              findRootTypeVar(objType) match {
                 case Some(tv) =>
                   EitherT.liftF(getTypeBounds(tv)).map { bounds =>
                     bounds.nonEmpty match {
@@ -155,8 +240,9 @@ object Instantiations {
               }
             case _ => None.pure[StateEither]
           }
-          // For trait default methods, prepend the Self type (e.g., TypeId("Option"))
-          // because the trait default has an extra outermost TermTAbs for Self.
+          // For trait default methods, prepend the receiver's concrete
+          // type because the trait default has an extra outermost TermTAbs
+          // for the receiver-type parameter.
           finalTys = isTraitDefault match {
             case true  => TypeId(UnknownInfo, typeName) +: tys
             case false =>
@@ -237,23 +323,6 @@ object Instantiations {
             case _ => acc
           }
         } yield r
-      case (TermTApp(info, termVar @ TermVar(_, idx, c), typ), _, _) =>
-        for {
-          optionName <- EitherT.liftF(State.inspect(indexToName(_, idx)))
-          name <- optionName match {
-            case Some(name) => name.pure[StateEither]
-            case None       => TypeError.format(NotFoundTypeError(info))
-          }
-          // Handle explicit type applications to data constructors (e.g., Nil[B])
-          isDataConstructor = name.headOption.exists(_.isUpper) && !name
-            .contains(BindTypeSeparator)
-          result <- isDataConstructor match {
-            case true =>
-              (acc :+ Instantiation(name, termVar, List(typ), cls))
-                .pure[StateEither]
-            case false => acc.pure[StateEither] // Non-constructor, skip
-          }
-        } yield result
       case (termVar @ TermVar(info, idx, c), _, _) =>
         for {
           optionName <- EitherT.liftF(State.inspect(indexToName(_, idx)))
@@ -262,17 +331,36 @@ object Instantiations {
             case None       => TypeError.format(NotFoundTypeError(info))
           }
           // Data constructors are uppercase and don't contain specialized suffix
-          isDataConstructor = name.headOption.exists(_.isUpper) && !name
-            .contains(BindTypeSeparator)
+          isDataConstructor = isDataConstrName(name)
           // Skip closure parameters - these are runtime values, not generic functions
           // Use semantic binding-based check instead of name pattern matching
           isClosureParam <- EitherT.liftF(
             State.inspect(Context.isClosureParameter(_, idx))
           )
           resolvedTys <- tys.traverse(resolveTypeConstructorsInType(_))
+          // Limit collected types to the binding's actual type arity.
+          //
+          // When a closure is passed directly as an argument to a
+          // constructor or generic function, the type checker's closure-
+          // check rule prepends the closure's argument type as an extra
+          // `TypeESolutionBind`. The consumer's declared type arity is
+          // unchanged, so `resolvedTys.length` can exceed the arity.
+          //
+          // Those prepended solutions carry `fromClosurePrepend = true`,
+          // so we drop them structurally (front-first, up to the surplus)
+          // instead of positionally with `takeRight`. The invariant lives
+          // in the data rather than in ordering arithmetic.
+          arity <- getType(info, idx)
+            .map(getTypeArrity)
+            .recover { case _ => resolvedTys.length }
+          arityLimitedTys = dropClosurePrependSurplus(
+            resolvedTys,
+            solutions,
+            arity
+          )
           result <- (
             isClosureParam,
-            isAllPureTypeVars(resolvedTys) && isDataConstructor
+            isAllPureTypeVars(arityLimitedTys) && isDataConstructor
           ) match {
             case (true, _) => acc.pure[StateEither]
             case (_, true) =>
@@ -281,17 +369,51 @@ object Instantiations {
               (acc :+ Instantiation(
                 name,
                 termVar,
-                resolvedTys,
+                arityLimitedTys,
                 cls,
                 Resolution.DeferredDataConstr
               )).pure[StateEither]
             case _ =>
-              (acc :+ Instantiation(name, termVar, resolvedTys, cls))
+              (acc :+ Instantiation(name, termVar, arityLimitedTys, cls))
                 .pure[StateEither]
           }
         } yield result
       case _ => acc.pure[StateEither]
     }
+  }
+
+  /** Drop closure-prepended solutions from `resolvedTys` so the collected type
+    * list matches the bind's declared `arity`.
+    *
+    * `resolvedTys(i)` corresponds to `solutions(i)` (both produced in the same
+    * order by `build`). When `solutions.length > arity`, the checker has added
+    * more entries than the consumer expects — those extras are the
+    * closure-prepends (`sol.fromClosurePrepend = true`) emitted when a closure
+    * is type-checked against an expected type. We drop exactly the surplus
+    * worth of closure prepends from the front. If the surplus cannot be
+    * explained by closure prepends (e.g. a future codepath adds another kind of
+    * prepend), we fall back to the positional `takeRight` so behavior is never
+    * worse than before.
+    */
+  def dropClosurePrependSurplus(
+      resolvedTys: List[Type],
+      solutions: List[TypeESolutionBind],
+      arity: Int
+  ): List[Type] = (arity > 0 && resolvedTys.length > arity) match {
+    case false => resolvedTys
+    case true  =>
+      val surplus = resolvedTys.length - arity
+      val closurePrependIdxs = solutions.zipWithIndex.collect {
+        case (sol, i) if sol.fromClosurePrepend => i
+      }
+      closurePrependIdxs.length >= surplus match {
+        case true =>
+          val toDrop = closurePrependIdxs.take(surplus).toSet
+          resolvedTys.zipWithIndex.collect {
+            case (t, i) if !toDrop.contains(i) => t
+          }
+        case false => resolvedTys.takeRight(arity)
+      }
   }
 
   /** Resolve TypeVar type constructors inside TypeApp to TypeId.
@@ -342,18 +464,31 @@ object Instantiations {
     case _                    => t
   }
 
-  def distinct(insts: List[Instantiation]): List[Instantiation] =
-    insts
-      .groupBy(_.i) // Group by method ID
-      .flatMap { case (methodID, group) =>
-        // For each method, keep only instantiations with max type count
-        // This filters out partial instantiations created during incremental type solving
+  /** Deduplicate instantiations after monomorphization-related collection.
+    *
+    * Always groups by method id and keeps only entries with the maximum
+    * type-arg count (drops partial instantiations from incremental solving).
+    *
+    * `byTerm = true` keeps distinct call sites (different `term.info`) for the
+    * same `(i, tys)` — required when `replaceInstantiations` matches by info.
+    * `byTerm = false` collapses them into one — the default for callers that
+    * only need one entry per `(method, types)` pair.
+    */
+  def distinct(
+      insts: List[Instantiation],
+      byTerm: Boolean = false
+  ): List[Instantiation] = {
+    val maxByMethod = insts
+      .groupBy(_.i)
+      .flatMap { case (_, group) =>
         val maxTypeCount = group.map(_.tys.length).maxOption.getOrElse(0)
         group.filter(_.tys.length == maxTypeCount)
       }
       .toList
-      .distinctBy(inst =>
-        (inst.i, inst.tys)
-      ) // Still deduplicate exact duplicates
+    byTerm match {
+      case true => maxByMethod.distinctBy(inst => (inst.i, inst.tys, inst.term))
+      case false => maxByMethod.distinctBy(inst => (inst.i, inst.tys))
+    }
+  }
 
 }
