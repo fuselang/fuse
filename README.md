@@ -1,5 +1,7 @@
 # <img src="https://raw.githubusercontent.com/fuselang/fuse/master/assets/logo.png" height="28px"/> Fuse
 
+[![codecov](https://codecov.io/github/fuselang/fuse/graph/badge.svg?token=VBEJK8VHWY)](https://codecov.io/github/fuselang/fuse)
+
 **Fuse** is a statically typed, purely functional language with higher-kinded types and ad-hoc polymorphism. It compiles to the GRIN whole-program optimizer, producing LLVM-generated native code.
 
 Website: https://fuselang.org/
