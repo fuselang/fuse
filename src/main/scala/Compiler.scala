@@ -10,6 +10,7 @@ import org.parboiled2.*
 import parser.FuseParser
 import parser.FuseParser.*
 import parser.ParserErrorFormatter
+import parser.Types.*
 
 import java.io.*
 import java.nio.file.{Files, Path, Paths}
@@ -66,11 +67,11 @@ object Compiler {
     */
   def readStdlibFiles(dir: Path): IO[List[(Path, String)]] = IO.blocking {
     import scala.jdk.CollectionConverters.*
-    val stream = Files.newDirectoryStream(dir, "*.fuse")
+    val stream = Files.newDirectoryStream(dir)
     try
-      stream.asScala.toList.map(p =>
-        p -> new String(Files.readAllBytes(p)).trim
-      )
+      stream.asScala.toList
+        .filter(p => p.getFileName.toString.endsWith(".fuse"))
+        .map(p => p -> new String(Files.readAllBytes(p)).trim)
     finally stream.close()
   }
 
@@ -107,11 +108,46 @@ object Compiler {
       case FTupleTypeDecl(_, i, _, _)   => i.value
       case FTypeAlias(_, i, _, _)       => i.value
     }.toSet
-    val requires = decls.collect {
-      case FTraitInstance(_, traitId, _, _, _, _) =>
-        traitId.value
-    }.toSet
+    val requires = decls.flatMap(declTypeRefs).toSet -- provides
     StdlibFileDeps(provides, requires)
+  }
+
+  /** Collect every type-name referenced by a declaration's signature, body type
+    * annotations, and trait/instance heads. Used by `extractStdlibFileDeps` to
+    * drive topological ordering: a file referencing `List` in any signature
+    * must load after the file that provides `List`.
+    */
+  def declTypeRefs(decl: FDecl): Set[String] = decl match {
+    case FTraitInstance(_, traitId, _, typeId, _, methods) =>
+      Set(traitId.value, typeId.value) ++ methods.flatMap(declTypeRefs)
+    case FFuncDecl(sig, _)                => funcSigTypeRefs(sig)
+    case FMethodDecl(sig, _)              => methodSigTypeRefs(sig)
+    case FTypeFuncDecls(_, _, _, methods) => methods.flatMap(declTypeRefs).toSet
+    case FTraitDecl(_, _, _, members)     =>
+      members.flatMap {
+        case Left(FMethodDecl(sig, _)) => methodSigTypeRefs(sig)
+        case Right(sig)                => methodSigTypeRefs(sig)
+      }.toSet
+    case _ => Set.empty[String]
+  }
+
+  def funcSigTypeRefs(sig: FFuncSig): Set[String] = {
+    val paramTypes = sig.p.toList.flatten.map(_.t)
+    (paramTypes :+ sig.r).flatMap(typeRefs).toSet
+  }
+
+  def methodSigTypeRefs(sig: FMethodSig): Set[String] = {
+    val paramTypes =
+      sig.p.toList.flatMap(_.params.toList.flatten).map(_.t)
+    (paramTypes :+ sig.r).flatMap(typeRefs).toSet
+  }
+
+  def typeRefs(t: FType): Set[String] = t match {
+    case FSimpleType(_, id, args) =>
+      Set(id.value) ++ args.toList.flatten.flatMap(typeRefs)
+    case FTupleType(_, ts)      => ts.flatMap(typeRefs).toSet
+    case FFuncType(_, ins, out) => (ins :+ out).flatMap(typeRefs).toSet
+    case FUnitType(_)           => Set.empty
   }
 
   /** Kahn-style topological sort. Each pass emits every file whose `requires`

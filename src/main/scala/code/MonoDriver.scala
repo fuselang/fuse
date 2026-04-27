@@ -61,7 +61,7 @@ object MonoDriver {
         val newAllBindNames =
           binds.map(_.i).toSet ++ newSavedGenericBinds.keySet
         for {
-          specializedBinds <- toSpecializedBinds(
+          (specializedBinds, shiftedGenericBinds) <- toSpecializedBinds(
             binds,
             resolvableInsts,
             newAllBindNames
@@ -70,9 +70,29 @@ object MonoDriver {
             specializedBinds,
             newSavedGenericBinds
           )
+          // `createMissingDataConstrSpecs` inserts new data-constructor specs
+          // into the bind list and shifts every bind after the insertion via
+          // `shiftBindAfterInsert`. The `shiftedGenericBinds` map produced by
+          // `toSpecializedBinds` predates these insertions — its entries are
+          // stale copies whose stored TypeVar `n` stamps lag the post-insert
+          // ctx length by the number of data-constructor specs inserted before
+          // the entry's source position. Refresh the map by re-locating each
+          // generic in the NEW bind list, so deferred specs in
+          // `createMissingGenericSpecs` are built from a generic whose body has
+          // ALL pre-insert and data-constructor-insert shifts applied. Without
+          // this, `typeShiftOnContextDiff` at GRIN time over-compensates by the
+          // missing data-constructor delta, drifting e.g. `List` references in
+          // a Nil-armed bind's transitive spec to `read`.
+          refreshedShiftedGenericBinds = shiftedGenericBinds.map {
+            case (name, staleBind) =>
+              name -> bindsWithDataConstrSpecs
+                .find(_.i == name)
+                .getOrElse(staleBind)
+          }
           bindsWithDeferredSpecs <- createMissingGenericSpecs(
             bindsWithDataConstrSpecs,
-            newSavedGenericBinds
+            newSavedGenericBinds,
+            refreshedShiftedGenericBinds
           )
           modifiedBinds <- bindsWithDeferredSpecs.traverse(
             replaceInstantiations(_, bindsWithDeferredSpecs)

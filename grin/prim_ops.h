@@ -17,7 +17,7 @@ void cstring(char* buffer, struct string* s);
 
 int64_t _prim_string_print(struct string* p1);
 int64_t _prim_int_print(int64_t p1);
-struct string* _prim_read_string();
+struct string* _prim_read_string(int64_t unit);
 int64_t _prim_usleep(int64_t p1);
 int64_t _prim_error(struct string* p1);
 int64_t _prim_ffi_file_eof(int64_t p1);
@@ -45,3 +45,9 @@ float _prim_float_mod(float p1, float p2);
 int64_t _prim_bool_and(int64_t p1, int64_t p2);
 int64_t _prim_bool_or(int64_t p1, int64_t p2);
 int64_t _prim_string_ne(struct string* p1, struct string* p2);
+
+int64_t _prim_args_count(int64_t unit);
+struct string* _prim_args_get(int64_t idx);
+
+int64_t _prim_string_char_at(struct string* s, int64_t idx);
+struct string* _prim_string_substring(struct string* s, int64_t start, int64_t end);

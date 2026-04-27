@@ -348,7 +348,13 @@ abstract class Expressions(fileName: String) extends Types(fileName) {
     )
   }
   def String = {
-    def Raw = rule(!'\"' ~ ANY)
+    // Two-char escape units come first so the parser commits both bytes
+    // before the single-byte fallback runs. `\\` (escaped backslash) must
+    // be its own alternative — without it, `\\"` would be parsed as one
+    // raw `\` followed by an `\"` escape, swallowing the closing quote.
+    def Raw = rule {
+      ('\\' ~ '\\') | ('\\' ~ '\"') | (!'\"' ~ ANY)
+    }
     rule {
       info ~ '"' ~ capture(Raw.*) ~ '"' ~> FString.apply
     }

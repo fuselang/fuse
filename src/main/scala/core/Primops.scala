@@ -48,10 +48,46 @@ object Primops {
       returnType = TypeUnit(i)
     ),
     PrimopSpec(
+      fuseName = "_read_stdin",
+      grinName = "_prim_read_string",
+      paramTypes = List(TypeUnit(i)),
+      returnType = TypeString(i)
+    ),
+    PrimopSpec(
       fuseName = "int_to_str",
       grinName = "_prim_int_str",
       paramTypes = List(TypeInt(i)),
       returnType = TypeString(i)
+    ),
+    PrimopSpec(
+      fuseName = "_args_count",
+      grinName = "_prim_args_count",
+      paramTypes = List(TypeUnit(i)),
+      returnType = TypeInt(i)
+    ),
+    PrimopSpec(
+      fuseName = "_args_get",
+      grinName = "_prim_args_get",
+      paramTypes = List(TypeInt(i)),
+      returnType = TypeString(i)
+    ),
+    PrimopSpec(
+      fuseName = "_string_char_at",
+      grinName = "_prim_string_char_at",
+      paramTypes = List(TypeString(i), TypeInt(i)),
+      returnType = TypeInt(i)
+    ),
+    PrimopSpec(
+      fuseName = "_string_substring",
+      grinName = "_prim_string_substring",
+      paramTypes = List(TypeString(i), TypeInt(i), TypeInt(i)),
+      returnType = TypeString(i)
+    ),
+    PrimopSpec(
+      fuseName = "_string_len",
+      grinName = "_prim_string_len",
+      paramTypes = List(TypeString(i)),
+      returnType = TypeInt(i)
     )
   )
 

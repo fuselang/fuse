@@ -8,13 +8,19 @@
 extern int64_t _heap_ptr_;
 #endif
 
+int g_argc = 0;
+char** g_argv = NULL;
+
 int64_t grinMain();
 
 void __runtime_error(int64_t c){
   exit(c);
 }
 
-int main() {
+int main(int argc, char** argv) {
+  g_argc = argc;
+  g_argv = argv;
+
 #ifdef USE_BOEHM_GC
   GC_INIT();
 #else

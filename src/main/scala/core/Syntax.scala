@@ -16,7 +16,26 @@ object Types {
     def containsEVar(eV: TypeEVar): Boolean
   }
 
-  case class TypeVar(info: Info, index: Integer, length: Integer) extends Type {
+  /** A type-variable reference. Carries a De Bruijn `index` plus the `length`
+    * (context size) at the moment of stamping, so
+    * `Context.typeShiftOnContextDiff` can compensate for closure entry/exit
+    * drift via uniform shift.
+    *
+    * The optional `referent` field is the original binding **name** at stamping
+    * time, populated only when the TypeVar references a top-level type
+    * abbreviation (`TypeAbbBind`). When set, `typeShiftOnContextDiff` consults
+    * the current context for that name instead of applying the uniform shift —
+    * sidestepping the Loophole K over-shift caused by mid-list inserts
+    * displacing the referent's absolute position. Local type-parameter binders
+    * (`TypeVarBind`) keep `referent = None` because their referents are scoped
+    * and uniform shift is correct for closure transitions.
+    */
+  case class TypeVar(
+      info: Info,
+      index: Integer,
+      length: Integer,
+      referent: Option[String] = None
+  ) extends Type {
     def containsEVar(eV: TypeEVar): Boolean = false
     override def isPrimitive: Boolean = true
   }
@@ -93,7 +112,7 @@ object Types {
   }
 
   implicit val showTypeInfo: ShowInfo[Type] = ShowInfo.info(_ match {
-    case TypeVar(info, _, _)       => info
+    case TypeVar(info, _, _, _)    => info
     case TypeClass(info, _)        => info
     case TypeEVar(info, _, _)      => info
     case TypeId(info, _)           => info

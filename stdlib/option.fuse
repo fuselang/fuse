@@ -1,0 +1,37 @@
+type Option[T]:
+    None
+    Some(T)
+
+impl Option[T]:
+    fun is_some(self) -> bool
+        match self:
+            Some(v) => true
+            _ => false
+
+    fun is_none(self) -> bool
+        match self:
+            Some(v) => false
+            _ => true
+
+    fun get_or_else(self, default: T) -> T
+        match self:
+            Some(a) => a
+            None => default
+
+    fun filter(self, f: T -> bool) -> Option[T]
+        match self:
+            Some(a) => {
+                match f(a):
+                    true => self
+                    _ => None
+            }
+            _ => None
+
+impl Monad for Option[T]:
+    fun flat_map[B](self, f: T -> Option[B]) -> Option[B]
+        match self:
+            Some(a) => f(a)
+            None => None
+
+    fun unit[T](a: T) -> Option[T]
+        Some(a)

@@ -71,8 +71,8 @@ object MonoSpecialize {
     }
 
   def hasNegativeTypeVarIndex(ty: Type): Boolean = ty match {
-    case TypeVar(_, idx, _) => idx < 0
-    case TypeApp(_, t1, t2) =>
+    case TypeVar(_, idx, _, _) => idx < 0
+    case TypeApp(_, t1, t2)    =>
       hasNegativeTypeVarIndex(t1) || hasNegativeTypeVarIndex(t2)
     case TypeArrow(_, t1, t2) =>
       hasNegativeTypeVarIndex(t1) || hasNegativeTypeVarIndex(t2)
@@ -81,8 +81,8 @@ object MonoSpecialize {
   }
 
   def getTypeContextLength(ty: Type): Option[Int] = ty match {
-    case TypeVar(_, _, n)   => Some(n)
-    case TypeApp(_, t1, t2) =>
+    case TypeVar(_, _, n, _) => Some(n)
+    case TypeApp(_, t1, t2)  =>
       getTypeContextLength(t1).orElse(getTypeContextLength(t2))
     case TypeArrow(_, t1, t2) =>
       getTypeContextLength(t1).orElse(getTypeContextLength(t2))
@@ -95,7 +95,7 @@ object MonoSpecialize {
       ty: Type,
       numBinds: Int
   ): ContextState[Boolean] = ty match {
-    case TypeVar(info, index, ctxLen) =>
+    case TypeVar(info, index, ctxLen, _) =>
       (index < 0) match {
         case true  => false.pure[ContextState]
         case false =>
@@ -116,8 +116,8 @@ object MonoSpecialize {
   }
 
   def extractTypeVarIndices(ty: Type): List[Int] = ty match {
-    case TypeVar(_, idx, _) => List(idx)
-    case TypeApp(_, t1, t2) =>
+    case TypeVar(_, idx, _, _) => List(idx)
+    case TypeApp(_, t1, t2)    =>
       extractTypeVarIndices(t1) ::: extractTypeVarIndices(t2)
     case TypeArrow(_, t1, t2) =>
       extractTypeVarIndices(t1) ::: extractTypeVarIndices(t2)
@@ -224,7 +224,7 @@ object MonoSpecialize {
       ty: Type,
       inCtor: Boolean = false
   ): List[((Int, Int), Boolean)] = ty match {
-    case TypeVar(_, idx, n) =>
+    case TypeVar(_, idx, n, _) =>
       List(((idx.intValue, n.intValue), inCtor))
     case TypeApp(_, t1, t2) =>
       collectTypeParamPairs(t1, true) ::: collectTypeParamPairs(t2, false)
@@ -240,7 +240,7 @@ object MonoSpecialize {
       ty: Type,
       mapping: Map[Int, Type]
   ): Type = ty match {
-    case TypeVar(_, idx, _) =>
+    case TypeVar(_, idx, _, _) =>
       mapping.getOrElse(idx.intValue, ty)
     case TypeApp(info, t1, t2) =>
       TypeApp(
@@ -486,9 +486,13 @@ object MonoSpecialize {
             term,
             specializedClosureInsts
           )
-          specializedTerm = shiftedInst.tys.foldLeft(
-            termWithClosureTypes: Term
-          )(specializeTerm(_, idx, _))
+          specializedTerm = renameSelfRecursiveBinding(
+            shiftedInst.tys.foldLeft(termWithClosureTypes: Term)(
+              specializeTerm(_, idx, _)
+            ),
+            bind.i,
+            name
+          )
           deferredDataConstrInsts = bind.insts.filter(
             _.r == Resolution.DeferredDataConstr
           )
@@ -535,19 +539,63 @@ object MonoSpecialize {
             insts,
             shiftedInst.tys
           )
-        } yield finalizeSpecializedBind(
-          name,
-          binding,
-          insts ::: syntheticDataConstrInsts,
-          bind.i,
-          inst.tys,
-          specializedClosureInsts
-        )
+          finalized <- finalizeSpecializedBind(
+            name,
+            binding,
+            insts ::: syntheticDataConstrInsts,
+            bind.i,
+            inst.tys,
+            specializedClosureInsts
+          )
+        } yield finalized
       case _ =>
         throw new RuntimeException(
           s"can't build specialized binding ${inst.i}"
         )
     }
+
+  /** Rename the recursion-combinator parameter inside the specialized term so
+    * its self-references resolve to the specialized name at GRIN codegen time.
+    *
+    * Top-level generic `fun` declarations are desugared (see
+    * `Desugar.withFixCombinator`) to `TermFix(TermAbs(prefix+name, ty, body))`,
+    * where `prefix+name` is the synthetic recursion-combinator parameter.
+    * Self-calls inside `body` are TermVars pointing to that binding. After
+    * monomorphization, the outer `Bind.i` becomes the type-suffixed spec name
+    * but the inner TermAbs binding name is unchanged. Without renaming,
+    * `Grin.toVariable` would resolve the recursive TermVar to the original
+    * prefixed name, strip the prefix, and emit the un-suffixed function name —
+    * which has no GRIN definition, breaking the linker.
+    *
+    * Renaming the inner binding to the prefixed spec name makes
+    * `Grin.toVariable` emit the spec name, matching the function header emitted
+    * from `Bind.i` after the standard `#`→`'` post-processing.
+    *
+    * `Grin.toParamVariable` already returns `""` for any prefix-marked name, so
+    * the recursion parameter remains invisible in the function header
+    * regardless of the rename.
+    *
+    * Methods inside `impl` blocks self-call via qualified names which produce
+    * `TermAssocProj` and are covered by the `containsAssocProjInBinding` path
+    * in `finalizeSpecializedBind`; this rename specifically handles bare-name
+    * self-calls in top-level `fun` bodies.
+    */
+  def renameSelfRecursiveBinding(
+      term: Term,
+      originalBindName: String,
+      specializedBindName: String
+  ): Term = {
+    val oldRecName =
+      s"${Desugar.RecursiveFunctionParamPrefix}$originalBindName"
+    val newRecName =
+      s"${Desugar.RecursiveFunctionParamPrefix}$specializedBindName"
+    term match {
+      case TermFix(info, TermAbs(absInfo, name, ty, body, retTy))
+          if name == oldRecName =>
+        TermFix(info, TermAbs(absInfo, newRecName, ty, body, retTy))
+      case _ => term
+    }
+  }
 
   /** Synthesize insts for bare TermVars in the specialized body that resolve
     * (via ctx lookup) to an already-specialized data-constructor bind but have
@@ -627,35 +675,97 @@ object MonoSpecialize {
       originalBindName: String,
       instTys: List[Type],
       specializedClosureInsts: List[Instantiation]
-  ): Bind = {
-    val filteredInsts = insts.filter(inst =>
-      !inst.tys.exists(ty => getTypeContextLength(ty).isDefined)
+  ): ContextState[Bind] = for {
+    // Drop insts whose tys still carry a generic-parameter TypeVar
+    // (binding = TypeVarBind). TypeVars whose binding is a TypeAbbBind
+    // (a concrete top-level type constructor) are real references and must
+    // be kept. The previous `!getTypeContextLength(ty).isDefined`
+    // predicate dropped both indiscriminately and stripped legitimate
+    // insts whose type arguments contained nested concrete constructors,
+    // leaving the corresponding spec ungenerated.
+    filteredInsts <- insts.filterA(inst =>
+      inst.tys.forallM(ty => isFreeOfGenericTypeVar(ty))
     )
-    // Preserve multiple call sites (different term.info) for the same
-    // method+types — each one needs its own replacement in
-    // replaceInstantiations (which matches by info).
-    val dedupedInsts = Instantiations.distinct(filteredInsts, byTerm = true)
-    val selfInstantiation =
-      containsAssocProjInBinding(binding, originalBindName) match {
-        case true =>
-          List(
-            Instantiation(
-              originalBindName,
-              TermAssocProj(UnknownInfo, instTys.head, originalBindName),
-              instTys,
-              List(),
-              Resolution.Resolved(0)
-            )
+    dedupedInsts = Instantiations.distinct(filteredInsts, byTerm = true)
+    selfInstantiation = containsAssocProjInBinding(
+      binding,
+      originalBindName
+    ) match {
+      case true =>
+        List(
+          Instantiation(
+            originalBindName,
+            TermAssocProj(UnknownInfo, instTys.head, originalBindName),
+            instTys,
+            List(),
+            Resolution.Resolved(0)
           )
-        case false => List()
-      }
-    val finalInsts = (selfInstantiation ::: dedupedInsts)
+        )
+      case false => List()
+    }
+    finalInsts = (selfInstantiation ::: dedupedInsts)
       .distinctBy(inst => (inst.i, inst.tys, inst.term))
-    val closureTypesMap = specializedClosureInsts
+    closureTypesMap = specializedClosureInsts
       .flatMap(cInst => cInst.tys.headOption.map(ty => cInst.i -> ty))
       .toMap
-    Bind(name, binding, finalInsts, closureTypesMap)
+  } yield Bind(name, binding, finalInsts, closureTypesMap)
+
+  /** True iff `ty` contains no `TypeVar` whose binding is a `TypeVarBind` (a
+    * generic parameter). `TypeVar`s whose binding is a top-level `TypeAbbBind`
+    * (a concrete top-level type constructor) are kept. Drifted `TypeVar`s
+    * pointing at a non-type binding (`TermAbbBind`, `VarBind`, etc.) are
+    * treated as non-concrete and thus filtered — accepting them causes
+    * `bindName()` to render method/term names into spec suffixes, producing
+    * pathological recursive spec names.
+    */
+  def isFreeOfGenericTypeVar(ty: Type): ContextState[Boolean] = ty match {
+    case TypeVar(info, idx, _, referent) =>
+      // Loophole K Option 1: the `referent` carries the original
+      // type-name. Prefer name-based lookup (via the current ctx)
+      // over the cached `idx` — the idx is a snapshot from when the
+      // type was created, and mono routinely adds binds that shift
+      // it, causing a name to resolve to the wrong (term) binding
+      // via stale idx.
+      referent match {
+        case Some(name) =>
+          State.inspect[Context, Option[Int]](nameToIndex(_, name)).flatMap {
+            case None =>
+              // Name not in ctx → fall back to idx-based lookup so a
+              // not-yet-added type still resolves through its captured
+              // idx if that idx happens to land on a TypeAbbBind.
+              isFreeViaIdx(info, idx)
+            case Some(curIdx) =>
+              GrinUtils.toContextStateOption(getBinding(info, curIdx)).map {
+                case Some(_: TypeAbbBind) => true
+                case _                    => false
+              }
+          }
+        case None => isFreeViaIdx(info, idx)
+      }
+    case TypeApp(_, t1, t2) =>
+      isFreeOfGenericTypeVar(t1).flatMap {
+        case false => false.pure[ContextState]
+        case true  => isFreeOfGenericTypeVar(t2)
+      }
+    case TypeArrow(_, t1, t2) =>
+      isFreeOfGenericTypeVar(t1).flatMap {
+        case false => false.pure[ContextState]
+        case true  => isFreeOfGenericTypeVar(t2)
+      }
+    case TypeAll(_, _, _, _, t) => isFreeOfGenericTypeVar(t)
+    case _: TypeEVar            => false.pure[ContextState]
+    case _                      => true.pure[ContextState]
   }
+
+  def isFreeViaIdx(info: parser.Info.Info, idx: Int): ContextState[Boolean] =
+    idx < 0 match {
+      case true  => false.pure[ContextState]
+      case false =>
+        GrinUtils.toContextStateOption(getBinding(info, idx)).map {
+          case Some(_: TypeAbbBind) => true
+          case _                    => false
+        }
+    }
 
   def containsAssocProjInBinding(
       binding: Binding,

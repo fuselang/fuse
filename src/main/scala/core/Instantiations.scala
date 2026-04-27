@@ -12,7 +12,11 @@ import core.Terms.*
 import core.TypeChecker.*
 import core.Types.*
 import parser.Info.Info
-import core.Desugar.{MethodNamePrefix, SelfTypeName}
+import core.Desugar.{
+  MethodNamePrefix,
+  RecursiveFunctionParamPrefix,
+  SelfTypeName
+}
 import parser.Info.ShowInfo.ShowInfoOps
 import scala.annotation.tailrec
 import parser.Info.UnknownInfo
@@ -118,7 +122,15 @@ object Instantiations {
         typeNames <- tys
           .traverse(Representation.typeToString(_))
           .map(_.mkString(BindTypeSeparator))
-        baseName = s"$i$BindTypeSeparator$typeNames"
+        baseName = tys.isEmpty match {
+          // Empty `tys` => no specialization suffix. Without this guard the
+          // renderer emitted `$i#` (trailing separator), producing names
+          // like `!exec#IO#` that GRIN rejects with "non-defined function".
+          // The bare `$i` form aligns with the original impl-method id from
+          // `Desugar.toMethodID`, so the call resolves to that bind.
+          case true  => i
+          case false => s"$i$BindTypeSeparator$typeNames"
+        }
         name = cls match {
           // NOTE: When class is set on the instantiation it points to a type
           // instances's method. Hence we need to add a method prefix.
@@ -159,10 +171,13 @@ object Instantiations {
         acc.pure[StateEither]
       case (assocProj @ TermAssocProj(_, ty, method), _, _) if tys.nonEmpty =>
         // Direct static method term (not yet wrapped in TermApp)
-        // Captures type solutions from innermost TypeAll unwrapping
+        // Captures type solutions from innermost TypeAll unwrapping.
+        // See the comment on the `(_: TermApp, assocProj, _)` case below for
+        // why trait resolution is required here.
         for {
           typeName <- EitherT.liftF(getNameFromType(ty))
-          methodID = Desugar.toMethodID(method, typeName)
+          traitOpt <- findMethodTrait(typeName, method)
+          (methodID, _) <- resolveMethodId(typeName, method, traitOpt)
           resolvedTys <- tys.traverse(resolveTypeConstructorsInType(_))
         } yield acc :+ Instantiation(methodID, assocProj, resolvedTys, cls)
       case (
@@ -171,10 +186,11 @@ object Instantiations {
             _
           ) if tys.nonEmpty =>
         // Direct method projection with type solutions (not wrapped in
-        // TermApp). Only fires for method calls with a single value
-        // argument: multi-argument method calls are caught by the outer
-        // `TermApp`/`TermMethodProj` case below, so collecting here would
-        // double-add them.
+        // TermApp). For trait methods the arity-1 guard avoids
+        // double-collection with downstream trait-method paths; for
+        // non-trait impl methods no other path collects, so the guard
+        // is relaxed there. Without the relaxation, multi-arg impl
+        // methods would produce a missing specialized bind at GRIN-gen.
         for {
           (objType, _) <- pureInfer(obj)
           typeName <- EitherT.liftF(getNameFromType(objType))
@@ -192,7 +208,16 @@ object Instantiations {
             case Some(idx) =>
               getType(UnknownInfo, idx).map(t => Some(getValueArity(t)))
           }
-          result <- methodArity.contains(1) match {
+          arityOk = (methodArity, traitOpt) match {
+            // Non-trait impl method: any non-zero arity collects
+            // (Loophole M).
+            case (Some(a), None) => a >= 1
+            // Trait method or unknown arity: preserve legacy arity-1
+            // guard to avoid double-collection.
+            case (Some(a), _) => a == 1
+            case _            => false
+          }
+          result <- arityOk match {
             case false => acc.pure[StateEither]
             case true  =>
               for {
@@ -204,7 +229,8 @@ object Instantiations {
               } yield acc :+ Instantiation(methodID, methodTerm, finalTys, cls)
           }
         } yield result
-      case (_: TermApp, methodTerm @ TermMethodProj(_, obj, method), _) =>
+      case (_: TermApp, methodTerm @ TermMethodProj(_, obj, method), _)
+          if tys.nonEmpty =>
         for {
           (objType, _) <- pureInfer(obj) // type of the object, not the method
           typeName <- EitherT.liftF(getNameFromType(objType))
@@ -256,10 +282,22 @@ object Instantiations {
           if tys.nonEmpty =>
         // Handle static method calls with type solutions
         // Type solutions preserve their full structure (including TypeApp wrappers)
-        // so that distinct specializations get distinct monomorphized names
+        // so that distinct specializations get distinct monomorphized names.
+        //
+        // Trait-method resolution: when `Type::method` refers to a method
+        // provided via a `impl Trait for Type` block, the bind id is
+        // `toTypeInstanceMethodID(method, typeName, traitName) =
+        // "!method#Type#Trait"`, not `toMethodID(method, typeName) =
+        // "!method#Type"`. Without consulting `findMethodTrait`, the AssocProj
+        // path produces an inst whose `i` lacks the trait qualifier, and
+        // `bindName()` then resolves to a non-existent bind. The closure
+        // calling that bind in GRIN renders e.g. `unitIO' p143` instead of
+        // `unitIOMonadi32' p143`, which the GRIN linker rejects as
+        // "illegal code".
         for {
           typeName <- EitherT.liftF(getNameFromType(ty))
-          methodID = Desugar.toMethodID(method, typeName)
+          traitOpt <- findMethodTrait(typeName, method)
+          (methodID, _) <- resolveMethodId(typeName, method, traitOpt)
           resolvedTys <- tys.traverse(resolveTypeConstructorsInType(_))
           existingInst = acc.find(_.i == methodID)
           // Look up the method's type arity to limit accumulation
@@ -306,6 +344,15 @@ object Instantiations {
               .traverse(isWellFormed(_))
               .map(_.reduce(_ && _))
           )
+          // Resolve bare TypeVars that point to top-level TypeAbbBinds into
+          // stable TypeId references. Without this, types captured here
+          // (e.g. the `T = List` solution of a trait-bounded generic like
+          // `fmap[A, B, T: Functor]`) carry De Bruijn indices that become
+          // invalid once monomorphization reshapes the binding context,
+          // producing names like `fmap#i32#i32#_T125` and dropping the
+          // inst from `discoverItems` because the stale TypeVar fails
+          // `isTypeFullyResolved`.
+          resolvedTys <- tys.traverse(resolveTypeConstructorsInType(_))
           fInsts <- acc.filterA(_.isTypeResolved().map(_ == false))
           r = fInsts.find(_.term == rootTerm) match {
             case Some(existing) =>
@@ -316,7 +363,7 @@ object Instantiations {
                 case _                =>
                   acc.map {
                     case i if i.term == rootTerm && isFormedSolution =>
-                      Instantiation(i.i, i.term, i.tys ::: tys, i.cls)
+                      Instantiation(i.i, i.term, i.tys ::: resolvedTys, i.cls)
                     case e => e
                   }
               }
@@ -326,10 +373,17 @@ object Instantiations {
       case (termVar @ TermVar(info, idx, c), _, _) =>
         for {
           optionName <- EitherT.liftF(State.inspect(indexToName(_, idx)))
-          name <- optionName match {
+          rawName <- optionName match {
             case Some(name) => name.pure[StateEither]
             case None       => TypeError.format(NotFoundTypeError(info))
           }
+          // Strip the recursion-combinator parameter prefix so the inst names
+          // the top-level generic bind (which is what gets specialized), not
+          // the inner synthetic ^foo parameter from
+          // `Desugar.withFixCombinator`. Without this, `bindName()` would
+          // yield "^foo#i32" while the actual spec bind is "foo#i32",
+          // leaving the recursive self-call unrewritten by MonoRewrite.
+          name = rawName.stripPrefix(RecursiveFunctionParamPrefix)
           // Data constructors are uppercase and don't contain specialized suffix
           isDataConstructor = isDataConstrName(name)
           // Skip closure parameters - these are runtime values, not generic functions
@@ -424,7 +478,7 @@ object Instantiations {
     * monomorphization the constructor name is stable across context changes.
     */
   def resolveTypeConstructorsInType(ty: Type): StateEither[Type] = ty match {
-    case TypeApp(info, tv @ TypeVar(tvInfo, idx, _), ty2) =>
+    case TypeApp(info, tv @ TypeVar(tvInfo, idx, _, _), ty2) =>
       for {
         binding <- getBinding(tvInfo, idx).recover { case _ =>
           TermAbbBind(TermUnit(UnknownInfo), None)
@@ -441,7 +495,7 @@ object Instantiations {
         resolvedTy1 <- resolveTypeConstructorsInType(ty1)
         resolvedTy2 <- resolveTypeConstructorsInType(ty2)
       } yield TypeApp(info, resolvedTy1, resolvedTy2)
-    case tv @ TypeVar(tvInfo, idx, _) =>
+    case tv @ TypeVar(tvInfo, idx, _, _) =>
       // Resolve bare TypeVars pointing to concrete TypeAbbBind (user-defined ADTs)
       // to stable TypeId names so they survive context changes in monomorphization.
       for {

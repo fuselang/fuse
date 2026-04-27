@@ -25,6 +25,7 @@ case class NestedPatternNotSupportedDesugarError(info: Info)
     extends DesugarError
 case class DoRequiresYieldExprDesugarError(info: Info) extends DesugarError
 case class DoExpectsAssignmentDesugarError(info: Info) extends DesugarError
+case class MainIONestedDesugarError(info: Info) extends DesugarError
 
 object DesugarError {
   def format[T](error: DesugarError): StateEither[T] =
@@ -56,5 +57,10 @@ object DesugarError {
         consoleError("yield expression not found", info)
       case DoExpectsAssignmentDesugarError(info) =>
         consoleError("assignment expression expected", info)
+      case MainIONestedDesugarError(info) =>
+        consoleError(
+          "`main` cannot return a nested `IO` type; unwrap to a single `IO[T]`",
+          info
+        )
     })
 }

@@ -24,6 +24,11 @@ case class BuildFile(file: String, includeStdlib: Boolean = true)
     extends Command
 case class CheckFile(file: String, includeStdlib: Boolean = true)
     extends Command
+case class RunFile(
+    file: String,
+    args: List[String] = Nil,
+    includeStdlib: Boolean = true
+) extends Command
 
 /** Build pipeline errors. */
 sealed trait BuildError
@@ -72,12 +77,22 @@ object Fuse
       fileOpts.map(f => CheckFile(f))
     }
 
-  val compilerCommand: Opts[Command] = buildCommand `orElse` checkCommand
+  val runCommand: Opts[RunFile] =
+    Opts.subcommand("run", "Compile and run a fuse source code file.") {
+      (
+        fileOpts,
+        Opts.arguments[String](metavar = "args").orEmpty.map(_.toList)
+      ).mapN((f, as) => RunFile(f, as))
+    }
+
+  val compilerCommand: Opts[Command] =
+    buildCommand `orElse` checkCommand `orElse` runCommand
 
   override def main: Opts[IO[ExitCode]] =
     compilerCommand.map {
       case c: BuildFile => build(c)
       case c: CheckFile => check(c)
+      case c: RunFile   => run(c)
     }
 
   /** Build pipeline using EitherT for short-circuit error handling. */
@@ -101,6 +116,52 @@ object Fuse
         IO.println(formatBuildError(err)).as(ExitCode.Error)
     }
   }
+
+  /** Compile and run a Fuse source file, forwarding stdio and exit code. */
+  def run(command: RunFile): IO[ExitCode] =
+    runFile(command.file, command.args, command.includeStdlib, executeInherited)
+      .flatMap {
+        case Right(code) => IO.pure(code)
+        case Left(err)   =>
+          IO.println(formatBuildError(err)).as(ExitCode.Error)
+      }
+
+  /** Shared compile-then-execute pipeline. Builds the Fuse source to a native
+    * binary, runs the binary via the supplied executor, and removes the `.grin`
+    * and `.out` intermediates regardless of executor outcome.
+    */
+  def runFile[A](
+      file: String,
+      args: List[String],
+      includeStdlib: Boolean,
+      executor: (Path, List[String]) => IO[A]
+  ): IO[Either[BuildError, A]] = {
+    val paths = BuildPaths.fromSource(file)
+    val pipeline: EitherT[IO, BuildError, A] = for {
+      _ <- compileFuseToGrin(BuildFile(file, includeStdlib), paths)
+      _ <- compileGrinWithGC(paths)
+      _ <- EitherT.right[BuildError](
+        cleanupIntermediateFiles(List(paths.grin))
+      )
+      result <- EitherT.right[BuildError](
+        executor(paths.output, args)
+          .guarantee(cleanupIntermediateFiles(List(paths.output)))
+      )
+    } yield result
+    pipeline.value
+  }
+
+  /** Executor for `run` that forwards stdin/stdout/stderr to the child and
+    * returns the child's exit code as the CLI exit code.
+    */
+  def executeInherited(exe: Path, args: List[String]): IO[ExitCode] =
+    IO.blocking {
+      val code = new ProcessBuilder((exe.toString +: args)*)
+        .inheritIO()
+        .start()
+        .waitFor()
+      ExitCode(code)
+    }
 
   /** Format build error for display. */
   def formatBuildError(error: BuildError): String = error match {

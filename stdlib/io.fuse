@@ -25,3 +25,20 @@ fun read(path: str) -> IO[str]
 
 fun write(path: str, content: str) -> IO[Unit]
   MkIO(_ => _file_write(path, content))
+
+fun get_args() -> IO[List[str]]
+  let collect_args = (i: i32, acc: List[str]) => {
+    match i < 0:
+      true => acc
+      false => collect_args(i - 1, Cons(_args_get(i), acc))
+  }
+  MkIO(_ => collect_args(_args_count(()) - 1, Nil))
+
+fun read_stdin_acc(acc: str) -> str
+  let line = _read_stdin(())
+  match str_len(line) == 0:
+    true => acc
+    false => read_stdin_acc(acc + line)
+
+fun read_stdin() -> IO[str]
+  MkIO(_ => read_stdin_acc(""))
