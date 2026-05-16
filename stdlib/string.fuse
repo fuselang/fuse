@@ -1,0 +1,37 @@
+fun char_at(s: str, i: i32) -> i32
+  _string_char_at(s, i)
+
+fun substring(s: str, start: i32, end: i32) -> str
+  _string_substring(s, start, end)
+
+fun str_len(s: str) -> i32
+  _string_len(s)
+
+fun is_whitespace(c: i32) -> bool
+  c == 32 || c == 9 || c == 10 || c == 13
+
+fun is_digit(c: i32) -> bool
+  c >= 48 && c <= 57
+
+fun is_lower(c: i32) -> bool
+  c >= 97 && c <= 122
+
+fun is_upper(c: i32) -> bool
+  c >= 65 && c <= 90
+
+fun is_alpha(c: i32) -> bool
+  is_lower(c) || is_upper(c)
+
+fun is_alnum(c: i32) -> bool
+  is_alpha(c) || is_digit(c)
+
+fun is_ident_start(c: i32) -> bool
+  is_alpha(c) || c == 95
+
+fun is_ident_cont(c: i32) -> bool
+  is_alnum(c) || c == 95
+
+fun repeat(s: str, n: i32) -> str
+  match n <= 0:
+    true => ""
+    false => s + repeat(s, n - 1)

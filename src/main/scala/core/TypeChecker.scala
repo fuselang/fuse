@@ -37,7 +37,7 @@ object TypeChecker {
           _ <- checkTypeInstanceMethodBinding(bind.i, binding)
           _ <- checkTypeInstance(bind.i, binding)
           id <- EitherT.liftF(addBinding(bind.i, binding))
-        } yield Bind(id, binding, insts)
+        } yield Bind(id, binding, insts, closureTypesFromInsts(insts))
       )
       .flatMap(binds =>
         binds.exists { bind => bind.i == MainFunction } match {
@@ -45,6 +45,109 @@ object TypeChecker {
           case false => TypeError.format(MainFunctionNotFoundTypeError())
         }
       )
+
+  /** Build `Bind.closureTypes` from `Resolution.Closure` insts.
+    *
+    * Without this seed, monomorphic binds reach GRIN-gen with
+    * `closureTypesFromBind = Map.empty`, and the closure-type lookup falls
+    * through to `pureInfer`. Two failure modes surface there:
+    *
+    *   1. **Identity-shape closures** (`λr. r`): the `TermClosure(_, _, None,
+    *      _)` infer arm mints two fresh EVars and the body's `check (TermVar
+    *      0)` only unifies them with each other. Neither side gets pinned to a
+    *      concrete base, producing a fully-EVar arrow as the apply-dispatch
+    *      key.
+    *   2. **Body-uses-stale-context closures**: `pureInfer` errors out when the
+    *      body references identifiers whose De-Bruijn indices don't resolve in
+    *      the GRIN-gen Context. The closure's `typeKey` ends up empty,
+    *      `closureMap` lacks an entry, and the dispatch site falls back to the
+    *      all-arity bucket producing a heterogeneous dispatch.
+    *
+    * Both cases are addressed by seeding `Bind.closureTypes` with the concrete
+    * arrow types that the bidirectional `check` already produced for every
+    * closure inst. The seed is keyed by `inst.i` (the closure parameter name).
+    * Multiple closures within the same bind that share a parameter name cannot
+    * be distinguished by name alone — those are filtered out and left to
+    * `pureInfer`, which is sufficient for the closures it can type.
+    *
+    * Only `TypeArrow` heads with no unsolved EVars are kept; partial/EVar
+    * arrows fall through to the `pureInfer` path which still has the existing
+    * structure-extraction recovery on top.
+    */
+  def closureTypesFromInsts(
+      insts: List[Instantiation]
+  ): Map[String, Type] =
+    insts
+      .filter(_.r == Resolution.Closure)
+      .filter(isIdentityClosureInst)
+      .flatMap(cInst =>
+        cInst.tys.headOption.collect {
+          case ty: TypeArrow if !containsUnsolvedEVar(ty) => cInst.i -> ty
+        }
+      )
+      .toMap
+
+  def isIdentityClosureInst(inst: Instantiation): Boolean = inst.term match {
+    case TermClosure(_, _, None, TermVar(_, 0, _)) => true
+    case _                                         => false
+  }
+
+  def containsUnsolvedEVar(ty: Type): Boolean = ty match {
+    case TypeEVar(_, _, _)    => true
+    case TypeArrow(_, t1, t2) =>
+      containsUnsolvedEVar(t1) || containsUnsolvedEVar(t2)
+    case TypeApp(_, t1, t2) =>
+      containsUnsolvedEVar(t1) || containsUnsolvedEVar(t2)
+    case TypeAll(_, _, _, _, t) => containsUnsolvedEVar(t)
+    case TypeRec(_, _, _, t)    => containsUnsolvedEVar(t)
+    case _                      => false
+  }
+
+  /** Structural test for raw generic TypeVars (referent = None). A TypeVar with
+    * `Some(name)` is a referent-encoded reference (Loophole K Option 1) to a
+    * type identifier (e.g. `List`) and is treated as resolved — its `typeToKey`
+    * produces the referent name. A `None` referent indicates a generic
+    * parameter without a fixed identifier; treat as unresolved. Used in
+    * `Grin.buildEnv` to filter `closureTypesGlobal` entries.
+    */
+  def hasUnresolvedTypeVar(ty: Type): Boolean = ty match {
+    case TypeVar(_, _, _, None)    => true
+    case TypeVar(_, _, _, Some(_)) => false
+    case TypeArrow(_, t1, t2)      =>
+      hasUnresolvedTypeVar(t1) || hasUnresolvedTypeVar(t2)
+    case TypeApp(_, t1, t2) =>
+      hasUnresolvedTypeVar(t1) || hasUnresolvedTypeVar(t2)
+    case TypeAll(_, _, _, _, t) => hasUnresolvedTypeVar(t)
+    case TypeRec(_, _, _, t)    => hasUnresolvedTypeVar(t)
+    case _                      => false
+  }
+
+  /** Structural test for an already-monomorphized ADT shape. Used by the
+    * `TermTApp` infer arm to recognize that `tyT1 = TypeRec(TypeVariant)` with
+    * no free type variables and no unsolved EVars is a residual
+    * type-application on a concrete constructor (e.g. `Nil[Node]` after `Nil`
+    * was already specialized to `List[Node]`). The `[T]` is then a no-op rather
+    * than an error.
+    */
+  def isMonomorphicAdt(ty: Type): Boolean = ty match {
+    case _: TypeRec => !containsUnsolvedEVar(ty) && !hasUnresolvedTypeVar(ty)
+    case _          => false
+  }
+
+  /** True iff `ty` is an arrow whose param AND return are both unsolved EVars
+    * (the `λr. r` identity-closure pattern that produces the pathological
+    * `"TypeEVar->TypeEVar"` typeKey). Used in `Grin.scala`'s closure-type
+    * resolution to detect when `pureInfer`'s result is the "fully unsolved"
+    * shape and the bidirectionally-checked seed should be preferred.
+    *
+    * Does *not* match arrows with one concrete side (e.g. `EVar -> i32`),
+    * preserving pre-existing dispatch behavior for `λ_. concrete_body` closures
+    * whose parameter stays unsolved because it's unused.
+    */
+  def isFullyEVarArrow(ty: Type): Boolean = ty match {
+    case TypeArrow(_, _: TypeEVar, _: TypeEVar) => true
+    case _                                      => false
+  }
 
   def checkBinding(
       b: Binding
@@ -63,13 +166,17 @@ object TypeChecker {
 
   def pureInfer(t: Term)(implicit
       checking: Boolean = true
-  ): StateEither[(Type, List[Instantiation])] = for {
-    m <- EitherT.liftF(addMark("p"))
-    (iT, insts) <- infer(t)
-    aT <- apply(iT)(shift = false)
-    aI <- insts.traverse(applyInst(_)(shift = false))
-    _ <- EitherT.liftF(peel(m))
-  } yield (aT, aI)
+  ): StateEither[(Type, List[Instantiation])] = {
+    val body: StateEither[(Type, List[Instantiation])] = for {
+      (iT, insts) <- infer(t)
+      aT <- apply(iT)(shift = false)
+      aI <- insts.traverse(applyInst(_)(shift = false))
+    } yield (aT, aI)
+    for {
+      m <- EitherT.liftF(addMark("p"))
+      result <- EitherT(body.value.flatMap(r => peel(m).map(_ => r)))
+    } yield result
+  }
 
   /** Infers a type for `exp` with input context `ctx`.
     * @return
@@ -119,11 +226,21 @@ object TypeChecker {
           resolvedType <- EitherT.liftF(State.inspect { (ctx: Context) =>
             resolveTypeConstructors(eAS1, ctx)
           })
+          // Store the closure's full arrow type (param + return) in the
+          // instantiation's `tys`. Storing only the param type loses the
+          // return-type witness, which downstream `closureTypesMap` builds
+          // and the GRIN-side `closureTypesFromBind` consumer need to
+          // compute a concrete-arrow typeKey. Without it, the lookup query
+          // falls through to the all-arity branch and the GRIN HPT analyzer
+          // rejects the merged type-env on shared closure bodies. Existing
+          // consumers already match on `TypeArrow` and extract what they
+          // need, so the broader form is structurally backward-compatible.
           closureInst = Instantiation(
             i = variable, // Use variable name as identifier
             term = TermClosure(info, variable, None, expr),
-            tys =
-              List(resolvedType), // The resolved parameter type with TypeIds
+            tys = List(
+              TypeArrow(info, resolvedType, typeShift(-1, eCS))
+            ),
             cls = List(),
             r = Resolution.Closure
           )
@@ -209,13 +326,34 @@ object TypeChecker {
       case TermAssocProj(info, ty, method) =>
         for {
           tyS <- EitherT.liftF(simplifyType(ty))
-          rootTypeVarOption = findRootTypeVar(ty)
-          typeBounds <- EitherT.liftF(
-            getTypeBounds(rootTypeVarOption.getOrElse(tyS))
-          )
-          // If method is already specialized, extract the base method name
-          baseMethod = SpecializedMethodUtils.extractBaseMethodName(method)
-          assocMethodType <- inferMethod(ty, tyS, typeBounds, baseMethod, info)
+          specializedType <- SpecializedMethodUtils.isSpecializedMethod(
+            method
+          ) match {
+            case false =>
+              EitherT.rightT[ContextState, Error](Option.empty[Type])
+            case true =>
+              for {
+                idxOpt <- EitherT.liftF(
+                  State.inspect((ctx: Context) => nameToIndex(ctx, method))
+                )
+                ty <- idxOpt.traverse(getType(info, _))
+              } yield ty
+          }
+          assocMethodType <- specializedType match {
+            case Some(ty) => ty.pure[StateEither]
+            case None     =>
+              for {
+                rootTypeVarOption <- EitherT.rightT[ContextState, Error](
+                  findRootTypeVar(ty)
+                )
+                typeBounds <- EitherT.liftF(
+                  getTypeBounds(rootTypeVarOption.getOrElse(tyS))
+                )
+                baseMethod =
+                  SpecializedMethodUtils.extractBaseMethodName(method)
+                ty <- inferMethod(ty, tyS, typeBounds, baseMethod, info)
+              } yield ty
+          }
         } yield (assocMethodType, Nil)
       case TermFix(info, t1) =>
         for {
@@ -268,7 +406,7 @@ object TypeChecker {
             (TypeAll(info, v, kind, cls, t), insts)
           }
         } yield ty
-      case TermTApp(info, expr, ty2) =>
+      case t @ TermTApp(info, expr, ty2) =>
         for {
           k2 <- kindOf(ty2)
           (ty1, insts) <- pureInfer(expr)
@@ -283,10 +421,20 @@ object TypeChecker {
             // After monomorphization, a `TermTApp(TermVar(f), T)` may
             // reference an already-specialized bind whose type has already
             // had the TypeAll unwrapped — the TermTApp wrapper is residual.
-            // Return the already-specialized type unchanged instead of
-            // erroring.
+            // Return the un-simplified `ty1` so a recursive ADT type stays
+            // in compact `TypeApp(TypeId, T)` form rather than the unfolded
+            // `TypeRec(TypeVariant(...))` produced by `simplifyType`. The
+            // unfolded form would propagate up and fail subtyping against
+            // declared compact-form types.
             case _ if !checking =>
-              tyT1.pure[StateEither]
+              ty1.pure[StateEither]
+            // A monomorphized constructor reaches here with `tyT1` =
+            // `TypeRec(TypeVariant(...))` rather than a `TypeAll`. The
+            // TermTApp wrapper is residual — passing `ty1` through preserves
+            // the concrete type. Guarded on `isMonomorphicAdt` so a
+            // type-applied primitive (e.g. `tyT1 = TypeInt`) still errors.
+            case _ if isMonomorphicAdt(tyT1) =>
+              ty1.pure[StateEither]
             case _ =>
               TypeError.format(
                 TypeArgumentsNotAllowedTypeError(
@@ -295,7 +443,20 @@ object TypeChecker {
                 )
               )
           }
-        } yield (ty, insts)
+          // A bare `TermTApp(TermVar, T)` in argument or value position
+          // carries no inst by default — `infer` for application sites only
+          // calls `Instantiations.build` on the function position, so a
+          // TermTApp elsewhere falls through. Without an inst,
+          // `replaceInstantiations` cannot redirect the TermVar to its
+          // specialised bind, leaving its De Bruijn index stale. As the
+          // bind list grows (insertions from other specialisations), the
+          // stale index resolves to an unrelated binding.
+          //
+          // Calling `Instantiations.build` directly on the TermTApp here
+          // generates the inst. Build is a no-op for non-TermVar heads so
+          // this is safe in all callsites.
+          buildInsts <- Instantiations.build(t, Nil, insts)
+        } yield (ty, buildInsts)
       case TermMatch(info, exprTerm, cases) =>
         for {
           // Get the type of the expression to match.
@@ -654,8 +815,27 @@ object TypeChecker {
       }
 
   def computeType(ty: Type): StateOption[Type] = ty match {
-    case TypeVar(_, idx, ctxLen) =>
-      getTypeAbb(idx).orElse(recoverStaleTypeVar(idx, ctxLen))
+    case TypeVar(_, idx, ctxLen, referent) =>
+      // Loophole K Option 1: prefer name-based recovery via referent before
+      // falling back to uniform-shift `recoverStaleTypeVar`. The referent is
+      // the original top-level type name stamped at desugar time. After
+      // mid-list bind inserts (monomorphization specs), the stored idx may
+      // point to a wrong slot — name lookup recovers the current idx.
+      val nameRecovered: StateOption[Type] = referent match {
+        case Some(name) =>
+          OptionT
+            .liftF[ContextState, Option[Int]](State.inspect { (ctx: Context) =>
+              nameToIndex(ctx, name)
+            })
+            .flatMap {
+              case Some(newIdx) if newIdx != idx => getTypeAbb(newIdx)
+              case _                             => OptionT.none
+            }
+        case None => OptionT.none
+      }
+      getTypeAbb(idx)
+        .orElse(nameRecovered)
+        .orElse(recoverStaleTypeVar(idx, ctxLen))
     case TypeApp(info, TypeAbs(_, _, tyT12), tyT2) =>
       OptionT.some[ContextState](typeSubstituteTop(tyT2, tyT12))
     case TypeApp(info, TypeId(_, name), tyT2) =>
@@ -680,9 +860,9 @@ object TypeChecker {
 
   @tailrec
   def findRootType(ty: Type): Type = ty match {
-    case v @ TypeVar(_, _, _) => v
-    case TypeApp(_, ty1, ty2) => findRootType(ty1)
-    case _                    => ty
+    case v @ TypeVar(_, _, _, _) => v
+    case TypeApp(_, ty1, ty2)    => findRootType(ty1)
+    case _                       => ty
   }
 
   @tailrec
@@ -702,7 +882,7 @@ object TypeChecker {
       })
 
   def getTypeBounds(ty: Type): ContextState[List[TypeClass]] = ty match {
-    case TypeVar(info, index, _) =>
+    case TypeVar(info, index, _, _) =>
       Context
         .getBinding(UnknownInfo, index)
         .getOrElse(List())
@@ -754,8 +934,8 @@ object TypeChecker {
         _ <- checkKindStar(ty1)
         _ <- checkKindStar(ty1)
       } yield KindStar
-    case TypeVar(info, idx, _) => getKind(info, idx)
-    case TypeId(info, name)    =>
+    case TypeVar(info, idx, _, _) => getKind(info, idx)
+    case TypeId(info, name)       =>
       // TypeId might be a monomorphized type or a type constructor
       // Try to look it up in the context
       for {
@@ -905,6 +1085,8 @@ object TypeChecker {
   def check(
       exp: Term,
       t: Type
+  )(implicit
+      checking: Boolean = true
   ): StateEither[(List[Instantiation], List[TypeESolutionBind])] =
     (exp, t) match {
       // 1I :: ((), 1)
@@ -1286,11 +1468,31 @@ object TypeChecker {
         } yield b1 && b2
       case (TypeRec(_, x1, k1, tyS1), TypeRec(_, _, k2, tyT1)) if k1 == k2 =>
         Context.addName(x1).flatMap(_ => isTypeEqual(tyS1, tyT1))
-      case (TypeVar(_, idx1, len1), TypeVar(_, idx2, len2)) =>
+      case (
+            TypeVar(_, idx1, _, Some(name1)),
+            TypeVar(_, idx2, _, Some(name2))
+          ) if name1 == name2 =>
+        // Loophole K Option 1: when both TypeVars carry the same referent
+        // and resolve to a top-level type abbreviation in the current
+        // context, treat them as equal regardless of idx drift. This
+        // sidesteps mid-list-insert displacement that the uniform shift
+        // can't compensate for. Local type-parameter binders
+        // (TypeVarBind) still require idx match because their names can
+        // shadow across nested scopes.
+        State.inspect { ctx =>
+          val notes = Context.getNotes(ctx).toList
+          val resolvesToTypeAbb = (n: Int) =>
+            (n >= 0 && n < notes.length) && (notes(n)._2 match {
+              case _: TypeAbbBind => true
+              case _              => false
+            })
+          (idx1 == idx2) || (resolvesToTypeAbb(idx1) && resolvesToTypeAbb(idx2))
+        }
+      case (TypeVar(_, idx1, _, _), TypeVar(_, idx2, _, _)) =>
         (idx1 == idx2).pure
-      case (TypeVar(_, idx, _), TypeId(_, id)) =>
+      case (TypeVar(_, idx, _, _), TypeId(_, id)) =>
         State.inspect(ctx => Context.indexToName(ctx, idx).contains(id))
-      case (TypeId(_, id), TypeVar(_, idx, _)) =>
+      case (TypeId(_, id), TypeVar(_, idx, _, _)) =>
         State.inspect(ctx => Context.indexToName(ctx, idx).contains(id))
       case (TypeRecord(_, f1), TypeRecord(_, f2)) if f1.length == f2.length =>
         f1.traverse { case (l1, tyT1) =>
@@ -1346,7 +1548,7 @@ object TypeChecker {
     case TypeApp(info, ctor, param) =>
       // Resolve constructor if it's a TypeVar
       val resolvedCtor = ctor match {
-        case TypeVar(_, idx, _) =>
+        case TypeVar(_, idx, _, _) =>
           // Look up the binding at this index
           Context.indexToName(ctx, idx) match {
             case Some(name) =>

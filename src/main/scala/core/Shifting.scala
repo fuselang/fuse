@@ -66,7 +66,7 @@ object Shifting {
     termMap(
       (info, c, k, n) =>
         if (k >= c) TermVar(info, k - 1, n - 1) else TermVar(info, k, n - 1),
-      (c, tyT) => typeSubstitute(tyS, c, tyT),
+      (c, tyT) => typeSubstituteTopAt(tyS, c, tyT),
       c,
       t
     )
@@ -196,6 +196,17 @@ object Shifting {
   def typeSubstituteTop(tyS: Type, tyT: Type): Type =
     typeShift(-1, typeSubstitute(typeShift(1, tyS), 0, tyT))
 
+  /** Generalization of `typeSubstituteTop` to substitute at arbitrary depth
+    * `c`, applying the closing downshift to indices strictly greater than `c`.
+    * The standard `typeSubstituteTop` is the special case `c = 0`.
+    *
+    * Used when a term-level traversal has crossed `c` binders before reaching
+    * the embedded type, so the eliminated `TermTAbs` slot lives at unified
+    * index `c` rather than `0`.
+    */
+  def typeSubstituteTopAt(tyS: Type, c: Int, tyT: Type): Type =
+    typeShiftAbove(-1, c + 1, typeSubstitute(typeShift(1, tyS), c, tyT))
+
   /** Substitutes `TypeVar` instances having `c` index with `tyS` type in
     * provided `tyT` type .
     */
@@ -231,7 +242,12 @@ object Shifting {
     */
   def typeMap(onVar: ShiftVarFunc[Type], c: Int, t: Type): Type = {
     def iter(c: Int, tyT: Type): Type = tyT match {
-      case TypeVar(info, x, n)          => onVar(info, c, x, n)
+      case input @ TypeVar(info, x, n, _) =>
+        onVar(info, c, x, n) match {
+          case out @ TypeVar(outInfo, _, _, None) if outInfo eq info =>
+            out.copy(referent = input.referent)
+          case other => other
+        }
       case TypeEVar(_, _, _)            => tyT
       case TypeAny(_)                   => tyT
       case TypeId(_, _)                 => tyT

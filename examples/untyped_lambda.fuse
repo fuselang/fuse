@@ -1,7 +1,3 @@
-type Option[T]:
-    None
-    Some(T)
-
 type Term:
     Var(index: i32, ctxlen: i32)
     Abs(hint: str, body: Term)
@@ -71,8 +67,7 @@ fun term_to_str(t: Term) -> str
         App(t1, t2) => "(" + term_to_str(t1) + " " + term_to_str(t2) + ")"
 
 fun println(s: str) -> Unit
-    print(s + "\n")
-    ()
+    print(s + "\n").exec()
 
 fun main() -> i32
     let id = Abs("x", Var(0, 1))

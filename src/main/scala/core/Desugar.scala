@@ -92,7 +92,9 @@ object Desugar {
       } yield List(typeBind)
     case FFuncDecl(sig @ FFuncSig(_, FIdentifier(i), tp, _, _), exprs) => {
       for {
-        func <- Context.runE(buildFunc(tp, sig, exprs))
+        rewritten <- rewriteMainIOReturn(i, sig, exprs)
+        (effSig, effExprs) = rewritten
+        func <- Context.runE(buildFunc(tp, effSig, effExprs))
         funcBind <- bindTermAbb(i, func)
       } yield List(funcBind)
     }
@@ -180,6 +182,45 @@ object Desugar {
       } yield typeClassInstanceBind +: methodBinds
     case _ =>
       DesugarError.format(DeclarationNotSupportedDesugarError(d.info))
+  }
+
+  def rewriteMainIOReturn(
+      i: String,
+      sig: FFuncSig,
+      exprs: Seq[FExpr]
+  ): StateEither[(FFuncSig, Seq[FExpr])] = sig.r match {
+    case ioTy @ FSimpleType(info, FIdentifier("IO"), Some(Seq(innerT)))
+        if i == TypeChecker.MainFunction =>
+      innerT match {
+        case FSimpleType(_, FIdentifier("IO"), _) =>
+          DesugarError.format(MainIONestedDesugarError(info))
+        case _ =>
+          val tmpName = "__main_io_action"
+          val ioLet = FLetExpr(
+            info,
+            FIdentifier(tmpName),
+            Some(ioTy),
+            exprs.takeRight(1)
+          )
+          val execLet = FLetExpr(
+            info,
+            FIdentifier("_"),
+            None,
+            Seq(
+              FMethodApp(
+                info,
+                FProj(info, FVar(info, tmpName), Seq(FVar(info, "exec"))),
+                None,
+                Seq(None)
+              )
+            )
+          )
+          val newSig = sig.copy(r = FSimpleType(info, FIdentifier("i32"), None))
+          val newExprs =
+            exprs.dropRight(1) :+ ioLet :+ execLet :+ FInt(info, 0)
+          (newSig, newExprs).pure[StateEither]
+      }
+    case _ => (sig, exprs).pure[StateEither]
   }
 
   def bindTypeAbb(i: String, t: Type): StateEither[Bind] =
@@ -898,7 +939,17 @@ object Desugar {
     })
     typeVar <- value match {
       case (ctx, Some(index)) =>
-        TypeVar(info, index, ctx._1.length).pure[StateEither]
+        // Loophole K Option 1: stamp every TypeVar with the original
+        // name as `referent`. At consumption time,
+        // `typeShiftOnContextDiff` checks the *current* binding kind
+        // for that name: top-level type abbreviations
+        // (TypeAbbBind) get name-based recovery to sidestep mid-list
+        // insert drift; local type-parameter binders (TypeVarBind)
+        // fall through to uniform shift. The discrimination cannot
+        // happen here at desugar time because top-level types are
+        // staged as NameBind first and only promoted to TypeAbbBind
+        // during type-checking (`checkBindings`).
+        TypeVar(info, index, ctx._1.length, Some(i)).pure[StateEither]
       case _ => DesugarError.format(TypeVariableNotFoundDesugarError(info, i))
     }
   } yield typeVar

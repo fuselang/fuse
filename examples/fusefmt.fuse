@@ -1,0 +1,455 @@
+type Token:
+    TKeyword(name: str)
+    TIdent(name: str)
+    TInt(value: i32)
+    TStr(value: str)
+    TOp(text: str)
+    TPunct(c: str)
+    TComment(text: str)
+    TNewline
+    TIndent(width: i32)
+    TEof
+
+type ScanStep:
+    StepEmit(np: i32, ls: bool, tok: Token)
+    StepSkip(np: i32)
+    StepEnd
+
+fun str_eq_at(s: str, t: str, i: i32, n: i32) -> bool
+    match i >= n:
+        true => true
+        false => {
+            match char_at(s, i) == char_at(t, i):
+                true => str_eq_at(s, t, i + 1, n)
+                false => false
+        }
+
+fun str_eq(s: str, t: str) -> bool
+    let sl = str_len(s)
+    let tl = str_len(t)
+    match sl == tl:
+        true => str_eq_at(s, t, 0, sl)
+        false => false
+
+fun is_keyword(s: str) -> bool
+    str_eq(s, "fun") || str_eq(s, "let") || str_eq(s, "match") || str_eq(s, "type") || str_eq(s, "impl") || str_eq(s, "trait") || str_eq(s, "do") || str_eq(s, "if") || str_eq(s, "import") || str_eq(s, "for") || str_eq(s, "true") || str_eq(s, "false") || str_eq(s, "Unit") || str_eq(s, "self")
+
+fun two_char_op(c1: i32, c2: i32) -> bool
+    (c1 == 61 && c2 == 62) || (c1 == 45 && c2 == 62) || (c1 == 60 && c2 == 45) || (c1 == 61 && c2 == 61) || (c1 == 33 && c2 == 61) || (c1 == 60 && c2 == 61) || (c1 == 62 && c2 == 61) || (c1 == 38 && c2 == 38) || (c1 == 124 && c2 == 124) || (c1 == 58 && c2 == 58)
+
+fun is_one_char_op(c: i32) -> bool
+    c == 61 || c == 60 || c == 62 || c == 43 || c == 45 || c == 42 || c == 47 || c == 37 || c == 33
+
+fun is_punct_char(c: i32) -> bool
+    c == 40 || c == 41 || c == 91 || c == 93 || c == 123 || c == 125 || c == 44 || c == 58 || c == 46 || c == 59
+
+fun parse_int_chars(src: str, pos: i32, end: i32, acc: i32) -> i32
+    match pos >= end:
+        true => acc
+        false => parse_int_chars(src, pos + 1, end, acc * 10 + (char_at(src, pos) - 48))
+
+fun count_indent_end(src: str, pos: i32, len: i32) -> i32
+    match pos >= len:
+        true => pos
+        false => {
+            match char_at(src, pos) == 32:
+                true => count_indent_end(src, pos + 1, len)
+                false => pos
+        }
+
+fun scan_ident_end(src: str, pos: i32, len: i32) -> i32
+    match pos >= len:
+        true => pos
+        false => {
+            match is_ident_cont(char_at(src, pos)):
+                true => scan_ident_end(src, pos + 1, len)
+                false => pos
+        }
+
+fun scan_int_end(src: str, pos: i32, len: i32) -> i32
+    match pos >= len:
+        true => pos
+        false => {
+            match is_digit(char_at(src, pos)):
+                true => scan_int_end(src, pos + 1, len)
+                false => pos
+        }
+
+fun scan_string_end(src: str, pos: i32, len: i32) -> i32
+    match pos >= len:
+        true => pos
+        false => {
+            match char_at(src, pos) == 34:
+                true => pos
+                false => {
+                    match char_at(src, pos) == 92 && pos + 1 < len:
+                        true => {
+                            let nx = char_at(src, pos + 1)
+                            match nx == 92 || nx == 34:
+                                true => scan_string_end(src, pos + 2, len)
+                                false => scan_string_end(src, pos + 1, len)
+                        }
+                        false => scan_string_end(src, pos + 1, len)
+                }
+        }
+
+fun scan_comment_end(src: str, pos: i32, len: i32) -> i32
+    match pos >= len:
+        true => pos
+        false => {
+            match char_at(src, pos) == 10:
+                true => pos
+                false => scan_comment_end(src, pos + 1, len)
+        }
+
+fun classify_ident(text: str) -> Token
+    match is_keyword(text):
+        true => TKeyword(text)
+        false => TIdent(text)
+
+fun peek_at(src: str, pos: i32, len: i32) -> i32
+    match pos < len:
+        true => char_at(src, pos)
+        false => 0
+
+fun advance_after_string(e: i32, len: i32) -> i32
+    match e < len:
+        true => e + 1
+        false => e
+
+fun step_indent(src: str, pos: i32, len: i32) -> ScanStep
+    let e = count_indent_end(src, pos, len)
+    let n = e - pos
+    StepEmit(e, false, TIndent(n))
+
+fun step_comment(src: str, pos: i32, len: i32) -> ScanStep
+    let e = scan_comment_end(src, pos + 1, len)
+    let txt = substring(src, pos + 1, e)
+    StepEmit(e, false, TComment(txt))
+
+fun step_string(src: str, pos: i32, len: i32) -> ScanStep
+    let e = scan_string_end(src, pos + 1, len)
+    let txt = substring(src, pos + 1, e)
+    let np = advance_after_string(e, len)
+    StepEmit(np, false, TStr(txt))
+
+fun step_int(src: str, pos: i32, len: i32) -> ScanStep
+    let e = scan_int_end(src, pos, len)
+    let v = parse_int_chars(src, pos, e, 0)
+    StepEmit(e, false, TInt(v))
+
+fun step_ident(src: str, pos: i32, len: i32) -> ScanStep
+    let e = scan_ident_end(src, pos + 1, len)
+    let txt = substring(src, pos, e)
+    StepEmit(e, false, classify_ident(txt))
+
+fun step_op_or_punct(src: str, pos: i32, len: i32, c: i32) -> ScanStep
+    let c2 = peek_at(src, pos + 1, len)
+    match two_char_op(c, c2):
+        true => StepEmit(pos + 2, false, TOp(substring(src, pos, pos + 2)))
+        false => {
+            match is_one_char_op(c):
+                true => StepEmit(pos + 1, false, TOp(substring(src, pos, pos + 1)))
+                false => {
+                    match is_punct_char(c):
+                        true => StepEmit(pos + 1, false, TPunct(substring(src, pos, pos + 1)))
+                        false => StepSkip(pos + 1)
+                }
+        }
+
+fun step_body(src: str, pos: i32, len: i32, c: i32) -> ScanStep
+    match c == 10:
+        true => StepEmit(pos + 1, true, TNewline)
+        false => {
+            match c == 32 || c == 9:
+                true => StepSkip(pos + 1)
+                false => {
+                    match c == 35:
+                        true => step_comment(src, pos, len)
+                        false => {
+                            match c == 34:
+                                true => step_string(src, pos, len)
+                                false => {
+                                    match is_digit(c):
+                                        true => step_int(src, pos, len)
+                                        false => {
+                                            match is_ident_start(c):
+                                                true => step_ident(src, pos, len)
+                                                false => step_op_or_punct(src, pos, len, c)
+                                        }
+                                }
+                        }
+                }
+        }
+
+fun next_step(src: str, pos: i32, len: i32, line_start: bool) -> ScanStep
+    match pos >= len:
+        true => StepEnd
+        false => {
+            match line_start:
+                true => step_indent(src, pos, len)
+                false => step_body(src, pos, len, char_at(src, pos))
+        }
+
+fun scan(src: str, pos: i32, len: i32, line_start: bool, acc: List[Token]) -> List[Token]
+    match next_step(src, pos, len, line_start):
+        StepEnd => Cons(TEof, acc).reverse()
+        StepSkip(np) => scan(src, np, len, false, acc)
+        StepEmit(np, ls, tok) => scan(src, np, len, ls, Cons(tok, acc))
+
+fun lex(src: str) -> List[Token]
+    scan(src, 0, str_len(src), true, Nil[Token])
+
+type Node:
+    NTok(t: Token)
+    NGroup(items: List[Node])
+    NLine(indent: i32, items: List[Node])
+    NBlank
+
+type ParseRes:
+    PR(rem: List[Token], items: List[Node])
+
+fun open_to_close(c: str) -> str
+    match str_eq(c, "("):
+        true => ")"
+        false => {
+            match str_eq(c, "["):
+                true => "]"
+                false => "}"
+        }
+
+impl Token:
+    fun is_open_punct(self) -> bool
+        match self:
+            TPunct(c) => str_eq(c, "(") || str_eq(c, "[") || str_eq(c, "{")
+            _ => false
+
+    fun is_close_punct(self) -> bool
+        match self:
+            TPunct(c) => str_eq(c, ")") || str_eq(c, "]") || str_eq(c, "}")
+            _ => false
+
+    fun punct_text(self) -> str
+        match self:
+            TPunct(c) => c
+            _ => ""
+
+    fun matching_close(self) -> str
+        match self:
+            TPunct(c) => open_to_close(c)
+            _ => ""
+
+    fun matches_close(self, expected: str) -> bool
+        match str_len(expected) > 0:
+            true => self.is_close_punct() && str_eq(self.punct_text(), expected)
+            false => false
+
+    fun is_no_lead_punct(self) -> bool
+        match self:
+            TPunct(c) => str_eq(c, ",") || str_eq(c, ";") || str_eq(c, ":") || str_eq(c, ".") || str_eq(c, ")") || str_eq(c, "]") || str_eq(c, "}")
+            TOp(s) => str_eq(s, "::")
+            _ => false
+
+    fun is_no_trail_punct(self) -> bool
+        match self:
+            TPunct(c) => str_eq(c, "(") || str_eq(c, "[") || str_eq(c, "{") || str_eq(c, ".")
+            TOp(s) => str_eq(s, "::")
+            _ => false
+
+    fun is_whitespace(self) -> bool
+        match self:
+            TNewline => true
+            TIndent(_) => true
+            _ => false
+
+    fun is_ident(self) -> bool
+        match self:
+            TIdent(_) => true
+            _ => false
+
+    fun is_call_open(self) -> bool
+        match self:
+            TPunct(c) => str_eq(c, "(") || str_eq(c, "[")
+            _ => false
+
+    fun is_call_target_close(self) -> bool
+        match self:
+            TPunct(c) => str_eq(c, ")") || str_eq(c, "]")
+            _ => false
+
+fun group_seq(tokens: List[Token], close: str, acc: List[Node]) -> ParseRes
+    match tokens:
+        Nil => PR(Nil[Token], acc.reverse())
+        Cons(h, rest) => {
+            match h.matches_close(close):
+                true => PR(rest, Cons(NTok(h), acc).reverse())
+                false => {
+                    match h.is_open_punct():
+                        true => {
+                            let mc = h.matching_close()
+                            match group_seq(rest, mc, Cons(NTok(h), Nil[Node])):
+                                PR(rem, inner) => group_seq(rem, close, Cons(NGroup(inner), acc))
+                        }
+                        false => group_seq(rest, close, Cons(NTok(h), acc))
+                }
+        }
+
+fun group_all(tokens: List[Token]) -> List[Node]
+    match group_seq(tokens, "", Nil):
+        PR(_, items) => items
+
+fun close_line(indent: i32, items: List[Node]) -> Node
+    match items:
+        Nil => NBlank
+        Cons(_, _) => NLine(indent, items.reverse())
+
+fun slice_lines_at(nodes: List[Node], ci: i32, ci_items: List[Node], acc: List[Node]) -> List[Node]
+    match nodes:
+        Nil => {
+            match ci_items:
+                Nil => acc.reverse()
+                Cons(_, _) => Cons(close_line(ci, ci_items), acc).reverse()
+        }
+        Cons(h, rest) => {
+            match h:
+                NTok(t) => {
+                    match t:
+                        TNewline => slice_lines_at(rest, 0, Nil, Cons(close_line(ci, ci_items), acc))
+                        TIndent(n) => slice_lines_at(rest, n, ci_items, acc)
+                        TEof => slice_lines_at(rest, ci, ci_items, acc)
+                        _ => slice_lines_at(rest, ci, Cons(h, ci_items), acc)
+                }
+                _ => slice_lines_at(rest, ci, Cons(h, ci_items), acc)
+        }
+
+fun slice_lines(nodes: List[Node]) -> List[Node]
+    slice_lines_at(nodes, 0, Nil, Nil)
+
+fun parse(tokens: List[Token]) -> List[Node]
+    slice_lines(group_all(tokens))
+
+fun round_indent(n: i32) -> i32
+    let level = n / 4
+    let extra = n % 4
+    match extra >= 2:
+        true => (level + 1) * 4
+        false => level * 4
+
+fun spaces(n: i32) -> str
+    match n <= 0:
+        true => ""
+        false => " " + spaces(n - 1)
+
+fun should_space(prev: Token, curr: Token) -> bool
+    match curr.is_whitespace():
+        true => false
+        false => {
+            match prev.is_whitespace():
+                true => false
+                false => {
+                    match curr.is_no_lead_punct():
+                        true => false
+                        false => {
+                            match prev.is_no_trail_punct():
+                                true => false
+                                false => {
+                                    match (prev.is_ident() || prev.is_call_target_close()) && curr.is_call_open():
+                                        true => false
+                                        false => true
+                                }
+                        }
+                }
+        }
+
+type EmitState:
+    ES(text: str, prev: Option[Token])
+
+fun space_before(prev: Option[Token], curr: Token) -> str
+    match prev:
+        None => ""
+        Some(p) => {
+            match should_space(p, curr):
+                true => " "
+                false => ""
+        }
+
+fun emit_token(t: Token) -> str
+    match t:
+        TKeyword(n) => n
+        TIdent(n) => n
+        TInt(v) => int_to_str(v)
+        TStr(s) => "\"" + s + "\""
+        TOp(s) => s
+        TPunct(c) => c
+        TComment(s) => "#" + s
+        TNewline => "\n"
+        TIndent(n) => spaces(round_indent(n))
+        TEof => ""
+
+fun emit_inline(items: List[Node], prev: Option[Token]) -> EmitState
+    match items:
+        Nil => ES("", prev)
+        Cons(h, t) => {
+            match h:
+                NTok(tk) => {
+                    let sep = space_before(prev, tk)
+                    let txt = emit_token(tk)
+                    match emit_inline(t, Some(tk)):
+                        ES(rest, fp) => ES(sep + txt + rest, fp)
+                }
+                NGroup(inner) => {
+                    let g: List[Node] = inner
+                    match emit_inline(g, prev):
+                        ES(itext, after) => {
+                            let p: Option[Token] = after
+                            match emit_inline(t, p):
+                                ES(rest, fp) => ES(itext + rest, fp)
+                        }
+                }
+                _ => emit_inline(t, prev)
+        }
+
+fun emit_line_str(items: List[Node]) -> str
+    match emit_inline(items, None):
+        ES(text, _) => text
+
+fun emit_doc(lines: List[Node], blank_run: i32, acc: str) -> str
+    match lines:
+        Nil => acc
+        Cons(h, t) => {
+            match h:
+                NLine(ind, items) => emit_doc(t, 0, acc + spaces(round_indent(ind)) + emit_line_str(items) + "\n")
+                NBlank => {
+                    match blank_run >= 2:
+                        true => emit_doc(t, blank_run + 1, acc)
+                        false => emit_doc(t, blank_run + 1, acc + "\n")
+                }
+                NTok(_) => emit_doc(t, blank_run, acc)
+                NGroup(_) => emit_doc(t, blank_run, acc)
+        }
+
+fun format(src: str) -> str
+    emit_doc(parse(lex(src)), 0, "")
+
+fun run_format(path: str) -> IO[i32]
+    do:
+        src <- read(path)
+        _ <- print(format(src))
+        0
+
+fun run_format_stdin() -> IO[i32]
+    do:
+        src <- read_stdin()
+        _ <- print(format(src))
+        0
+
+fun choose_action(args: List[str]) -> IO[i32]
+    match args.length() >= 1:
+        true => run_format(args.head_or(""))
+        false => run_format_stdin()
+
+fun main() -> IO[i32]
+    do:
+        args <- get_args()
+        r <- choose_action(args)
+        r

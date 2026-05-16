@@ -6,14 +6,16 @@ object GrinPrelude {
     ("_prim_int_print", "_prim_int_print     :: T_Int64 -> T_Int64"),
     ("_prim_usleep", "_prim_usleep        :: T_Int64 -> T_Int64"),
     ("_prim_string_print", "_prim_string_print  :: T_String -> T_Int64"),
-    ("_prim_read_string", "_prim_read_string   :: T_String"),
+    ("_prim_read_string", "_prim_read_string   :: T_Int64 -> T_String"),
     ("_prim_error", "_prim_error         :: T_String -> T_Int64"),
     ("_prim_ffi_file_eof", "_prim_ffi_file_eof  :: T_Int64 -> T_Int64"),
     ("_prim_file_read", "_prim_file_read     :: T_String -> T_String"),
     (
       "_prim_file_write",
       "_prim_file_write    :: T_String -> T_String -> T_Int64"
-    )
+    ),
+    ("_prim_args_count", "_prim_args_count    :: T_Int64 -> T_Int64"),
+    ("_prim_args_get", "_prim_args_get      :: T_Int64 -> T_String")
   )
 
   val ffiPure: List[(String, String)] = List(
@@ -45,7 +47,15 @@ object GrinPrelude {
     ("_prim_str_int", "_prim_str_int        :: T_String -> T_Int64"),
     ("_prim_int_float", "_prim_int_float      :: T_Int64 -> T_Float"),
     ("_prim_float_string", "_prim_float_string   :: T_Float -> T_String"),
-    ("_prim_char_int", "_prim_char_int       :: T_Char  -> T_Int64")
+    ("_prim_char_int", "_prim_char_int       :: T_Char  -> T_Int64"),
+    (
+      "_prim_string_char_at",
+      "_prim_string_char_at   :: T_String -> T_Int64 -> T_Int64"
+    ),
+    (
+      "_prim_string_substring",
+      "_prim_string_substring :: T_String -> T_Int64 -> T_Int64 -> T_String"
+    )
   )
 
   val primopPure: List[(String, String)] = List(

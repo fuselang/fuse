@@ -151,7 +151,7 @@ object Context {
       node: String
   ): ContextState[Option[TypeVar]] =
     findAlgebraicDataType(info, node).map(
-      _.map(v => TypeVar(info, v._2, v._3))
+      _.map(v => TypeVar(info, v._2, v._3, Some(v._1._1)))
     )
 
   def getAlgebraicDataTypeName(
@@ -199,12 +199,35 @@ object Context {
     * Required to do so when an existential variables gets resolved _deep_ in
     * the context but doesn't get shifted once _out_ of it. Usually that happens
     * in closures.
+    *
+    * Loophole K Option 1: TypeVars stamped with `referent = Some(name)` use
+    * **name-based recovery** instead of uniform shift. The uniform shift is
+    * correct for closure entry/exit (referent didn't move, ctx grew/shrunk
+    * uniformly) but over-shifts when mid-list inserts in the bind list displace
+    * the referent's absolute position by less than the total ctx growth. Name
+    * lookup is invariant under mid-list inserts: the binding's name doesn't
+    * move when adjacent specs get inserted. When the lookup succeeds, return a
+    * fresh TypeVar with up-to-date `(idx, length)` and the same `referent`
+    * carried forward. When the lookup fails (name was removed or shadowed),
+    * fall through to the legacy uniform shift.
     */
   def typeShiftOnContextDiff(ty: Type): ContextState[Type] = ty match {
-    case TypeVar(_, _, varContextLength) =>
+    case tv: TypeVar =>
       State.inspect { ctx =>
-        val d = varContextLength - getNotes(ctx).toList.length
-        typeShift(-d, ty)
+        val notes = getNotes(ctx).toList
+        val curLen = notes.length
+        // Verify the recovered binding is still a type abbreviation. If a
+        // same-named term shadowed the type (unlikely but possible after
+        // rewrites), the `collect` filters it out and we fall through to
+        // uniform shift.
+        val recovered = tv.referent.flatMap(name =>
+          nameToIndex(ctx, name).flatMap(newIdx =>
+            notes.lift(newIdx).collect { case (_, _: TypeAbbBind) =>
+              TypeVar(tv.info, newIdx, curLen, Some(name))
+            }
+          )
+        )
+        recovered.getOrElse(typeShift(curLen - tv.length, tv))
       }
     case TypeApp(info, ty1, ty2) =>
       for {

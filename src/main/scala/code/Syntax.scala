@@ -21,7 +21,7 @@ object Syntax {
       f: String,
       arity: Int,
       ptag: Option[String] =
-        None, // Track which P-tag this variable holds (e.g., "P2c18")
+        None, // Track which P-tag this variable holds (e.g., "P2foo")
       typeKey: String = "" // Type signature for closureMap lookup
   ) extends Expr
   case class PartialFunValue(
@@ -66,14 +66,35 @@ object Syntax {
       paramTypeKeys: List[String] // Per-level param types for grouping
   )
 
+  /** Structural signature for closure dispatch. Replaces the prior string-keyed
+    * `closureMap` so polymorphic queries (e.g. `A->B`) can unify with concrete
+    * entries (e.g. `i32->i32`) via `unifiesWith`, and concrete queries can
+    * still match exactly. The string form (recoverable via `toTypeKey`) is
+    * preserved for downstream consumers (e.g. `applyFnForClosure`,
+    * `closureToTypeKey`) that still take typeKey strings.
+    */
+  case class ClosureSig(paramKeys: List[String], returnKey: String) {
+    def toTypeKey: String = paramKeys match {
+      case Nil  => returnKey
+      case keys => (keys :+ returnKey).mkString("->")
+    }
+  }
+
   /** Environment containing all closure-related maps for GRIN code generation.
     * Used as a single implicit parameter instead of multiple scattered maps.
     */
   case class Env(
-      closureMap: Map[String, List[String]] = Map.empty,
+      closureMap: Map[ClosureSig, List[String]] = Map.empty,
       arityFactsMap: Map[String, ArityFact] = Map.empty,
       closureTypesFromBind: Map[String, Type] = Map.empty,
       closureTypesFallback: Map[String, Type] = Map.empty,
+      // Global last-resort map: aggregates concrete-arrow closure-Resolution
+      // insts across all binds. Used when `pureInfer(c)`,
+      // `getClosureTypeWithFallback(c)`, and `closureTypesFallback` all fail
+      // to produce a closure's type at GRIN-gen — typically when a closure
+      // body references identifiers that don't resolve in the post-Mono
+      // Context, leaving its `typeKey` empty without this seed.
+      closureTypesGlobal: Map[String, Type] = Map.empty,
       // typeInstances maps typeName -> set of trait class names it impls.
       // Built once over the full bind list so forward references work during
       // sequential rendering (trait default method specializations can call
@@ -184,6 +205,13 @@ object Syntax {
               case args => s"pure ($tag ${args.mkString(" ")})"
             }
             show"$variable =\n${indent(1, body)}"
+          // A bare nullary FunctionValue body (e.g. `empty'i32 _76 = MyNone'i32`)
+          // emits the function call directly with proper indentation. Without
+          // this branch the value falls through to `PureExpr`, whose `case _`
+          // calls `expr.show` and drops the leading indent — producing GRIN
+          // input that `grin` rejects with "incorrect indentation".
+          case FunctionValue(f, 0, _, _) =>
+            show"$variable =\n${indent(1, f)}"
           case _ =>
             show"$variable =\n${PureExpr(e)}"
         }

@@ -45,10 +45,22 @@ object Representation {
       buildContext: Boolean = false
   ): StateEither[String] =
     t match {
-      case TypeVar(_, idx, n) =>
+      case TypeVar(_, idx, n, referent) =>
         EitherT(State.inspect { ctx =>
-          Context
-            .indexToName(ctx, idx)
+          // Loophole K Option 1: when the referent is set and resolves to a
+          // top-level TypeAbbBind, prefer it over indexToName(idx). Drifted
+          // idx may point to an unrelated bind (e.g. a primop or method
+          // spec) — using the referent yields the user-facing type name.
+          val notes = Context.getNotes(ctx).toList
+          val referentName: Option[String] = referent.flatMap { name =>
+            Context.nameToIndex(ctx, name).flatMap { resolvedIdx =>
+              notes.lift(resolvedIdx).collect { case (_, _: TypeAbbBind) =>
+                name
+              }
+            }
+          }
+          referentName
+            .orElse(Context.indexToName(ctx, idx))
             .orElse(
               // Fallback for TypeVars with out-of-range indices (e.g., negative
               // from over-shifting). Use placeholder to avoid crashing during

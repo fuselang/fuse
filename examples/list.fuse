@@ -1,7 +1,3 @@
-type List[A]:
-    Cons(h: A, t: List[A])
-    Nil
-
 trait Functor[A]:
     fun map[B](self, f: A -> B) -> Self[B];
 
@@ -39,7 +35,7 @@ impl Functor[A] for List[A]:
 fun fmap[A, B, T: Functor](f: A -> B, c: T[A]) -> T[B]
     c.map(f)
 
-fun main() -> i32
+fun main() -> IO[Unit]
     let l = Cons(2, Cons(3, Nil))
     let l1 = fmap(v => v + 1, l)
     let l2 = Cons(7, Nil)
@@ -47,7 +43,5 @@ fun main() -> i32
     let l4 = l3.filter(e => e > 3)
     let s = List::sum(l4)
     let p = List::product(l4)
-    let io = print(int_to_str(s + p))
-    io.exec()
-    0
-      
+    print(int_to_str(s + p))
+

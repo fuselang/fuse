@@ -1,19 +1,9 @@
-type Option[A]:
-    None
-    Some(A)
-
-impl Option[A]:
-    fun map[B](self, f: A -> B) -> Option[B]
-        match self:
-            Some(v) => Some(f(v))
-            _ => None
-
 fun main() -> i32
     let o = Some(5)
     let o1 = o.map(a => a + 1)
     match o1:
         Some(v) => {
-            print(int_to_str(v))
+            print(int_to_str(v)).exec()
             0
         }
         None => 1

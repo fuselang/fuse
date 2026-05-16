@@ -106,11 +106,14 @@ object GrinUtils {
       val constructorKey = typeToKey(constructor)
       val argKey = typeToKey(arg)
       s"$constructorKey[$argKey]"
-    case TypeVar(_, idx, _) =>
-      // TypeVars are problematic - just use a generic placeholder based on index
-      // This will likely cause mismatches, but better than crashing
-      s"T$idx"
-    case TypeId(_, name) =>
+    case TypeVar(_, idx, _, Some(name)) =>
+      // Loophole K Option 1: prefer the referent name (a stable
+      // type-constructor or generic-param identifier) over the
+      // De-Bruijn idx — idx drifts across mono epochs and can stamp
+      // unrelated names into apply-fn group keys.
+      name
+    case TypeVar(_, idx, _, _) => s"T$idx"
+    case TypeId(_, name)       =>
       name
     case TypeInt(_)             => "i32"
     case TypeFloat(_)           => "f32"
@@ -197,6 +200,25 @@ object GrinUtils {
         case (state, _) => state
       }
       ._2
+
+  /** Parse a typeKey string into a structural `ClosureSig`. Splits on top-level
+    * `->` (nested arrows inside `[...]` are preserved as atomic). For non-arrow
+    * keys (no top-level `->`), returns an empty paramKeys list with the whole
+    * key as the return key.
+    */
+  def parseTypeKey(typeKey: String): ClosureSig = {
+    val arrows = topLevelArrowIndices(typeKey)
+    arrows.isEmpty match {
+      case true  => ClosureSig(Nil, typeKey)
+      case false =>
+        val paramKeys =
+          (0 until arrows.length).toList.map(i =>
+            extractParamTypeAt(typeKey, i)
+          )
+        val returnKey = typeKey.substring(arrows.last + 2)
+        ClosureSig(paramKeys, returnKey)
+    }
+  }
 
   /** Get closure arity without type-checking (avoids De Bruijn index issues) */
   def getClosureArity(c: Term): Int = c match {
@@ -331,14 +353,14 @@ object GrinUtils {
   }
 
   def typeArgToString(ty: Type): ContextState[String] = ty match {
-    case TypeInt(_)         => State.pure("i32")
-    case TypeFloat(_)       => State.pure("f32")
-    case TypeString(_)      => State.pure("str")
-    case TypeBool(_)        => State.pure("bool")
-    case TypeUnit(_)        => State.pure("Unit")
-    case TypeId(_, name)    => State.pure(name)
-    case TypeVar(_, idx, _) => getNameFromIndex(idx)
-    case TypeApp(_, t1, t2) =>
+    case TypeInt(_)            => State.pure("i32")
+    case TypeFloat(_)          => State.pure("f32")
+    case TypeString(_)         => State.pure("str")
+    case TypeBool(_)           => State.pure("bool")
+    case TypeUnit(_)           => State.pure("Unit")
+    case TypeId(_, name)       => State.pure(name)
+    case TypeVar(_, idx, _, _) => getNameFromIndex(idx)
+    case TypeApp(_, t1, t2)    =>
       for {
         s1 <- typeArgToString(t1)
         s2 <- typeArgToString(t2)
@@ -401,6 +423,43 @@ object GrinUtils {
               })
           )
         } yield result
+      // Loophole L Option B (extended): non-specialized method projection
+      // (`exec`, `map`, …) on a TermVar receiver. The cached generic
+      // `!{m}#{IO}` impl method is *gone* after monomorphization (mono
+      // replaces it with type-arg-suffixed specs like `!exec#IO#i32`).
+      // Look up the type-arg-suffixed impl method using the receiver's
+      // concrete type-arg name; if found, use its TermAbbBind.ty (already
+      // post-substitution at mono time) to skip `typeCheck(t1)`.
+      case TermMethodProj(_, TermVar(_, selfIdx, _), m)
+          if !fuse.SpecializedMethodUtils.isSpecializedMethod(m) =>
+        for {
+          selfTypeOpt <- toContextStateOption(
+            Context.getType(UnknownInfo, selfIdx)
+          )
+          result <- selfTypeOpt.flatMap(typeConstructorNameDirect) match {
+            case None           => State.pure[Context, Option[Type]](None)
+            case Some(typeName) =>
+              val baseMethodID = Desugar.toMethodID(m, typeName)
+              val argSuffix = selfTypeOpt
+                .flatMap(typeAppArg)
+                .flatMap(typeArgSuffixName)
+              val methodID =
+                argSuffix.fold(baseMethodID)(suf => s"$baseMethodID#$suf")
+              for {
+                methodIdxOpt <- State
+                  .inspect[Context, Option[Int]](nameToIndex(_, methodID))
+                methodTyOpt <- methodIdxOpt match {
+                  case None      => State.pure[Context, Option[Type]](None)
+                  case Some(idx) =>
+                    toContextStateOption(getBinding(UnknownInfo, idx))
+                      .map(_.flatMap {
+                        case TermAbbBind(_, Some(ty)) => Some(ty)
+                        case _                        => None
+                      })
+                }
+              } yield methodTyOpt
+          }
+        } yield result
       case TermVar(_, idx, _) =>
         // Handle specialized data constructors (e.g., Cons#i32, Nil#i32)
         for {
@@ -418,57 +477,37 @@ object GrinUtils {
       case _ => State.pure(None)
     }
 
-  // CallCategory: Categorize function calls following GHC-GRIN pattern
-  // This enables explicit handling of saturated, under-saturated, and over-saturated calls
-  sealed trait CallCategory
-  case class SaturatedCall(fn: String, args: List[String]) extends CallCategory
-  case class UndersaturatedCall(fn: String, args: List[String], remaining: Int)
-      extends CallCategory
-  case class OversaturatedCall(
-      fn: String,
-      initialArgs: List[String],
-      extraArgs: List[String]
-  ) extends CallCategory
-
-  /** Categorize a function call based on arity facts.
-    * @param fn
-    *   Function name
-    * @param args
-    *   Arguments provided
-    * @param expectedArity
-    *   Expected number of arguments (from ArityFact)
-    * @return
-    *   CallCategory indicating saturated, undersaturated, or oversaturated
-    */
-  def categorizeCall(
-      fn: String,
-      args: List[String],
-      expectedArity: Int
-  ): CallCategory = {
-    val providedCount = args.length
-    providedCount.compare(expectedArity) match {
-      case 0          => SaturatedCall(fn, args)
-      case x if x < 0 =>
-        UndersaturatedCall(fn, args, expectedArity - providedCount)
-      case _ =>
-        OversaturatedCall(
-          fn,
-          args.take(expectedArity),
-          args.drop(expectedArity)
-        )
-    }
+  def typeConstructorNameDirect(ty: Type): Option[String] = ty match {
+    case TypeApp(_, TypeVar(_, _, _, Some(name)), _) => Some(name)
+    case TypeApp(_, TypeId(_, name), _)              => Some(name)
+    case _                                           => None
   }
 
-  /** Categorize a closure call using ArityFact. For closures, expectedArity =
-    * totalParams - capturedVars (dispatch arity)
+  def typeAppArg(ty: Type): Option[Type] = ty match {
+    case TypeApp(_, _, arg) => Some(arg)
+    case _                  => None
+  }
+
+  /** Render a type as its mono spec-name suffix component (e.g. `i32`, `str`,
+    * `Unit`, `List[str]`). Mirrors how `MonoSpecialize` encodes type arguments
+    * into bind names. Returns `None` for non-canonical shapes (e.g. open
+    * `TypeVar` without referent or type-app without a constructor name) so
+    * callers fall through.
     */
-  def categorizeClosureCall(
-      fn: String,
-      args: List[String],
-      fact: ArityFact
-  ): CallCategory = {
-    val dispatchArity = fact.totalParams - fact.capturedVars
-    categorizeCall(fn, args, dispatchArity)
+  def typeArgSuffixName(ty: Type): Option[String] = ty match {
+    case TypeInt(_)                   => Some("i32")
+    case TypeFloat(_)                 => Some("f32")
+    case TypeBool(_)                  => Some("bool")
+    case TypeString(_)                => Some("str")
+    case TypeUnit(_)                  => Some("Unit")
+    case TypeId(_, name)              => Some(name)
+    case TypeVar(_, _, _, Some(name)) => Some(name)
+    case TypeApp(_, head, arg)        =>
+      for {
+        h <- typeArgSuffixName(head)
+        a <- typeArgSuffixName(arg)
+      } yield s"$h[$a]"
+    case _ => None
   }
 
   object PrimOp:

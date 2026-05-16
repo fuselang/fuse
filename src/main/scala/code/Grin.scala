@@ -46,6 +46,33 @@ object Grin {
     case _                       => false
   }
 
+  /** Loophole N — Single Canonical Type Lookup (SCTL).
+    *
+    * Single source of truth for an unannotated closure's full arrow type at
+    * GRIN-gen time. Used by path 1 (`toClosureAbs` None arm) and as a
+    * last-resort by path 2 (`toClosureValue` cascade). Paths 3 and 4 inherit
+    * transitively from paths 1 and 2.
+    *
+    * Reads from `closureTypesFromBind` (Mono-populated for generic binds)
+    * first, then `closureTypesGlobal` (cross-bind aggregate with
+    * name-uniqueness drop). Filters the result to clean arrows — no unsolved
+    * EVars, no unresolved TypeVars (referent-encoded TypeVars with `Some(name)`
+    * count as resolved per Loophole K Option 1).
+    *
+    * Deliberately skips `closureTypesFallback`: the per-bind map keeps
+    * colliding names (last-write-wins) for path 2's type-class continuation
+    * dispatch, but that semantics is unsuitable here — SCTL must return either
+    * a precise type or None, never an arbitrary collision winner.
+    */
+  def canonicalClosureType(name: String)(implicit env: Env): Option[Type] =
+    env.closureTypesFromBind
+      .get(name)
+      .orElse(env.closureTypesGlobal.get(name))
+      .filter(ty =>
+        !TypeChecker.containsUnsolvedEVar(ty)
+          && !TypeChecker.hasUnresolvedTypeVar(ty)
+      )
+
   def isClosureTerm(t: Term): Boolean = t match {
     case _: TermClosure             => true
     case TermFix(_, c: TermClosure) => true
@@ -81,13 +108,13 @@ object Grin {
       (lambdaBindings, partialFunctions) = values.flatten.unzip
       applyFunction <- buildApply(partialFunctions.flatten)
     } yield {
-      val grinCode = (lambdaBindings.flatten.map(_.show) :+ applyFunction)
+      val raw = (lambdaBindings.flatten.map(_.show) :+ applyFunction)
         .mkString("\n\n")
         .replaceAll(
           "([a-zA-Z0-9])#",
           "$1'"
         ) // Replace # with ' in type specializations only
-        .replaceAll("[\\[\\]]", "") // Remove brackets from TypeApp names
+      val grinCode = stripBracketsOutsideStrings(raw)
       val ffi = generateMissingFFI(grinCode)
       ffi.isEmpty match {
         case true  => grinCode
@@ -95,6 +122,25 @@ object Grin {
       }
     }
     s.runEmptyA.value
+  }
+
+  // Strips `[` and `]` from TypeApp identifier names without touching the
+  // bytes inside GRIN string literals of the form `#"..."`. The unguarded
+  // global `replaceAll("[\\[\\]]", "")` previously deleted brackets from
+  // user string content too. The lit regex tolerates `\"` escapes so it
+  // stays correct for source strings containing escaped quotes.
+  def stripBracketsOutsideStrings(code: String): String = {
+    val grinStringLit = """#"(?:[^"\\]|\\.)*"""".r
+    val (acc, last) = grinStringLit
+      .findAllMatchIn(code)
+      .foldLeft(("", 0)) { case ((s, prev), m) =>
+        (
+          s + code.substring(prev, m.start).replaceAll("[\\[\\]]", "") +
+            m.matched,
+          m.end
+        )
+      }
+    acc + code.substring(last).replaceAll("[\\[\\]]", "")
   }
 
   /** Build Env by collecting partial functions from bindings and constructing
@@ -110,9 +156,36 @@ object Grin {
   def buildEnv(bindings: List[Bind]): Env = {
     val typeInstancesMap = buildTypeInstancesMap(bindings)
     val typeInstanceMethodsMap = buildTypeInstanceMethodsMap(bindings)
+    // Aggregate concrete-arrow closure types from all binds' insts. Used
+    // as a last-resort fallback in `toClosureValue` when both `pureInfer`
+    // and `getClosureTypeWithFallback` fail to type a closure at GRIN-gen
+    // — typically when the closure's body references identifiers that
+    // don't resolve in the post-Mono Context. Each bind contributes its
+    // own closure-Resolution insts, keyed by closure parameter name. Names
+    // that occur multiple times across binds are excluded — caller cannot
+    // disambiguate by name alone.
+    val closureTypesGlobal: Map[String, Type] = {
+      val candidates = bindings.flatMap(bind =>
+        bind.insts
+          .filter(_.r == core.Instantiations.Resolution.Closure)
+          .flatMap(cInst =>
+            cInst.tys.headOption.collect {
+              case ty: TypeArrow
+                  if !TypeChecker.containsUnsolvedEVar(ty)
+                    && !TypeChecker.hasUnresolvedTypeVar(ty) =>
+                cInst.i -> ty
+            }
+          )
+      )
+      val nameCounts = candidates.groupBy(_._1).view.mapValues(_.size).toMap
+      candidates.collect {
+        case (name, ty) if nameCounts.getOrElse(name, 0) == 1 => name -> ty
+      }.toMap
+    }
     val primingEnv = Env(
       typeInstances = typeInstancesMap,
-      typeInstanceMethods = typeInstanceMethodsMap
+      typeInstanceMethods = typeInstanceMethodsMap,
+      closureTypesGlobal = closureTypesGlobal
     )
     val primingFunctions = collectPartialFunctions(bindings, primingEnv)
     val primingEnvWithFunctions =
@@ -141,10 +214,10 @@ object Grin {
       env: Env,
       partialFunctions: List[PartialFunValue]
   ): Env = {
-    val closureMap: Map[String, List[String]] = partialFunctions
+    val closureMap: Map[ClosureSig, List[String]] = partialFunctions
       .filter(_.typeKey.nonEmpty)
-      .groupBy(_.typeKey)
-      .map { case (typeKey, pfs) => (typeKey, pfs.map(_.f).distinct) }
+      .groupBy(pf => parseTypeKey(pf.typeKey))
+      .map { case (sig, pfs) => (sig, pfs.map(_.f).distinct) }
     // Per-closure facts store raw parameter and return types. Merging of
     // unresolved parameter types into concrete sibling groups happens in
     // buildGroupedApply (via duplication) and in applyFnForClosure (at
@@ -160,7 +233,8 @@ object Grin {
     }.toMap
     env.copy(
       closureMap = closureMap,
-      arityFactsMap = arityFactsMap
+      arityFactsMap = arityFactsMap,
+      closureTypesGlobal = env.closureTypesGlobal
     )
   }
 
@@ -343,9 +417,45 @@ object Grin {
           case true  => pickConcreteParam(remaining, returnType).getOrElse(raw)
         }
       case None =>
-        siblingParam(remaining, returnType).getOrElse {
-          val p = extractParamTypeAt(typeKeyFallback, 0)
-          p.isEmpty match { case true => "unknown"; case false => p }
+        // Loophole N circumvent: when typeKeyFallback supplies a
+        // concrete first-parameter type AND a closure is actually
+        // registered with that paramType in the same
+        // (arity, returnType) bucket, prefer it over the
+        // non-deterministic `siblingParam` heuristic.
+        // `siblingParam` iterates `env.arityFactsMap.values`
+        // unsorted; its `.headOption` pick can flip when unrelated
+        // closures register/unregister, poisoning apply keys for
+        // call sites whose closure type is already known.
+        // The `concreteRegistered` check guarantees the picked
+        // paramType corresponds to an apply table that
+        // `buildGroupedApply` actually generated — without this
+        // guard, the fix could emit a dangling reference to a
+        // table that wouldn't exist (e.g.
+        // `apply1_unit_to_unit` when no concrete-unit-param
+        // closure for return=unit exists; only the unresolved
+        // sibling registered under `apply1_TypeEVar_to_unit`).
+        val raw = extractParamTypeAt(typeKeyFallback, 0)
+        val concreteRegistered =
+          (raw.nonEmpty && !isUnresolvedParamType(raw)) match {
+            case false => false
+            case true  =>
+              env.arityFactsMap.values.exists(af =>
+                af.totalParams >= remaining
+                  && af.returnTypeKey == returnType
+                  && af.paramTypeKeys
+                    .lift(af.totalParams - remaining)
+                    .contains(raw)
+              )
+          }
+        concreteRegistered match {
+          case true  => raw
+          case false =>
+            siblingParam(remaining, returnType).getOrElse {
+              raw.isEmpty match {
+                case true  => "unknown"
+                case false => raw
+              }
+            }
         }
     }
     applyFnName(remaining, paramType, returnType)
@@ -394,7 +504,7 @@ object Grin {
     * was created.
     */
   def resolveTypeConstructors(ty: Type): ContextState[Type] = ty match {
-    case TypeApp(info, tv @ TypeVar(tvInfo, idx, n), arg) =>
+    case TypeApp(info, tv @ TypeVar(tvInfo, idx, n, _), arg) =>
       for {
         currentCtxLen <- State.inspect { (ctx: Context) => ctx._1.length }
         adjustedIdx = currentCtxLen - n + idx
@@ -506,14 +616,17 @@ object Grin {
   ): ContextState[Option[(List[LambdaBinding], List[PartialFunValue])]] = {
     // Pass closure types from the Bind to GRIN generation.
     // Also pass resolved closure types from insts as fallback for unannotated closures.
+    // Use the symmetric guard already used by `closureTypesGlobal` —
+    // `containsUnsolvedEVar` + `hasUnresolvedTypeVar`. The previous
+    // `getTypeContextLength` filter dropped legitimate types whose
+    // constructors are referent-encoded TypeVars (Loophole K Option 1).
     val closureTypesFallback = binding.insts
       .filter(_.r == core.Instantiations.Resolution.Closure)
       .flatMap(cInst =>
         cInst.tys.headOption.collect {
           case ty: TypeArrow
-              if !MonoSpecialize
-                .getTypeContextLength(ty)
-                .isDefined =>
+              if !TypeChecker.containsUnsolvedEVar(ty)
+                && !TypeChecker.hasUnresolvedTypeVar(ty) =>
             cInst.i -> ty
         }
       )
@@ -1162,7 +1275,7 @@ object Grin {
         } yield expr
     }
 
-  // Helper: Extract closure name from P-tag (e.g., "P2c18" -> "c18")
+  // Helper: Extract closure name from P-tag (e.g., "P2foo" -> "foo")
   def closureFromTag(tag: String): String =
     tag.dropWhile(c => c == 'P' || c.isDigit)
 
@@ -1200,13 +1313,13 @@ object Grin {
       arity: Int,
       tKey: String = ""
   )(implicit env: Env): AppExpr = {
-    // Extract closure name from tag (e.g., "P2c18" -> "c18")
+    // Extract closure name from tag (e.g., "P2foo" -> "foo")
     val closureName = closureFromTag(tag)
 
     // If tKey is a closure name (no arrows), look up its typeKey from closureMap
     val closureToTypeKey: Map[String, String] = env.closureMap.flatMap {
-      case (typeKey, closureNames) =>
-        closureNames.map(cn => cn -> typeKey)
+      case (sig, closureNames) =>
+        closureNames.map(cn => cn -> sig.toTypeKey)
     }
 
     // Use closure name to look up typeKey, which contains the accurate type info
@@ -1235,8 +1348,8 @@ object Grin {
     // For each closure, look up its actual return type from closureMap (typeKey -> closures)
     // by finding which typeKey contains this closure, then extracting the return type
     val closureToTypeKey: Map[String, String] = env.closureMap.flatMap {
-      case (typeKey, closureNames) =>
-        closureNames.map(cn => cn -> typeKey)
+      case (sig, closureNames) =>
+        closureNames.map(cn => cn -> sig.toTypeKey)
     }
 
     // For each closure, dispatch to the appropriate apply function
@@ -1286,7 +1399,10 @@ object Grin {
       case (name, fact) if fact.totalParams == arity => name
     }.toList
 
-  // Helper: Lookup closures with fallback (no specialized variant expansion)
+  // Helper: Lookup closures with fallback. closureMap is keyed by
+  // structural `ClosureSig` (so `parseTypeKey(tKey)` becomes the lookup
+  // key); query semantics are exact match first, all-arity fallback when
+  // missing.
   def lookupClosures(tKey: String, arity: Int)(implicit
       env: Env
   ): List[String] =
@@ -1294,7 +1410,10 @@ object Grin {
     tKey.contains(",") match {
       case true  => tKey.split(",").toList
       case false =>
-        env.closureMap.getOrElse(tKey, getClosuresByArity(arity))
+        env.closureMap.getOrElse(
+          parseTypeKey(tKey),
+          getClosuresByArity(arity)
+        )
     }
 
   // Helper: Lookup single closure (for direct P-tag inference)
@@ -1374,9 +1493,21 @@ object Grin {
     // (avoids De Bruijn index issues when closure has stale indices from type-checking phase)
     arity = getClosureArity(c)
     // Compute typeKey from closure type - try multiple sources:
-    // 1. First try closureTypesFromBind (from monomorphization) - has accurate full arrow types
-    // 2. Then try type-checking the closure
-    // 3. Finally fall back to structure extraction
+    // 1. First try closureTypesFromBind. Two seeding paths populate this:
+    //    (a) `MonoSpecialize.finalizeSpecializedBind` for specialized
+    //        generic binds (legacy seed; carries spec-substituted arrow).
+    //    (b) `TypeChecker.closureTypesFromInsts` for monomorphic binds
+    //        whose closure is identity-shape (`λx. x`). Identity closures
+    //        are exactly the case where pureInfer provably leaks unsolved
+    //        EVars; non-identity closures are deliberately excluded so the
+    //        existing pureInfer path (step 2) keeps handling them with its
+    //        current behavior.
+    // 2. Then `pureInfer`. Returns EVar-laden arrows for closures the
+    //    initial bidirectional check left under-constrained. Pre-existing
+    //    dispatch tolerates the `"TypeEVar->T"` shape for `λ_.
+    //    concrete_body` style closures whose unused parameter stays
+    //    unsolved, so this path is kept as the second-class fallback.
+    // 3. Finally structure extraction, then `closureTypesFallback`.
     closureTypeFromBind = c match {
       case TermClosure(_, variable, _, _) =>
         env.closureTypesFromBind.get(variable)
@@ -1393,10 +1524,20 @@ object Grin {
             getClosureTypeWithFallback(c).map {
               case Some(ty) => Some(ty)
               case None     =>
-                // Last resort: check closure types from insts
+                // Last-resort lookup: per-bind closureTypesFallback (built
+                // from current binding's own insts) and the global aggregate
+                // closureTypesGlobal (built across all binds). The global
+                // map covers the case where the closure's body references
+                // identifiers that don't resolve in the post-Mono Context —
+                // pureInfer errors out and the per-bind fallbacks miss
+                // because the closure has been lambda-lifted out of its
+                // parent's bind, but the parent bind's insts still carry
+                // the bidirectionally-checked arrow.
                 c match {
                   case TermClosure(_, variable, _, _) =>
-                    env.closureTypesFallback.get(variable)
+                    env.closureTypesFallback
+                      .get(variable)
+                      .orElse(env.closureTypesGlobal.get(variable))
                   case _ => None
                 }
             }
@@ -1443,11 +1584,19 @@ object Grin {
           b <- toClosureAbs(body)
         } yield Abs(toParamVariable(variable2), b)
       case TermClosure(_, variable, None, body) =>
-        // TODO: Remove this simplification of variable type for closure,
-        // once all term closures are populated with var types during
-        // monomorphization phase. This logic is primarly used to test
-        // building inline lambdas without type annotations.
-        val variableType = TypeUnit(UnknownInfo)
+        // Route the unannotated parameter binding through SCTL.
+        // `canonicalClosureType(variable)` returns `Some(arrow)` when one
+        // of the trustworthy maps (closureTypesFromBind,
+        // closureTypesGlobal) has a clean arrow type for this closure.
+        // Extract the parameter type from the arrow's left side; fall
+        // back to TypeUnit when SCTL misses (preserves baseline for
+        // unrelated closures). Safe because `applyFnForClosure` is
+        // deterministic (typeKeyFallback takes priority over
+        // `siblingParam` when concrete and registered).
+        val variableType: Type = canonicalClosureType(variable) match {
+          case Some(TypeArrow(_, paramTy, _)) => paramTy
+          case _                              => TypeUnit(UnknownInfo)
+        }
         for {
           variable1 <- includeFunctionSuffix(variable, variableType)
           variable2 <- Context.addBinding(variable1, VarBind(variableType))

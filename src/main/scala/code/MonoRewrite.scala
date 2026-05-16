@@ -30,21 +30,45 @@ object MonoRewrite {
   /** Insert specialized binds into the bind list. Iterates over all binds and
     * creates specializations for those that have matching instantiations.
     * Accumulates De Bruijn index shifts as new binds are inserted.
+    *
+    * Returns the specialized bind list and a map from generic-bind name to the
+    * shifted source bind. The map is populated for BOTH the i-arm (binds
+    * specialised in this pass) and the Nil-arm (generic binds whose bodies are
+    * shifted by the accumulator but not specialised here) —
+    * `createMissingGenericSpecs` consumes the map to build deferred specs from
+    * the iter-shifted source rather than the unshifted `savedGenericBinds`.
+    * Without the Nil-arm coverage (Loophole D), a deferred spec built from an
+    * unshifted source produces TypeVars whose `n` is δ units below the GRIN
+    * context length, drifting names by δ slots at lookup time.
     */
   def toSpecializedBinds(
       binds: List[Bind],
       insts: List[Instantiation],
       allBindNames: Set[String] = Set.empty
-  ): ContextState[List[Bind]] =
+  ): ContextState[(List[Bind], Map[String, Bind])] =
     for {
       result <- binds
-        .foldLeftM((List[Bind](), List[Shift]())) {
-          case ((binds, shifts), bind) =>
+        .foldLeftM((List[Bind](), List[Shift](), Map[String, Bind]())) {
+          case ((binds, shifts, shiftedBinds), bind) =>
             getBindInstantiations(bind, insts).flatMap { bindInsts =>
               bindInsts match {
                 case Nil =>
                   val sbind = shifts.foldLeft(bind) { (b, s) =>
                     bindShift(s.d, b, s.c)
+                  }
+                  // Record the shifted version of every GENERIC bind whose
+                  // body gets bumped by the iteration-local accumulator
+                  // even when it is not itself specialised in this pass.
+                  // `createMissingGenericSpecs` later uses this map to
+                  // build deferred specs from the iter-shifted source bind
+                  // rather than the unshifted `savedGenericBinds` — without
+                  // this, the deferred spec's body retains pre-shift indices
+                  // while the bind list around it grew, producing the
+                  // cross-iteration drift class (Loophole D).
+                  val updatedShiftedBinds = bind.b match {
+                    case TermAbbBind(_: TermTAbs, _) =>
+                      shiftedBinds + (bind.i -> sbind)
+                    case _ => shiftedBinds
                   }
                   for {
                     _ <- addBinding(sbind.i, sbind.b)
@@ -56,14 +80,17 @@ object MonoRewrite {
                       sInsts,
                       sbind.closureTypes
                     )
-                  } yield (b, incrShifts(shifts))
+                  } yield (b, incrShifts(shifts), updatedShiftedBinds)
                 case i =>
+                  val shiftedSourceBind = shifts.foldLeft(bind) { (b, s) =>
+                    bindShift(s.d, b, s.c)
+                  }
                   for {
                     specializedBindsList <- i.zipWithIndex
                       .traverse((inst, idx) =>
                         for {
                           bind <- buildSpecializedBind(
-                            bind,
+                            shiftedSourceBind,
                             inst,
                             idx,
                             allBindNames
@@ -76,14 +103,15 @@ object MonoRewrite {
                     binds ::: specializedBindsList,
                     incrShifts(shifts) :+ Shift(
                       specializedBindsList.length - 1,
-                      0
-                    )
+                      1
+                    ),
+                    shiftedBinds + (bind.i -> shiftedSourceBind)
                   )
               }
             }
         }
-      (specializedBinds, _) = result
-    } yield specializedBinds
+      (specializedBinds, _, shiftedGenericBinds) = result
+    } yield (specializedBinds, shiftedGenericBinds)
 
   /** Find instantiations from the given list that match a specific bind. For
     * ADTs, all instantiations for that type are associated. For type instance
@@ -198,25 +226,71 @@ object MonoRewrite {
     case _             => false
   }
 
+  /** Create missing specializations for generic functions discovered via
+    * transitive instantiation resolution (i.e., after the main
+    * `toSpecializedBinds` pass has run). Each missing spec is inserted right
+    * after the last existing specialization of the same function.
+    *
+    * The `shiftedGenericBinds` map (produced by `toSpecializedBinds`) contains
+    * the SHIFTED version of each expanded generic bind — i.e., the version with
+    * accumulated De Bruijn index shifts applied. These shifted versions carry
+    * TypeVar `n` (context-length) fields that are consistent with the position
+    * those binds occupied in the context during the main specialization pass.
+    * Using the shifted version here is critical: the unshifted original from
+    * `savedGenericBinds` has TypeVar `n` values that are one or more units too
+    * small, causing `typeShiftOnContextDiff` in the GRIN backend to compute a
+    * wrong index offset and resolve type-name references to the wrong binding.
+    */
   def createMissingGenericSpecs(
       binds: List[Bind],
-      savedGenericBinds: Map[String, Bind]
-  ): ContextState[List[Bind]] = {
-    val unresolvedConcreteInsts = binds.flatMap(b =>
-      b.insts.filter(i =>
-        i.r == Resolution.Unresolved &&
-          !i.tys.exists(ty => getTypeContextLength(ty).isDefined) &&
-          i.tys.exists(isConcreteType(_))
+      savedGenericBinds: Map[String, Bind],
+      shiftedGenericBinds: Map[String, Bind] = Map.empty
+  ): ContextState[List[Bind]] = for {
+    // Bind-aware unresolvedness: keep insts whose remaining `TypeVar`s
+    // refer to top-level concrete types (TypeAbbBind), drop those that
+    // refer to still-unresolved generic params (TypeVarBind). See
+    // `MonoSpecialize.isFreeOfGenericTypeVar` for the rationale.
+    unresolvedConcreteInsts <- binds
+      .flatMap(_.insts)
+      .filterA(i =>
+        i.r match {
+          case Resolution.Unresolved =>
+            i.tys.forallM(ty => isFreeOfGenericTypeVar(ty)).map { freeOfGen =>
+              freeOfGen && i.tys.exists(isConcreteType(_))
+            }
+          case _ => false.pure[ContextState]
+        }
       )
-    )
-    val uniqueInsts = Instantiations.distinct(unresolvedConcreteInsts)
-    uniqueInsts.foldLeftM(binds) { (currentBinds, inst) =>
+    uniqueInsts = Instantiations.distinct(unresolvedConcreteInsts)
+    result <- uniqueInsts.foldLeftM(binds) { (currentBinds, inst) =>
       for {
         specName <- toContextState(inst.bindName())
         exists <- State.inspect { (ctx: Context) =>
           nameToIndex(ctx, specName).isDefined
         }
-        result <- (exists, savedGenericBinds.get(inst.i)) match {
+        // Each iteration of the foldLeft inserts a spec into `currentBinds`
+        // and shifts every bind after the insertion via `shiftBindAfterInsert`.
+        // The `shiftedGenericBinds` map's values are static snapshots taken
+        // BEFORE this loop began, so when a later iteration looks up the same
+        // (or another) generic, the snapshot lacks the prior iteration's
+        // insertion shift. Re-locate the generic in `currentBinds` (filtered to
+        // `TermAbbBind(TermTAbs, _)` so we don't accidentally match a non-
+        // generic same-named bind like a record constructor) so the newly-built
+        // spec body inherits all accumulated shifts.
+        currentGenericBind = currentBinds.find(b =>
+          b.i == inst.i && (b.b match {
+            case TermAbbBind(_: TermTAbs, _) => true
+            case _                           => false
+          })
+        )
+        result <- (
+          exists,
+          currentGenericBind.orElse(
+            shiftedGenericBinds
+              .get(inst.i)
+              .orElse(savedGenericBinds.get(inst.i))
+          )
+        ) match {
           case (false, Some(genericBind)) =>
             for {
               newBind <- buildSpecializedBind(genericBind, inst, 0)
@@ -231,7 +305,7 @@ object MonoRewrite {
         }
       } yield result
     }
-  }
+  } yield result
 
   /** Find the insertion position for a new generic specialization. Returns the
     * index right after the last existing specialization of this function, or
@@ -282,36 +356,36 @@ object MonoRewrite {
       bind: Bind,
       dataConstrInst: Instantiation
   ): Bind = {
-    val matchingInst = bind.insts.find(i =>
-      i.r == Resolution.DeferredDataConstr && i.i == dataConstrInst.i && i.tys == dataConstrInst.tys
-    )
-    matchingInst match {
-      case None       => bind
-      case Some(inst) =>
-        val termInfo = inst.term match {
-          case tv: TermVar => Some(tv.info)
-          case _           => None
-        }
-        termInfo match {
-          case None       => bind
-          case Some(info) =>
-            val redirectedBinding = bind.b match {
-              case TermAbbBind(term, ty) =>
-                val newTerm = TermFold.findVarByInfo(term, info) match {
-                  case Some((rawIdx, _, depth)) =>
-                    val baseIdx = rawIdx - depth
-                    redirectTermVar(term, info, baseIdx, baseIdx - 1)
-                  case None => term
-                }
-                TermAbbBind(newTerm, ty)
-              case _ => bind.b
-            }
-            val updatedInsts = bind.insts.filterNot(i =>
-              i.r == Resolution.DeferredDataConstr && i.i == dataConstrInst.i && i.tys == dataConstrInst.tys
-            )
-            Bind(bind.i, redirectedBinding, updatedInsts, bind.closureTypes)
-        }
+    def isMatching(i: Instantiation): Boolean =
+      i.r == Resolution.DeferredDataConstr &&
+        i.i == dataConstrInst.i &&
+        i.tys == dataConstrInst.tys
+    val rewritten = for {
+      inst <- bind.insts.find(isMatching)
+      info <- inst.term match {
+        case tv: TermVar => Some(tv.info)
+        case _           => None
+      }
+    } yield {
+      val redirectedBinding = bind.b match {
+        case TermAbbBind(term, ty) =>
+          val newTerm = TermFold.findVarByInfo(term, info) match {
+            case Some((rawIdx, _, depth)) =>
+              val baseIdx = rawIdx - depth
+              redirectTermVar(term, info, baseIdx, baseIdx - 1)
+            case None => term
+          }
+          TermAbbBind(newTerm, ty)
+        case other => other
+      }
+      Bind(
+        bind.i,
+        redirectedBinding,
+        bind.insts.filterNot(isMatching),
+        bind.closureTypes
+      )
     }
+    rewritten.getOrElse(bind)
   }
 
   def redirectTermVar(
@@ -321,11 +395,13 @@ object MonoRewrite {
       newIdx: Int
   ): Term =
     termMap(
-      (info, c, k, n) =>
-        (info == targetInfo && k == oldIdx + c) match {
-          case true  => TermVar(info, newIdx + c, n)
-          case false => TermVar(info, k, n)
-        },
+      (info, c, k, n) => {
+        val resolvedK = (info == targetInfo && k == oldIdx + c) match {
+          case true  => newIdx + c
+          case false => k
+        }
+        TermVar(info, resolvedK, n)
+      },
       (c, ty) => ty,
       0,
       term

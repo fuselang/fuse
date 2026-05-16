@@ -75,7 +75,7 @@ int64_t _prim_int_print(int64_t p1) {
     return 0;
 }
 
-struct string* _prim_read_string() {
+struct string* _prim_read_string(int64_t unit) {
     char *buffer = NULL;
     size_t len = 0;
     size_t read;
@@ -304,4 +304,41 @@ int64_t _prim_bool_or(int64_t p1, int64_t p2) {
 
 int64_t _prim_string_ne(struct string* p1, struct string* p2) {
     return !_prim_string_eq(p1, p2);
+}
+
+extern int g_argc;
+extern char** g_argv;
+
+int64_t _prim_args_count(int64_t unit) {
+    (void)unit;
+    return (int64_t)(g_argc > 0 ? g_argc - 1 : 0);
+}
+
+struct string* _prim_args_get(int64_t idx) {
+    int64_t total = (int64_t)(g_argc > 0 ? g_argc - 1 : 0);
+    if (idx < 0 || idx >= total) {
+        struct string* msg = create_string_copy("args index out of bounds");
+        _prim_error(msg);
+        return create_string_len(0);
+    }
+    return create_string_copy(g_argv[idx + 1]);
+}
+
+int64_t _prim_string_char_at(struct string* s, int64_t idx) {
+    if (idx < 0 || idx >= s->length) {
+        struct string* msg = create_string_copy("string index out of bounds");
+        _prim_error(msg);
+        return 0;
+    }
+    return (int64_t)(unsigned char)s->data[idx];
+}
+
+struct string* _prim_string_substring(struct string* s, int64_t start, int64_t end) {
+    if (start < 0) start = 0;
+    if (end > s->length) end = s->length;
+    if (start >= end) return create_string_len(0);
+    int64_t len = end - start;
+    struct string* r = create_string_len(len);
+    memcpy(r->data, s->data + start, len);
+    return r;
 }

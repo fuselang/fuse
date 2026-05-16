@@ -5,7 +5,6 @@ import scala.concurrent.duration.Duration
 import cats.effect.{IO, Resource}
 import java.nio.file.{Files, Path, Paths}
 import scala.sys.process.*
-import cats.effect.ExitCode
 
 abstract class CompilerTests extends FunSuite {
   import CompilerTests.*
@@ -14,14 +13,18 @@ abstract class CompilerTests extends FunSuite {
   /** Asserts fuse code is type checked. */
   def fuse(code: String, expected: Output = CheckOutput(None)) =
     expected match {
-      case CheckOutput(s)                             => assertCheck(code, s)
-      case BuildOutput(s)                             => assertBuild(code, s)
-      case ExecutableOutput(stdout, exitCode, stdlib) =>
-        assertExecutable(code, stdout, exitCode, stdlib)
+      case CheckOutput(s, stdlib) => assertCheck(code, s, stdlib)
+      case BuildOutput(s, stdlib) => assertBuild(code, s, stdlib)
+      case ExecutableOutput(stdout, exitCode, stdlib, args) =>
+        assertExecutable(code, stdout, exitCode, stdlib, args)
     }
 
-  def assertCheck(code: String, expectedError: Option[String]) =
-    (check(code), expectedError) match {
+  def assertCheck(
+      code: String,
+      expectedError: Option[String],
+      includeStdlib: Boolean = true
+  ) =
+    (check(code, includeStdlib = includeStdlib), expectedError) match {
       case (t, None)                    => assert(t.isRight, s"\n${t.merge}")
       case (t, Some(error)) if t.isLeft =>
         assert(t.merge.contains(error), s"\n${error} not in:\n${t.merge}")
@@ -29,8 +32,12 @@ abstract class CompilerTests extends FunSuite {
         assert(false, s"\ncheck passed, error not thrown: '${error}'")
     }
 
-  def assertBuild(code: String, expectedGrinCode: String) =
-    build(code) match {
+  def assertBuild(
+      code: String,
+      expectedGrinCode: String,
+      includeStdlib: Boolean = false
+  ) =
+    build(code, includeStdlib = includeStdlib) match {
       case Right(grinCode) =>
         assertNoDiff(
           grinCode,
@@ -45,11 +52,12 @@ abstract class CompilerTests extends FunSuite {
       code: String,
       expectedStdout: String,
       expectedExitCode: Int = 0,
-      includeStdlib: Boolean = false
+      includeStdlib: Boolean = false,
+      args: List[String] = Nil
   ) = {
     import cats.effect.unsafe.implicits.global
 
-    execute(code, includeStdlib).unsafeRunSync() match {
+    execute(code, includeStdlib, args).unsafeRunSync() match {
       case Right(result) =>
         assertEquals(
           result.exitCode,
@@ -208,6 +216,25 @@ fun main() -> Unit
     let l = Cons(2, Cons(3, Nil))
     let l1 = l.map_2(v => v + 1)
     ()
+        """
+    )
+  }
+  test("check top-level generic recursive list reverse with stdlib") {
+    fuse(
+      """
+type List[T]:
+    Cons(h: T, t: List[T])
+    Nil
+
+fun list_reverse_acc[T](xs: List[T], acc: List[T]) -> List[T]
+    match xs:
+        Cons(h, t) => list_reverse_acc(t, Cons(h, acc))
+        Nil => acc
+
+fun main() -> i32
+    let l = Cons(1, Cons(2, Nil))
+    let r = list_reverse_acc(l, Nil[i32])
+    0
         """
     )
   }
@@ -654,6 +681,27 @@ fun main() -> i32
         """)
   }
   test(
+    "check non-generic top-level fn with self-recursive let-bound closure on List[str]"
+  ) {
+    fuse("""
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+fun join(lines_: List[str]) -> str
+    let iter = (lines: List[str], acc: str) => {
+        match lines:
+            Nil => acc
+            Cons(h, t) => iter(t, acc + h)
+    }
+    iter(lines_, "")
+
+fun main() -> i32
+    let r = join(Nil[str])
+    0
+        """)
+  }
+  test(
     "check recursive closure inference with match statement for list type annotations required"
   ) {
     fuse(
@@ -1006,7 +1054,8 @@ fun main() -> i32
 
   }
   test("check generic trait monad with default implementation") {
-    fuse("""
+    fuse(
+      """
 trait Monad[A]:
   fun unit[T](a: T) -> Self[T];
 
@@ -1032,7 +1081,9 @@ fun main() -> i32
     let o = Some(5)
     o.map(a => a + 1)
     0
-        """)
+        """,
+      CheckOutput(None, includeStdlib = false)
+    )
 
   }
   test("check generic trait monad for state") {
@@ -1076,7 +1127,8 @@ fun main() -> i32
         """)
   }
   test("check generic traits monad + show with default implementation") {
-    fuse("""
+    fuse(
+      """
 trait Monad[A]:
   fun unit[B](a: B) -> Self[B];
 
@@ -1110,7 +1162,9 @@ fun main() -> i32
     let o = Some(5)
     o.map(a => a + 1)
     0
-        """)
+        """,
+      CheckOutput(None, includeStdlib = false)
+    )
   }
   test("check invalid type classes used for type param for different kinds") {
     fuse(
@@ -1171,7 +1225,8 @@ fun main() -> i32
 
   }
   test("check do expr") {
-    fuse("""
+    fuse(
+      """
 trait Monad[A]:
   fun unit[A](a: A) -> Self[A];
 
@@ -1207,7 +1262,9 @@ fun main() -> i32
   match d:
     Some(v) => v
     _ => 0
-        """)
+        """,
+      CheckOutput(None, includeStdlib = false)
+    )
 
   }
   test("check do expr invalid do expr") {
@@ -1484,7 +1541,8 @@ fun main() -> i32
       CheckOutput(
         Some(
           "expected type of `i32`, found `str`"
-        )
+        ),
+        includeStdlib = false
       )
     )
 
@@ -1502,6 +1560,40 @@ fun main() -> Unit
   greetings().exec()
         """)
 
+  }
+  test("check main returning IO[Unit] with do notation") {
+    fuse("""
+fun main() -> IO[Unit]
+  do:
+    _ <- print("a\n")
+    _ <- print("b\n")
+    ()
+        """)
+  }
+  test("check main returning IO[Unit] with single expression") {
+    fuse("""
+fun main() -> IO[Unit]
+  print("hi\n")
+        """)
+  }
+  test("check main returning IO[i32]") {
+    fuse("""
+fun main() -> IO[i32]
+  do:
+    _ <- print("answer:\n")
+    42
+        """)
+  }
+  test("reject main returning nested IO") {
+    fuse(
+      """
+fun main() -> IO[IO[Unit]]
+  unit(print("nope"))
+        """,
+      CheckOutput(
+        Some("`main` cannot return a nested `IO` type")
+      )
+    )
   }
   test("check generic list map with unit return type") {
     fuse(
@@ -2020,6 +2112,33 @@ fun main() -> i32
     """)
   }
 
+  test("check escaped double-quote in string literal") {
+    fuse("""
+fun main() -> str
+    "\""
+    """)
+  }
+
+  test("check Nil[T] nested inside Cons literal is accepted") {
+    fuse("""
+type Token:
+    TID(s: str)
+
+type Node:
+    NTok(h: Token)
+    NSep
+
+fun foo(xs: List[Node]) -> i32
+    0
+
+fun bar(h: Token) -> i32
+    foo(Cons(NTok(h), Nil[Node]))
+
+fun main() -> i32
+    bar(TID("a"))
+    """)
+  }
+
 }
 
 class CompilerBuildTests extends CompilerTests {
@@ -2379,6 +2498,263 @@ grinMain _6 =
  _11 <-  _prim_string_print s7
  pure i8
         """)
+    )
+  }
+  test("build top-level generic recursive list reverse") {
+    fuse(
+      """
+type List[T]:
+    Cons(h: T, t: List[T])
+    Nil
+
+fun list_reverse_acc[T](xs: List[T], acc: List[T]) -> List[T]
+    match xs:
+        Cons(h, t) => list_reverse_acc(t, Cons(h, acc))
+        Nil => acc
+
+fun main() -> i32
+    let l = Cons(1, Cons(2, Nil))
+    let r = list_reverse_acc(l, Nil[i32])
+    0
+        """,
+      BuildOutput("""Cons'i32 h0 t1 =
+ store (CConsi32 h0 t1)
+
+Nil'i32 =  store (CNili32)
+
+list_reverse_acc'i32 xs4 acc5 =
+ p8 <- fetch xs4
+ case p8 of
+  (CConsi32 h8 t'9) ->
+   p11 <- Cons'i32 h8 acc5
+   p12 <- list_reverse_acc'i32 t'9 p11
+   pure p12
+  #default ->
+   pure acc5
+
+grinMain _12 =
+ p14 <- Nil'i32
+ p15 <- Cons'i32 2 p14
+ l15 <-  Cons'i32 1 p15
+ p17 <- Nil'i32
+ r17 <-  list_reverse_acc'i32 l15 p17
+ pure 0""")
+    )
+  }
+  test("build non-recursive top-level generic head_or with stdlib") {
+    fuse(
+      """
+type List[T]:
+    Cons(h: T, t: List[T])
+    Nil
+
+fun head_or[T](xs: List[T], dflt: T) -> T
+    match xs:
+        Cons(h, _) => h
+        Nil => dflt
+
+fun main() -> i32
+    let l = Cons(42, Nil)
+    let r = head_or(l, 0)
+    r
+        """,
+      BuildOutput(
+        """ffi pure
+  _prim_bool_and :: T_Bool -> T_Bool -> T_Bool
+  _prim_bool_or :: T_Bool -> T_Bool -> T_Bool
+
+char_at s0 i1 =
+ _prim_string_char_at s0 i1
+
+substring s2 start3 end4 =
+ _prim_string_substring s2 start3 end4
+
+str_len s5 =
+ _prim_string_len s5
+
+is_whitespace c6 =
+ p8 <- _prim_int_eq c6 32
+ p9 <- _prim_int_eq c6 9
+ p10 <- _prim_bool_or p8 p9
+ p11 <- _prim_int_eq c6 10
+ p12 <- _prim_bool_or p10 p11
+ p13 <- _prim_int_eq c6 13
+ _prim_bool_or p12 p13
+
+is_digit c13 =
+ p15 <- _prim_int_ge c13 48
+ p16 <- _prim_int_le c13 57
+ _prim_bool_and p15 p16
+
+is_lower c16 =
+ p18 <- _prim_int_ge c16 97
+ p19 <- _prim_int_le c16 122
+ _prim_bool_and p18 p19
+
+is_upper c19 =
+ p21 <- _prim_int_ge c19 65
+ p22 <- _prim_int_le c19 90
+ _prim_bool_and p21 p22
+
+is_alpha c22 =
+ p24 <- is_lower c22
+ p25 <- is_upper c22
+ _prim_bool_or p24 p25
+
+is_alnum c25 =
+ p27 <- is_alpha c25
+ p28 <- is_digit c25
+ _prim_bool_or p27 p28
+
+is_ident_start c28 =
+ p30 <- is_alpha c28
+ p31 <- _prim_int_eq c28 95
+ _prim_bool_or p30 p31
+
+is_ident_cont c31 =
+ p33 <- is_alnum c31
+ p34 <- _prim_int_eq c31 95
+ _prim_bool_or p33 p34
+
+repeat s34 n35 =
+ p38 <- _prim_int_le n35 0
+ case p38 of
+  #True ->
+   pure #""
+  #False ->
+   p39 <- _prim_int_sub n35 1
+   p40 <- repeat s34 p39
+   p41 <- _prim_string_concat s34 p40
+   pure p41
+
+Cons'str h41 t42 =
+ store (CConsstr h41 t42)
+
+Cons'i32 h45 t46 =
+ store (CConsi32 h45 t46)
+
+Nil'str =  store (CNilstr)
+
+Nil'i32 =  store (CNili32)
+
+MkIO'Unit run''49 =
+ p52 <- store run''49
+ store (CMkIOUnit p52)
+
+MkIO'str run''52 =
+ p55 <- store run''52
+ store (CMkIOstr p55)
+
+MkIO'Liststr run''55 =
+ p58 <- store run''55
+ store (CMkIOListstr p58)
+
+print s58 =
+ p67 <- pure (P1c60 s58)
+ MkIO'Unit p67
+
+c60 s5861 _61 =
+ _prim_string_print s5861
+
+read path67 =
+ p76 <- pure (P1c69 path67)
+ MkIO'str p76
+
+c69 path6770 _70 =
+ _prim_file_read path6770
+
+write path76 content77 =
+ p87 <- pure (P1c79 path76 content77)
+ MkIO'Unit p87
+
+c79 path7680 content7781 _81 =
+ _prim_file_write path7680 content7781
+
+get_args _87 =
+ p139 <- pure (P1c130 )
+ MkIO'Liststr p139
+
+collect_args89 i89 acc90 =
+ p93 <- _prim_int_lt i89 0
+ case p93 of
+  #True ->
+   pure acc90
+  #False ->
+   p94 <- _prim_int_sub i89 1
+   p95 <- _prim_args_get i89
+   p96 <- Cons'str p95 acc90
+   p97 <- collect_args89  p94 p96
+   pure p97
+
+c130 _130 =
+ p132 <- _prim_args_count 0
+ p133 <- _prim_int_sub p132 1
+ p134 <- Nil'i32
+ collect_args89 p133 p134
+
+read_stdin_acc acc139 =
+ line141 <-  _prim_read_string 0
+ p144 <- str_len line141
+ p145 <- _prim_int_eq p144 0
+ case p145 of
+  #True ->
+   pure acc139
+  #False ->
+   p146 <- _prim_string_concat acc139 line141
+   p147 <- read_stdin_acc p146
+   pure p147
+
+read_stdin _147 =
+ p155 <- pure (P1c149 )
+ MkIO'str p155
+
+c149 _149 =
+ read_stdin_acc #""
+
+Cons'str h155 t156 =
+ store (CConsstr h155 t156)
+
+Cons'i32 h159 t160 =
+ store (CConsi32 h159 t160)
+
+Nil'str =  store (CNilstr)
+
+Nil'i32 =  store (CNili32)
+
+head_or'i32 xs163 dflt164 =
+ p167 <- fetch xs163
+ case p167 of
+  (CConsi32 h167 _'168) ->
+   pure h167
+  #default ->
+   pure dflt164
+
+grinMain _169 =
+ p171 <- Nil'i32
+ l171 <-  Cons'i32 42 p171
+ r172 <-  head_or'i32 l171 0
+ pure r172
+
+apply1_TypeEVar_to_str p174 p175 =
+ case p174 of
+  (P1c69 p176) ->
+   c69 p176 p175
+  (P1c149) ->
+   c149 p175
+
+apply1_TypeEVar_to_unit p177 p178 =
+ case p177 of
+  (P1c60 p179) ->
+   c60 p179 p178
+  (P1c79 p180 p181) ->
+   c79 p180 p181 p178
+
+apply1_unit_to_List_str p182 p183 =
+ case p182 of
+  (P1c130) ->
+   c130 p183""",
+        includeStdlib = true
+      )
     )
   }
   test("build function with params using generics") {
@@ -3407,6 +3783,8 @@ Cons'Unit h4 t5 =
 
 Nil'i32 =  store (CNili32)
 
+Nil'Unit =  store (CNilUnit)
+
 foldrightListi32Listi32' as8 z9 f''10 =
  p13 <- fetch as8
  case p13 of
@@ -3441,7 +3819,7 @@ c32 f''2933 h34 t35 =
  Cons'i32 p37 t35
 
 mapListi32Unit' self39 f''40 =
- p42 <- Nil'i32
+ p42 <- Nil'Unit
  p49 <- store f''40
  p50 <- pure (P2c43 p49)
  foldrightListi32ListUnit' self39 p42 p50
@@ -4014,7 +4392,7 @@ execIOUnit' self21 =
  case p24 of
   (CMkIOUnit p26) ->
    f24 <- fetch p26
-   p27 <- apply1_unit_to_unit f24 0
+   p27 <- apply1_TypeEVar_to_unit f24 0
    pure p27
 
 mapMonadIOUniti32' self27 f''28 =
@@ -4039,72 +4417,92 @@ c39 self3640 f''3742 _43 =
  execIOi32' b46
 
 flatmapIOMonadUniti32' self49 f''50 =
- p61 <- store f''50
- p62 <- pure (P1c52 self49 p61)
- MkIO'i32 p62
+ p62 <- store f''50
+ p63 <- pure (P1c52 self49 p62)
+ MkIO'i32 p63
 
 c52 self4953 f''5055 _56 =
  f''505556 <- fetch f''5055
  a57 <-  execIOUnit' self4953
- b59 <-  apply1_unit_to_IO_i32 f''505556 a57
- execIOi32' b59
+ p59 <-  case f''505556 of
+  (P1c89) ->
+   apply1_unit_to_i32 f''505556 a57
+  (P1c78) ->
+   apply1_str_to_IO_i32 f''505556 a57
+  (P1c70) ->
+   apply1_TypeEVar_to_str f''505556 a57
+  (P1c30 _f''505556_c30_0) ->
+   apply1_IO_to_IO_i32 f''505556 a57
+  (P1c52 _f''505556_c52_0 _f''505556_c52_1) ->
+   apply1_unit_to_i32 f''505556 a57
+  (P1c65 _f''505556_c65_0) ->
+   apply1_unit_to_i32 f''505556 a57
+  (P1c80 _f''505556_c80_0) ->
+   apply1_TypeEVar_to_unit f''505556 a57
+  (P1c39 _f''505556_c39_0 _f''505556_c39_1) ->
+   apply1_unit_to_i32 f''505556 a57
+ b60 <-  pure p59
+ execIOi32' b60
 
-unitIOMonadi32' a62 =
- p67 <- pure (P1c64 a62)
- MkIO'i32 p67
+unitIOMonadi32' a63 =
+ p68 <- pure (P1c65 a63)
+ MkIO'i32 p68
 
-c64 a6265 _65 =
- pure a6265
+c65 a6366 _66 =
+ pure a6366
 
-grinMain _67 =
- p75 <- pure (P1c69 )
- p76 <- MkIO'str p75
- p105 <- pure (P1c77 )
- program105 <-  flatmapIOMonadstri32' p76 p105
- execIOi32' program105
+grinMain _68 =
+ p76 <- pure (P1c70 )
+ p77 <- MkIO'str p76
+ p106 <- pure (P1c78 )
+ program106 <-  flatmapIOMonadstri32' p77 p106
+ execIOi32' program106
 
-c69 _69 =
+c70 _70 =
  pure #"hi"
 
-c77 s77 =
- p86 <- pure (P1c79 s77)
- p87 <- MkIO'Unit p86
- p94 <- pure (P1c88 )
- mapMonadIOUniti32' p87 p94
+c78 s78 =
+ p87 <- pure (P1c80 s78)
+ p88 <- MkIO'Unit p87
+ p95 <- pure (P1c89 )
+ mapMonadIOUniti32' p88 p95
 
-c79 s7780 _80 =
- _prim_string_print s7780
+c80 s7881 _81 =
+ _prim_string_print s7881
 
-c88 _88 =
+c89 _89 =
  pure 0
 
-apply1_TypeEVar_to_str p107 p108 =
- case p107 of
-  (P1c69) ->
-   c69 p108
+apply1_IO_to_IO_i32 p108 p109 =
+ case p108 of
+  (P1c30 p110) ->
+   c30 p110 p109
 
-apply1_str_to_IO_i32 p109 p110 =
- case p109 of
-  (P1c77) ->
-   c77 p110
-
-apply1_unit_to_IO_i32 p111 p112 =
+apply1_TypeEVar_to_str p111 p112 =
  case p111 of
-  (P1c30 p113) ->
-   c30 p113 p112
+  (P1c70) ->
+   c70 p112
 
-apply1_unit_to_i32 p114 p115 =
- case p114 of
-  (P1c39 p116 p117) ->
-   c39 p116 p117 p115
-  (P1c52 p118 p119) ->
-   c52 p118 p119 p115
-  (P1c64 p120) ->
-   c64 p120 p115
-  (P1c79 p121) ->
-   c79 p121 p115
-  (P1c88) ->
-   c88 p115""")
+apply1_TypeEVar_to_unit p113 p114 =
+ case p113 of
+  (P1c80 p115) ->
+   c80 p115 p114
+
+apply1_str_to_IO_i32 p116 p117 =
+ case p116 of
+  (P1c78) ->
+   c78 p117
+
+apply1_unit_to_i32 p118 p119 =
+ case p118 of
+  (P1c39 p120 p121) ->
+   c39 p120 p121 p119
+  (P1c52 p122 p123) ->
+   c52 p122 p123 p119
+  (P1c65 p124) ->
+   c65 p124 p119
+  (P1c89) ->
+   c89 p119""")
     )
   }
 
@@ -4163,18 +4561,24 @@ fun main() -> i32
   _print(describe(o))
   0
       """,
-      BuildOutput("""describe o0 =
- p3 <- fetch o0
- case p3 of
-  (CMySomei32 v3) ->
+      BuildOutput("""MySome'i32 t10 =
+ store (CMySomei32 t10)
+
+MyNone'i32 =  store (CMyNonei32)
+
+describe o2 =
+ p5 <- fetch o2
+ case p5 of
+  (CMySomei32 v5) ->
    pure #"some"
   #default ->
    pure #"none"
 
-grinMain _4 =
- o7 <-  store (CMyNonei32)
- p9 <- describe o7
- _10 <-  _prim_string_print p9
+grinMain _6 =
+ p8 <- MyNone'i32
+ o10 <-  pure p8
+ p12 <- describe o10
+ _13 <-  _prim_string_print p12
  pure 0""")
     )
   }
@@ -4582,6 +4986,29 @@ fun main() -> i32
     0
         """,
       ExecutableOutput("Hello World\n5")
+    )
+  }
+  test("execute top-level generic recursive list reverse") {
+    fuse(
+      """
+type List[T]:
+    Cons(h: T, t: List[T])
+    Nil
+
+fun list_reverse_acc[T](xs: List[T], acc: List[T]) -> List[T]
+    match xs:
+        Cons(h, t) => list_reverse_acc(t, Cons(h, acc))
+        Nil => acc
+
+fun main() -> i32
+    let l = Cons(1, Cons(2, Nil))
+    let r = list_reverse_acc(l, Nil[i32])
+    match r:
+        Cons(h, _) => _print(int_to_str(h))
+        Nil => _print("nil")
+    0
+        """,
+      ExecutableOutput("2")
     )
   }
   test("execute function with params using generics") {
@@ -5559,6 +5986,27 @@ fun main() -> i32
       ExecutableOutput("Hello IO!", includeStdlib = true)
     )
   }
+  test("execute main returning IO[Unit] single print") {
+    fuse(
+      """
+fun main() -> IO[Unit]
+  print("Hello IO!")
+      """,
+      ExecutableOutput("Hello IO!", includeStdlib = true)
+    )
+  }
+  test("execute main returning IO[Unit]") {
+    fuse(
+      """
+fun main() -> IO[Unit]
+  do:
+    _ <- print("a\n")
+    _ <- print("b\n")
+    ()
+      """,
+      ExecutableOutput("a\nb", includeStdlib = true)
+    )
+  }
   test("execute io unit and flat_map") {
     fuse(
       """
@@ -5699,6 +6147,101 @@ fun main() -> i32
     )
   }
 
+  test("execute fusefmt formats messy file") {
+    import scala.io.Source
+    val fmtSource =
+      Source.fromFile("examples/fusefmt.fuse").mkString
+    val tempInput =
+      java.nio.file.Files.createTempFile("fusefmt-input-", ".fuse")
+    val messy =
+      "fun main() -> i32   \n   let x = 1   \n\n\n\n   x\n"
+    java.nio.file.Files.write(tempInput, messy.getBytes)
+    try
+      fuse(
+        fmtSource,
+        ExecutableOutput(
+          "fun main() -> i32\n    let x = 1\n\n\n    x",
+          includeStdlib = true,
+          args = List(tempInput.toString)
+        )
+      )
+    finally java.nio.file.Files.deleteIfExists(tempInput)
+  }
+
+  test("execute stdlib string helpers") {
+    fuse(
+      """
+fun main() -> i32
+  _print(int_to_str(char_at("hello", 1)))
+  _print(" ")
+  _print(substring("hello world", 6, 11))
+  _print(" ")
+  _print(int_to_str(str_len("abc")))
+  _print(" ")
+  match is_whitespace(32):
+    true => _print("ok")
+    false => _print("fail")
+  0
+      """,
+      ExecutableOutput("101 world 3 ok", includeStdlib = true)
+    )
+  }
+
+  test("execute args count returns user arg count") {
+    fuse(
+      """
+fun main() -> i32
+  _print(int_to_str(_args_count(())))
+  0
+      """,
+      ExecutableOutput("3", args = List("a", "b", "c"))
+    )
+  }
+
+  test("execute args count returns 0 with no extra args") {
+    fuse(
+      """
+fun main() -> i32
+  _print(int_to_str(_args_count(())))
+  0
+      """,
+      ExecutableOutput("0")
+    )
+  }
+
+  test("execute args get returns first user arg") {
+    fuse(
+      """
+fun main() -> i32
+  _print(_args_get(0))
+  0
+      """,
+      ExecutableOutput("hello", args = List("hello"))
+    )
+  }
+
+  test("execute string char_at returns codepoint at index") {
+    fuse(
+      """
+fun main() -> i32
+  _print(int_to_str(_string_char_at("hello", 1)))
+  0
+      """,
+      ExecutableOutput("101")
+    )
+  }
+
+  test("execute string substring extracts range") {
+    fuse(
+      """
+fun main() -> i32
+  _print(_string_substring("hello world", 6, 11))
+  0
+      """,
+      ExecutableOutput("world")
+    )
+  }
+
   test("execute io flat_map with non-unit binding") {
     fuse(
       """
@@ -5726,18 +6269,101 @@ fun main() -> i32
       ExecutableOutput("43")
     )
   }
+  test("execute fmap List with trait bound") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+trait Functor[A]:
+    fun map[B](self, f: A -> B) -> Self[B];
+
+impl List[A]:
+    fun fold_right[A, B](as: List[A], z: B, f: (A, B) -> B) -> B
+        match as:
+            Cons(x, xs) => f(x, List::fold_right(xs, z, f))
+            Nil => z
+
+    fun fold_left[A, B](l: List[A], acc: B, f: (B, A) -> B) -> B
+        match l:
+            Cons(h, t) => List::fold_left(t, f(acc, h), f)
+            Nil => acc
+
+    fun append[A](l1: List[A], l2: List[A]) -> List[A]
+        List::fold_right(l1, l2, (h, t) => Cons(h, t))
+
+    fun sum(l: List[i32]) -> i32
+        List::fold_right(l, 0, (acc, b) => acc + b)
+
+    fun product(l: List[i32]) -> i32
+        List::fold_left(l, 1, (acc, b) => acc * b)
+
+    fun filter[A](self, f: A -> bool) -> List[A]
+        List::fold_right(self, Nil[A], (h, t) => {
+            match f(h):
+                true => Cons(h, t)
+                false => t
+        })
+
+impl Functor[A] for List[A]:
+    fun map[B](self, f: A -> B) -> List[B]
+        List::fold_right(self, Nil[B], (h, t) => Cons(f(h), t))
+
+fun fmap[A, B, T: Functor](f: A -> B, c: T[A]) -> T[B]
+    c.map(f)
+
+fun main() -> i32
+    let l = Cons(2, Cons(3, Nil))
+    let l1 = fmap(v => v + 1, l)
+    let l2 = Cons(7, Nil)
+    let l3 = List::append(l1, l2)
+    let l4 = l3.filter(e => e > 3)
+    let s = List::sum(l4)
+    let p = List::product(l4)
+    _print(int_to_str(s + p))
+    0
+      """,
+      ExecutableOutput("39")
+    )
+  }
+
+  test("execute brackets in string literals survive codegen") {
+    fuse(
+      """
+fun main() -> i32
+    _print("[a]b[c]")
+    0
+      """,
+      ExecutableOutput("[a]b[c]")
+    )
+  }
+
+  test("execute escaped double-quote round-trips to a single quote byte") {
+    fuse(
+      """
+fun main() -> i32
+    _print("\"")
+    0
+      """,
+      ExecutableOutput("\"")
+    )
+  }
 }
 
 object CompilerTests {
   import Fuse.*
 
   sealed trait Output
-  case class CheckOutput(s: Option[String]) extends Output
-  case class BuildOutput(s: String) extends Output
+  case class CheckOutput(s: Option[String], includeStdlib: Boolean = true)
+      extends Output
+  case class BuildOutput(s: String, includeStdlib: Boolean = false)
+      extends Output
   case class ExecutableOutput(
       expectedStdout: String,
       expectedExitCode: Int = 0,
-      includeStdlib: Boolean = false
+      includeStdlib: Boolean = false,
+      args: List[String] = Nil
   ) extends Output
 
   case class ExecutionResult(stdout: String, stderr: String, exitCode: Int)
@@ -5765,50 +6391,33 @@ object CompilerTests {
     Resource.make(acquire)(release)
   }
 
-  private def executeProcess(exePath: Path): IO[ExecutionResult] = {
+  def execute(
+      code: String,
+      includeStdlib: Boolean = false,
+      args: List[String] = Nil
+  ): IO[Either[String, ExecutionResult]] =
+    createTempFuseFile(code).use { fusePath =>
+      Fuse.runFile(fusePath.toString, args, includeStdlib, executeCapture).map {
+        case Right(result) => Right(result)
+        case Left(_)       => Left("compilation failed: fuse or grin error")
+      }
+    }
+
+  def executeCapture(exe: Path, args: List[String]): IO[ExecutionResult] =
     IO.blocking {
       val stdout = new StringBuilder
       val stderr = new StringBuilder
-
       val logger = ProcessLogger(
         out => stdout.append(out).append("\n"),
         err => stderr.append(err).append("\n")
       )
-
-      val exitCode = Process(exePath.toString).!(logger)
-
+      val exitCode = Process(exe.toString +: args).!(logger)
       ExecutionResult(
         stdout.toString.trim,
         stderr.toString.trim,
         exitCode
       )
     }
-  }
-
-  def execute(
-      code: String,
-      includeStdlib: Boolean = false
-  ): IO[Either[String, ExecutionResult]] = {
-    createTempFuseFile(code).use { fusePath =>
-      for {
-        buildExitCode <- Fuse.build(
-          BuildFile(fusePath.toString, includeStdlib)
-        )
-        result <- buildExitCode match {
-          case ExitCode.Success =>
-            val outPath =
-              Paths.get(
-                fusePath.toString.stripSuffix(
-                  s".$FuseFileExtension"
-                ) + s".$FuseOutputExtension"
-              )
-            executeProcess(outPath).map(Right(_))
-          case _ =>
-            IO.pure(Left("compilation failed: fuse or grin error"))
-        }
-      } yield result
-    }
-  }
 
   /** Synchronously load the pre-parsed library module for the test helpers if
     * the command requests it. Mirrors `Compiler.run`'s load-then-compile flow
@@ -5823,8 +6432,12 @@ object CompilerTests {
     }
   }
 
-  def check(code: String, fileName: String = s"test.$FuseFileExtension") = {
-    val command = CheckFile(fileName)
+  def check(
+      code: String,
+      fileName: String = s"test.$FuseFileExtension",
+      includeStdlib: Boolean = true
+  ) = {
+    val command = CheckFile(fileName, includeStdlib)
     loadStdlibSync(command).flatMap(stdlib =>
       Compiler.compile(command, code.trim, fileName, stdlib)
     )

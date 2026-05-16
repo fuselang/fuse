@@ -1,0 +1,39 @@
+type List[T]:
+    Cons(h: T, t: List[T])
+    Nil
+
+impl List[T]:
+    fun reverse(self) -> List[T]
+        let iter = (xs: List[T], acc: List[T]) => {
+            match xs:
+                Cons(h, t) => iter(t, Cons(h, acc))
+                Nil => acc
+        }
+        iter(self, Nil[T])
+
+    fun head_or[T](self, dflt: T) -> T
+        match self:
+            Cons(h, _) => h
+            Nil => dflt
+
+    fun length(self) -> i32
+        let iter = (xs: List[T], acc: i32) => {
+            match xs:
+                Cons(_, t) => iter(t, acc + 1)
+                Nil => acc
+        }
+        iter(self, 0)
+
+    fun append(self, other: List[T]) -> List[T]
+        match self:
+            Cons(h, t) => Cons(h, t.append(other))
+            Nil => other
+
+impl Monad for List[T]:
+    fun flat_map[B](self, f: T -> List[B]) -> List[B]
+        match self:
+            Cons(h, t) => f(h).append(t.flat_map(f))
+            Nil => Nil[B]
+
+    fun unit[T](a: T) -> List[T]
+        Cons(a, Nil)

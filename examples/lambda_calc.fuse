@@ -2,21 +2,6 @@ type List[T]:
     Cons(h: T, t: List[T])
     Nil
 
-type Option[T]:
-    None
-    Some(T)
-
-impl Option[T]:
-    fun is_some(self) -> bool
-        match self:
-            Some(v) => true
-            _ => false
-
-    fun is_none(self) -> bool
-        match self:
-            Some(v) => false
-            _ => true
-
 type Tuple[A, B](A, B)
 
 type Type:
