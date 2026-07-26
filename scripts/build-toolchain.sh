@@ -275,12 +275,12 @@ build_fuse() {
     cd "$PROJECT_ROOT"
     sbt fuseNative/nativeLink
 
-    # Find and copy the binary
+    # Find and copy the binary (Scala Native 0.5.x names it after the project)
     local fuse_bin
-    fuse_bin=$(find . -path "*native*" -name "fuse-out" -type f | head -1)
+    fuse_bin=$(find .native/target -maxdepth 2 -name "fuse" -type f | head -1)
 
     if [ -z "$fuse_bin" ] || [ ! -f "$fuse_bin" ]; then
-        err "Fuse build failed: fuse-out not found"
+        err "Fuse build failed: binary not found under .native/target"
     fi
 
     cp "$fuse_bin" "${toolchain_dir}/bin/fuse"

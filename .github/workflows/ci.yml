@@ -11,6 +11,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Toolchain release used to run the test suite. Pinned rather than tracking
+  # `latest` so a failed release (which publishes an asset-less tag) cannot
+  # turn every PR red. Bump after a release publishes its artifacts.
+  FUSE_TOOLCHAIN_VERSION: v0.3.4
+
 jobs:
   format:
     name: Check Formatting
@@ -36,7 +42,9 @@ jobs:
           apps: sbt
       - name: Run tests with coverage
         run: |
-          curl -fsSL https://fuselang.github.io/fuse/fuseup | sh -s -- -y --no-modify-path
+          # Install with the checked-out fuseup so installer changes are exercised
+          # by the PR that makes them, not only after they deploy to gh-pages.
+          sh gh-pages/fuseup -y --no-modify-path --version "$FUSE_TOOLCHAIN_VERSION"
           . ~/.local/share/fuse/env
           export FUSE_RUNTIME="$GITHUB_WORKSPACE/grin"
           export FUSE_STDLIB="$GITHUB_WORKSPACE/stdlib"
@@ -46,3 +54,30 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./.jvm/target/scala-3.6.4/scoverage-report/scoverage.xml
           fail_ci_if_error: false
+
+  native:
+    name: Native Link
+    runs-on: ubuntu-latest
+    needs: format
+    env:
+      JAVA_OPTS: -Xms2048M -Xmx2048M -Xss6M -XX:ReservedCodeCacheSize=256M
+    steps:
+      - uses: actions/checkout@v6
+      - uses: coursier/cache-action@v6
+      - uses: coursier/setup-action@v2
+        with:
+          jvm: temurin:17
+          apps: sbt
+      # The release tarball is built from this binary. Its name is set by Scala
+      # Native, so a version bump can move it without breaking any test — which
+      # is how the v0.4.0 release broke. Assert the release script still finds it.
+      - name: Verify release binary lookup
+        run: |
+          sbt fuseNative/nativeLink
+          fuse_bin=$(find .native/target -maxdepth 2 -name "fuse" -type f | head -1)
+          if [ -z "$fuse_bin" ]; then
+            echo "::error::native binary not found where scripts/build-toolchain.sh expects it"
+            find .native/target -maxdepth 2 -type f
+            exit 1
+          fi
+          echo "found $fuse_bin"

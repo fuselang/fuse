@@ -87,9 +87,11 @@ install_toolchain() {
         say "Downloading toolchain for ${_platform}..."
 
         if command -v curl > /dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -SfL "$_url" -o "$_archive" --progress-bar
+            curl --proto '=https' --tlsv1.2 -SfL "$_url" -o "$_archive" --progress-bar \
+                || err "failed to download $_url (release assets missing?)"
         elif command -v wget > /dev/null 2>&1; then
-            wget --https-only "$_url" -O "$_archive" --show-progress
+            wget --https-only "$_url" -O "$_archive" --show-progress \
+                || err "failed to download $_url (release assets missing?)"
         else
             err "need 'curl' or 'wget' to download"
         fi
@@ -97,7 +99,8 @@ install_toolchain() {
 
     say "Extracting toolchain..."
     mkdir -p "$FUSE_HOME"
-    tar -xzf "$_archive" -C "$FUSE_HOME" --strip-components=1
+    tar -xzf "$_archive" -C "$FUSE_HOME" --strip-components=1 \
+        || err "failed to extract toolchain archive"
 
     # Only remove if we downloaded it
     [ -z "$_local_path" ] && rm -f "$_archive"
@@ -241,6 +244,7 @@ OPTIONS:
     -y                  Accept defaults, don't prompt
     -h, --help          Print help
     --local <path>      Install from local tarball (for testing)
+    --version <tag>     Install a specific release (e.g. v0.4.1) instead of latest
     --no-modify-path    Don't modify shell profile
 EOF
 }
@@ -260,6 +264,12 @@ main() {
                 shift
                 _local_path="$1"
                 [ ! -f "$_local_path" ] && err "file not found: $_local_path"
+                ;;
+            --version)
+                shift
+                [ -z "${1:-}" ] && err "--version requires a release tag (e.g. v0.4.1)"
+                TOOLCHAIN_URL="https://github.com/fuselang/fuse/releases/download/$1"
+                say "Pinned to release $1"
                 ;;
             -h|--help) usage; exit 0 ;;
             *) say "unknown option: $1" ;;
