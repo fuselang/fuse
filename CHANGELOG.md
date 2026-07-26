@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/fuselang/fuse/compare/v0.4.0...v0.4.1) (2026-07-26)
+
+
+### Bug Fixes
+
+* release toolchain binary lookup and installer error handling ([32d4d52](https://github.com/fuselang/fuse/commit/32d4d526adabd98efacccda07878490e5a0f0bd3))
+
 ## [0.4.0](https://github.com/fuselang/fuse/compare/v0.3.4...v0.4.0) (2026-05-16)
 
 
