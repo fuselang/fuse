@@ -2157,8 +2157,12 @@ fun main() -> Unit
 greetings _0 =
  _prim_string_print #"Hello World"
 
-grinMain _1 =
- greetings 0""")
+_fuse_main _1 =
+ greetings 0
+
+grinMain _fuse_main_arg =
+ _fuse_main_res <- _fuse_main 0
+ pure 0""")
     )
   }
   test("build simple sum type") {
@@ -2212,8 +2216,12 @@ fun main() -> f32
     2.0 + 2.0
     """,
       BuildOutput("""
-grinMain _0 =
- _prim_float_add 2.0 2.0""")
+_fuse_main _0 =
+ _prim_float_add 2.0 2.0
+
+grinMain _fuse_main_arg =
+ _fuse_main_res <- _fuse_main 0
+ pure 0""")
     )
   }
   test("build string addition") {
@@ -2223,8 +2231,12 @@ fun main() -> str
     "Hello" + "World"
     """,
       BuildOutput("""
-grinMain _0 =
- _prim_string_concat #"Hello" #"World"""")
+_fuse_main _0 =
+ _prim_string_concat #"Hello" #"World"
+
+grinMain _fuse_main_arg =
+ _fuse_main_res <- _fuse_main 0
+ pure 0""")
     )
   }
   test("build integer subtraction") {
@@ -2245,8 +2257,12 @@ fun main() -> f32
     2.0 * 2.0
     """,
       BuildOutput("""
-grinMain _0 =
- _prim_float_mul 2.0 2.0""")
+_fuse_main _0 =
+ _prim_float_mul 2.0 2.0
+
+grinMain _fuse_main_arg =
+ _fuse_main_res <- _fuse_main 0
+ pure 0""")
     )
   }
   test("build float division") {
@@ -2256,8 +2272,12 @@ fun main() -> f32
     2.0 / 2.0
     """,
       BuildOutput("""
-grinMain _0 =
- _prim_float_div 2.0 2.0""")
+_fuse_main _0 =
+ _prim_float_div 2.0 2.0
+
+grinMain _fuse_main_arg =
+ _fuse_main_res <- _fuse_main 0
+ pure 0""")
     )
   }
   test("build int modulo") {
@@ -2293,8 +2313,12 @@ fun main() -> bool
     10 == 10
     """,
       BuildOutput("""
-grinMain _0 =
- _prim_int_eq 10 10""")
+_fuse_main _0 =
+ _prim_int_eq 10 10
+
+grinMain _fuse_main_arg =
+ _fuse_main_res <- _fuse_main 0
+ pure 0""")
     )
   }
   test("build str not equal") {
@@ -2307,8 +2331,12 @@ fun main() -> bool
 ffi pure
   _prim_string_ne :: T_String -> T_String -> T_Bool
 
-grinMain _0 =
- _prim_string_ne #"Hello" #"World"""")
+_fuse_main _0 =
+ _prim_string_ne #"Hello" #"World"
+
+grinMain _fuse_main_arg =
+ _fuse_main_res <- _fuse_main 0
+ pure 0""")
     )
   }
   test("build and") {
@@ -2321,10 +2349,14 @@ fun main() -> bool
 ffi pure
   _prim_bool_and :: T_Bool -> T_Bool -> T_Bool
 
-grinMain _0 =
+_fuse_main _0 =
  p2 <- _prim_int_ne 1 2
  p3 <- _prim_int_eq 3 4
- _prim_bool_and p2 p3""")
+ _prim_bool_and p2 p3
+
+grinMain _fuse_main_arg =
+ _fuse_main_res <- _fuse_main 0
+ pure 0""")
     )
   }
   test("build or") {
@@ -2337,10 +2369,14 @@ fun main() -> bool
 ffi pure
   _prim_bool_or :: T_Bool -> T_Bool -> T_Bool
 
-grinMain _0 =
+_fuse_main _0 =
  p2 <- _prim_int_ne 1 2
  p3 <- _prim_int_eq 3 4
- _prim_bool_or p2 p3""")
+ _prim_bool_or p2 p3
+
+grinMain _fuse_main_arg =
+ _fuse_main_res <- _fuse_main 0
+ pure 0""")
     )
   }
   test("build inline lambda with type annotation") {
@@ -2423,9 +2459,13 @@ fun main() -> Unit
 identity'str v0 =
  pure v0
 
-grinMain _1 =
+_fuse_main _1 =
  s2 <-  identity'str #"Hello World"
  _prim_string_print s2
+
+grinMain _fuse_main_arg =
+ _fuse_main_res <- _fuse_main 0
+ pure 0
         """)
     )
   }
@@ -4628,6 +4668,125 @@ grinMain _9 =
 class CompilerExecTests extends CompilerTests {
   import CompilerTests.*
 
+  // A source given without a directory component builds to a bare program
+  // name, which a spawned process resolves against PATH instead of the working
+  // directory. The runner must hand the executor a path that unambiguously
+  // points at the binary it just built.
+  test("execute receives an absolute path to the built binary") {
+    import cats.effect.unsafe.implicits.global
+    val result = createTempFuseFile("""
+fun main() -> i32
+  0
+      """)
+      .use { fusePath =>
+        Fuse.runFile(
+          fusePath.toString,
+          Nil,
+          false,
+          (exe: Path, _: List[String]) =>
+            IO.pure((exe.isAbsolute, Files.isExecutable(exe)))
+        )
+      }
+      .unsafeRunSync()
+    assertEquals(result, Right((true, true)))
+  }
+
+  test("execute generic method recursing through itself") {
+    fuse(
+      """
+type List[T]:
+    Cons(h: T, t: List[T])
+    Nil
+
+impl List[T]:
+    fun append(self, other: List[T]) -> List[T]
+        match self:
+            Cons(h, t) => Cons(h, t.append(other))
+            Nil => other
+
+fun main() -> i32
+    let l1 = Cons(1, Nil)
+    let l2 = Cons(2, Nil)
+    let l3 = l1.append(l2)
+    match l3:
+        Cons(h, t) => h
+        Nil => 0
+      """,
+      ExecutableOutput("", expectedExitCode = 1)
+    )
+  }
+
+  test("execute trait instance method recursing through itself") {
+    fuse(
+      """
+trait Monad[A]:
+    fun flat_map[B](self, f: A -> Self[B]) -> Self[B];
+
+type List[T]:
+    Cons(h: T, t: List[T])
+    Nil
+
+impl List[T]:
+    fun append(self, other: List[T]) -> List[T]
+        match self:
+            Cons(h, t) => Cons(h, t.append(other))
+            Nil => other
+
+impl Monad for List[T]:
+    fun flat_map[B](self, f: T -> List[B]) -> List[B]
+        match self:
+            Cons(h, t) => f(h).append(t.flat_map(f))
+            Nil => Nil[B]
+
+fun main() -> i32
+    let l = Cons(1, Cons(2, Nil))
+    let doubled = l.flat_map(v => Cons(v, Cons(v * 10, Nil)))
+    match doubled:
+        Cons(h, t) => h
+        Nil => 0
+      """,
+      ExecutableOutput("", expectedExitCode = 1)
+    )
+  }
+
+  test("execute stdlib list append") {
+    fuse(
+      """
+fun main() -> i32
+    let l1 = Cons(1, Cons(2, Nil))
+    let l2 = Cons(3, Nil)
+    let joined = l1.append(l2)
+    _print(int_to_str(joined.length()))
+    joined.head_or(0)
+      """,
+      ExecutableOutput("3", expectedExitCode = 1, includeStdlib = true)
+    )
+  }
+
+  test("execute exits with the value main returns") {
+    fuse(
+      """
+fun main() -> i32
+    _print("failing")
+    3
+      """,
+      ExecutableOutput("failing", expectedExitCode = 3)
+    )
+  }
+
+  // A `main` that yields anything but an i32 has no exit code to give, so the
+  // generated entry point discards its result and exits 0 — while the effects
+  // it performed must survive GRIN's dead-code passes.
+  test("execute main without an exit code runs effects and exits 0") {
+    fuse(
+      """
+fun main() -> Unit
+    _print("effect ran")
+      """,
+      ExecutableOutput("effect ran", expectedExitCode = 0)
+    )
+  }
+
   test("execute generic phantom in return") {
     fuse(
       """
@@ -6374,7 +6533,7 @@ object CompilerTests {
     dir
   }
 
-  private def createTempFuseFile(code: String): Resource[IO, Path] = {
+  def createTempFuseFile(code: String): Resource[IO, Path] = {
     val acquire = IO {
       val tempFile =
         Files.createTempFile(testTempDir, "test-", s".$FuseFileExtension")
@@ -6386,7 +6545,7 @@ object CompilerTests {
         val baseName = path.toString.stripSuffix(s".$FuseFileExtension")
         Files.deleteIfExists(path)
         Files.deleteIfExists(Paths.get(baseName + s".$FuseGrinExtension"))
-        Files.deleteIfExists(Paths.get(baseName + s".$FuseOutputExtension"))
+        Files.deleteIfExists(Paths.get(baseName))
       }.void
     Resource.make(acquire)(release)
   }

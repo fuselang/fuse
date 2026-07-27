@@ -301,6 +301,111 @@ object TermFold {
     fold[Id, Boolean](algebra, term)
   }
 
+  /** Collect the source positions of `TermMethodProj` calls to `methodName`,
+    * spelled as it appears at the call site rather than as a mangled bind name
+    * — the receiver-syntax counterpart of `containsAssocProj`.
+    *
+    * Positions rather than nodes: the fold hands each callback its children's
+    * folded results, so the receiver term is no longer reachable at
+    * `onMethodProj`. A position identifies a call site uniquely, which is all
+    * callers need to tell one `x.method(..)` from another.
+    */
+  def collectMethodProjInfos(term: Term, methodName: String): List[Info] = {
+    import cats.Id
+    val algebra = new TermAlgebra[Id, List[Info]] {
+      def onVar(info: Info, idx: Int, ctxLen: Int, depth: Int): List[Info] = Nil
+      def onAbs(
+          info: Info,
+          name: String,
+          ty: Type,
+          body: List[Info],
+          retTy: Option[Type],
+          depth: Int
+      ): List[Info] = body
+      def onClosure(
+          info: Info,
+          name: String,
+          ty: Option[Type],
+          body: List[Info],
+          depth: Int
+      ): List[Info] = body
+      def onApp(
+          info: Info,
+          f: List[Info],
+          arg: List[Info],
+          depth: Int
+      ): List[Info] = f ::: arg
+      def onFix(info: Info, t: List[Info], depth: Int): List[Info] = t
+      def onMatch(
+          info: Info,
+          scrutinee: List[Info],
+          cases: List[(Pattern, List[Info])],
+          depth: Int
+      ): List[Info] = scrutinee ::: cases.flatMap(_._2)
+      def onLet(
+          info: Info,
+          name: String,
+          t1: List[Info],
+          t2: List[Info],
+          depth: Int
+      ): List[Info] = t1 ::: t2
+      def onProj(
+          info: Info,
+          t: List[Info],
+          label: String,
+          depth: Int
+      ): List[Info] = t
+      def onMethodProj(
+          info: Info,
+          t: List[Info],
+          method: String,
+          depth: Int
+      ): List[Info] = (method == methodName) match {
+        case true  => info :: t
+        case false => t
+      }
+      def onAssocProj(
+          info: Info,
+          ty: Type,
+          method: String,
+          depth: Int
+      ): List[Info] = Nil
+      def onRecord(
+          info: Info,
+          fields: List[(String, List[Info])],
+          depth: Int
+      ): List[Info] = fields.flatMap(_._2)
+      def onTag(
+          info: Info,
+          label: String,
+          t: List[Info],
+          ty: Type,
+          depth: Int
+      ): List[Info] = t
+      def onAscribe(
+          info: Info,
+          t: List[Info],
+          ty: Type,
+          depth: Int
+      ): List[Info] = t
+      def onTAbs(
+          info: Info,
+          name: String,
+          cls: List[TypeClass],
+          body: List[Info],
+          depth: Int
+      ): List[Info] = body
+      def onTApp(
+          info: Info,
+          t: List[Info],
+          ty: Type,
+          depth: Int
+      ): List[Info] = t
+      def onLeaf(term: Term, depth: Int): List[Info] = Nil
+    }
+    fold[Id, List[Info]](algebra, term)
+  }
+
   /** Collect TermVars that refer to bindings outside the current term (idx >=
     * local binder depth). Pattern-bound and lambda-bound vars are excluded.
     *

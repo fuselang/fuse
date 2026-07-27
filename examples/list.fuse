@@ -12,9 +12,6 @@ impl List[A]:
             Cons(h, t) => List::fold_left(t, f(acc, h), f)
             Nil => acc
 
-    fun append[A](l1: List[A], l2: List[A]) -> List[A]
-        List::fold_right(l1, l2, (h, t) => Cons(h, t))
-
     fun sum(l: List[i32]) -> i32
         List::fold_right(l, 0, (acc, b) => acc + b)
 
