@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/fuselang/fuse/compare/v0.4.1...v0.4.2) (2026-07-29)
+
+
+### Bug Fixes
+
+* resolve run output path and propagate main's exit code ([#18](https://github.com/fuselang/fuse/issues/18)) ([ea29874](https://github.com/fuselang/fuse/commit/ea29874c9369ebda6e020b54aecf27c67b302b4a))
+
 ## [0.4.1](https://github.com/fuselang/fuse/compare/v0.4.0...v0.4.1) (2026-07-26)
 
 

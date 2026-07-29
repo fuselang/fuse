@@ -40,7 +40,7 @@ object Fuse
     extends CommandIOApp(
       name = "fuse",
       header = "Fuse is a tool for managing Fuse source code.",
-      version = "0.4.1" // x-release-please-version
+      version = "0.4.2" // x-release-please-version
     ) {
 
   // File extensions (public for test access). A built program is an
