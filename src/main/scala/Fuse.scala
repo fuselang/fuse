@@ -8,6 +8,7 @@ import com.monovore.decline.effect.CommandIOApp
 import core.Context.Error
 
 import java.io.{
+  ByteArrayOutputStream,
   File,
   FileInputStream,
   FileOutputStream,
@@ -42,10 +43,11 @@ object Fuse
       version = "0.4.1" // x-release-please-version
     ) {
 
-  // File extensions (public for test access)
+  // File extensions (public for test access). A built program is an
+  // extensionless executable named after its source, as `cc -o`/`rustc`
+  // produce; only the intermediate GRIN carries an extension of its own.
   val FuseFileExtension = "fuse"
   val FuseGrinExtension = "grin"
-  val FuseOutputExtension = "out"
 
   /** Paths for build artifacts derived from source file. */
   case class BuildPaths(
@@ -56,11 +58,11 @@ object Fuse
 
   object BuildPaths {
     def fromSource(sourcePath: String): BuildPaths = {
-      val base = sourcePath.stripSuffix(FuseFileExtension)
+      val base = sourcePath.stripSuffix(s".$FuseFileExtension")
       BuildPaths(
         source = Paths.get(sourcePath),
-        grin = Paths.get(base + FuseGrinExtension),
-        output = Paths.get(base + FuseOutputExtension)
+        grin = Paths.get(s"$base.$FuseGrinExtension"),
+        output = Paths.get(base)
       )
     }
   }
@@ -127,8 +129,13 @@ object Fuse
       }
 
   /** Shared compile-then-execute pipeline. Builds the Fuse source to a native
-    * binary, runs the binary via the supplied executor, and removes the `.grin`
-    * and `.out` intermediates regardless of executor outcome.
+    * binary, runs the binary via the supplied executor, and removes both the
+    * `.grin` intermediate and the binary regardless of executor outcome.
+    *
+    * The executor receives an absolute path: a source given without a directory
+    * component builds to a bare program name, which a spawned process resolves
+    * against `PATH` rather than the working directory, so the binary that was
+    * just built would not be found.
     */
   def runFile[A](
       file: String,
@@ -144,7 +151,7 @@ object Fuse
         cleanupIntermediateFiles(List(paths.grin))
       )
       result <- EitherT.right[BuildError](
-        executor(paths.output, args)
+        executor(paths.output.toAbsolutePath, args)
           .guarantee(cleanupIntermediateFiles(List(paths.output)))
       )
     } yield result
@@ -180,7 +187,11 @@ object Fuse
       paths: BuildPaths
   ): EitherT[IO, BuildError, Unit] =
     EitherT(
-      compileFile(command, paths.source.toFile, paths.grin.toFile).map {
+      compileFile(
+        command,
+        paths.source.toFile,
+        IO(new FileOutputStream(paths.grin.toFile))
+      ).map {
         case Some(error) => Left(FuseCompileError(error))
         case None        => Right(())
       }
@@ -216,32 +227,36 @@ object Fuse
       IO.blocking(Files.deleteIfExists(path)).void
     }
 
-  /** Type check command. */
-  def check(command: CheckFile): IO[ExitCode] = {
-    val program = new File(command.file)
-    val output = new File(
-      command.file.stripSuffix(FuseFileExtension) + FuseOutputExtension
-    )
-    compileFile(command, program, output).flatMap {
-      case Some(error) => IO.println(error).as(ExitCode.Error)
-      case None        => IO.pure(ExitCode.Success)
+  /** Type check command. The type representation goes to stdout so it can be
+    * read or piped; checking a file leaves no artifact behind.
+    */
+  def check(command: CheckFile): IO[ExitCode] =
+    IO(new ByteArrayOutputStream()).flatMap { representation =>
+      compileFile(command, new File(command.file), IO.pure(representation))
+        .flatMap {
+          case Some(error) => IO.println(error).as(ExitCode.Error)
+          case None        =>
+            new String(representation.toByteArray).trim match {
+              case ""    => IO.pure(ExitCode.Success)
+              case types => IO.println(types).as(ExitCode.Success)
+            }
+        }
     }
-  }
 
-  /** Compile a Fuse file using bracket for resource safety. */
+  /** Compile a Fuse file using bracket for resource safety. The destination is
+    * acquired rather than passed open, so a source that fails validation leaves
+    * no half-created output behind.
+    */
   def compileFile(
       command: Command,
       origin: File,
-      destination: File
+      destination: IO[OutputStream]
   ): IO[Option[Error]] =
     validateSourceFile(origin).flatMap {
       case Some(error) => IO.pure(Some(error))
       case None        =>
         val acquireStreams: IO[(InputStream, OutputStream)] =
-          (
-            IO(new FileInputStream(origin)),
-            IO(new FileOutputStream(destination))
-          ).tupled
+          (IO(new FileInputStream(origin)), destination).tupled
         val releaseStreams: ((InputStream, OutputStream)) => IO[Unit] = {
           case (in, out) =>
             (IO(in.close()), IO(out.close())).tupled
@@ -264,27 +279,43 @@ object Fuse
           }
     }
 
-  /** Validate that a source file exists, is a regular file, and is readable. */
+  /** Validate that a source file exists, is a regular file, is readable, and
+    * carries the `.fuse` extension — the built executable is the source name
+    * with that extension removed, so a source without it would be overwritten
+    * by its own build output.
+    */
   def validateSourceFile(file: File): IO[Option[Error]] = IO {
-    (file.exists, file.isFile, file.canRead) match {
-      case (false, _, _) =>
+    (
+      file.exists,
+      file.isFile,
+      file.canRead,
+      file.getName.endsWith(s".$FuseFileExtension")
+    ) match {
+      case (false, _, _, _) =>
         Some(
           Utils.consoleError(
             s"file not found: ${file.getPath}",
             UnknownInfo
           )
         )
-      case (_, false, _) =>
+      case (_, false, _, _) =>
         Some(
           Utils.consoleError(
             s"not a file: ${file.getPath}",
             UnknownInfo
           )
         )
-      case (_, _, false) =>
+      case (_, _, false, _) =>
         Some(
           Utils.consoleError(
             s"file not readable: ${file.getPath}",
+            UnknownInfo
+          )
+        )
+      case (_, _, _, false) =>
+        Some(
+          Utils.consoleError(
+            s"not a .$FuseFileExtension source file: ${file.getPath}",
             UnknownInfo
           )
         )

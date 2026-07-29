@@ -20,6 +20,7 @@ import core.TypeChecker.*
 import core.Types.*
 import code.GrinUtils.{toContextState, toContextStateOption, getNameFromType}
 import code.MonoTypes.*
+import fuse.SpecializedMethodUtils
 import parser.Info.Info
 import parser.Info.UnknownInfo
 
@@ -703,8 +704,15 @@ object MonoSpecialize {
         )
       case false => List()
     }
-    finalInsts = (selfInstantiation ::: dedupedInsts)
-      .distinctBy(inst => (inst.i, inst.tys, inst.term))
+    selfMethodInstantiations = selfMethodProjInsts(
+      binding,
+      originalBindName,
+      instTys,
+      dedupedInsts
+    )
+    finalInsts =
+      (selfInstantiation ::: selfMethodInstantiations ::: dedupedInsts)
+        .distinctBy(inst => (inst.i, inst.tys, inst.term))
     closureTypesMap = specializedClosureInsts
       .flatMap(cInst => cInst.tys.headOption.map(ty => cInst.i -> ty))
       .toMap
@@ -774,6 +782,71 @@ object MonoSpecialize {
     case TermAbbBind(term, _) => TermFold.containsAssocProj(term, methodName)
     case _                    => false
   }
+
+  /** A method that recurses on a receiver gets no instantiation out of type
+    * checking: the self-call sits at the method's own type parameter, so
+    * `Instantiations.build` has no type solution to record and its
+    * `tys.nonEmpty` guard skips the site. Left alone, the specialized body
+    * keeps calling the generic method name while the definition is emitted
+    * under the type-suffixed one, and the backend emits a call to a function
+    * that was never defined.
+    *
+    * One inst per call site, carrying that site's own position, so
+    * `MonoRewrite.replaceInstantiations` renames exactly that node. Sites
+    * already covered by a real inst — a call on some other receiver that
+    * happens to share the method name — are left to it.
+    *
+    * The two other self-call shapes are covered elsewhere: qualified calls by
+    * `containsAssocProjInBinding` above, bare-name calls in top-level `fun`
+    * bodies by `renameSelfRecursiveBinding`.
+    */
+  def selfMethodProjInsts(
+      binding: Binding,
+      originalBindName: String,
+      instTys: List[Type],
+      covered: List[Instantiation]
+  ): List[Instantiation] = binding match {
+    case TermAbbBind(term, _) =>
+      val methodName =
+        SpecializedMethodUtils.extractBaseMethodName(originalBindName)
+      // Insts that already target this same method do not count as coverage:
+      // they are the self-call, recorded against a name that no longer leads
+      // anywhere concrete. Only a call resolved to some *other* bind is left
+      // to its own inst.
+      val selfTargets =
+        Set(originalBindName) ++ abstractTraitMethodName(originalBindName)
+      val coveredInfos = covered.collect {
+        case Instantiation(i, proj: TermMethodProj, _, _, _)
+            if !selfTargets.contains(i) =>
+          proj.info
+      }.toSet
+      TermFold
+        .collectMethodProjInfos(term, methodName)
+        .distinct
+        .filterNot(coveredInfos.contains)
+        .map(info =>
+          Instantiation(
+            originalBindName,
+            TermMethodProj(info, TermUnit(info), methodName),
+            instTys,
+            List(),
+            Resolution.Resolved(0)
+          )
+        )
+    case _ => List()
+  }
+
+  /** The abstract trait method a trait-instance method implements: `!m#C` for a
+    * bind named `!m#T#C`. A self-call inside such a bind is recorded against
+    * this name whenever the receiver is still the instance's type parameter,
+    * because that is all type checking can see at the call site.
+    */
+  def abstractTraitMethodName(bindName: String): Option[String] =
+    bindName match {
+      case Desugar.TypeInstanceMethodPattern(method, _, cls) =>
+        Some(s"$MethodNamePrefix$method$BindTypeSeparator$cls")
+      case _ => None
+    }
 
   /** Separate instantiation categories and compute De Bruijn index mapping for
     * regular type parameters.

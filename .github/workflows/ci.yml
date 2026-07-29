@@ -15,7 +15,7 @@ env:
   # Toolchain release used to run the test suite. Pinned rather than tracking
   # `latest` so a failed release (which publishes an asset-less tag) cannot
   # turn every PR red. Bump after a release publishes its artifacts.
-  FUSE_TOOLCHAIN_VERSION: v0.3.4
+  FUSE_TOOLCHAIN_VERSION: v0.4.1
 
 jobs:
   format:

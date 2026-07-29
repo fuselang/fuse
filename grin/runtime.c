@@ -11,6 +11,10 @@ extern int64_t _heap_ptr_;
 int g_argc = 0;
 char** g_argv = NULL;
 
+/* Compiled Fuse programs guarantee `grinMain` yields the process exit code as
+   a T_Int64: `main() -> i32` returns its own value, every other `main` return
+   type is wrapped by the code generator so the result is discarded and 0 is
+   returned in its place. */
 int64_t grinMain();
 
 void __runtime_error(int64_t c){
@@ -28,11 +32,11 @@ int main(int argc, char** argv) {
   _heap_ptr_ = (int64_t)heap;
 #endif
 
-  grinMain();
+  int64_t exit_code = grinMain();
 
 #ifndef USE_BOEHM_GC
   free(heap);
 #endif
 
-  return 0;
+  return (int)exit_code;
 }

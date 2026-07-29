@@ -20,6 +20,8 @@ import fuse.SpecializedMethodUtils
 
 object Grin {
   val MainFunction = "grinMain"
+  // Holds a `main` whose result is not an exit code; see `withExitCodeEntry`.
+  val WrappedMainFunction = "_fuse_main"
 
   /** Checks if a De Bruijn-indexed variable is referenced in a term. Used to
     * detect dead let-bindings for unused closures.
@@ -108,7 +110,8 @@ object Grin {
       (lambdaBindings, partialFunctions) = values.flatten.unzip
       applyFunction <- buildApply(partialFunctions.flatten)
     } yield {
-      val raw = (lambdaBindings.flatten.map(_.show) :+ applyFunction)
+      val entry = withExitCodeEntry(lambdaBindings.flatten, bindings)
+      val raw = (entry.map(_.show) :+ applyFunction)
         .mkString("\n\n")
         .replaceAll(
           "([a-zA-Z0-9])#",
@@ -123,6 +126,66 @@ object Grin {
     }
     s.runEmptyA.value
   }
+
+  /** The C runtime uses `grinMain`'s result as the process exit status, so the
+    * entry point has to yield a `T_Int64`. A `main() -> i32` already does and
+    * is emitted untouched — its value becomes the exit code.
+    *
+    * Every other `main` return type would hand the runtime whatever
+    * representation it happens to have — a heap pointer, a float, or, for unit,
+    * no value at all. Those are compiled under `WrappedMainFunction` and called
+    * from a generated `grinMain` that binds the result — keeping the call, and
+    * with it the program's effects, alive through GRIN's dead-code passes — and
+    * returns 0 in its place.
+    */
+  def withExitCodeEntry(
+      lambdaBindings: List[LambdaBinding],
+      bindings: List[Bind]
+  ): List[LambdaBinding] =
+    (
+      mainReturnsExitCode(bindings),
+      lambdaBindings.exists(_.name == MainFunction)
+    ) match {
+      case (false, true) =>
+        lambdaBindings.map {
+          case LambdaBinding(MainFunction, e) =>
+            LambdaBinding(WrappedMainFunction, e)
+          case b => b
+        } :+ exitCodeEntry
+      case _ => lambdaBindings
+    }
+
+  /** True when `main` returns `i32`, the one Fuse type whose GRIN
+    * representation is the bare `T_Int64` the runtime can exit with.
+    */
+  def mainReturnsExitCode(bindings: List[Bind]): Boolean =
+    bindings.find(_.i == TypeChecker.MainFunction).map(_.b) match {
+      case Some(TermAbbBind(_, Some(TypeArrow(_, _, _: TypeInt))))     => true
+      case Some(TermAbbBind(TermAbs(_, _, _, _, Some(_: TypeInt)), _)) => true
+      case _                                                           => false
+    }
+
+  /** `grinMain` for a `main` that does not itself produce an exit code. The
+    * unit argument mirrors the one the code generator gives every nullary Fuse
+    * function.
+    */
+  def exitCodeEntry: LambdaBinding =
+    LambdaBinding(
+      MainFunction,
+      Abs(
+        s"${WrappedMainFunction}_arg",
+        MultiLineExpr(
+          List(
+            BindExpr(
+              s"${WrappedMainFunction}_res <- $WrappedMainFunction 0",
+              s"${WrappedMainFunction}_res",
+              Nil
+            )
+          ),
+          Value("0")
+        )
+      )
+    )
 
   // Strips `[` and `]` from TypeApp identifier names without touching the
   // bytes inside GRIN string literals of the form `#"..."`. The unguarded
