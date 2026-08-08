@@ -32,7 +32,9 @@ object Grin {
     case TermClosure(_, _, _, body) => isVarUsed(idx + 1, body)
     case TermAbs(_, _, _, body, _)  => isVarUsed(idx + 1, body)
     case TermLet(_, _, t1, t2)  => isVarUsed(idx, t1) || isVarUsed(idx + 1, t2)
-    case TermFix(_, t)          => isVarUsed(idx + 1, t)
+    // TermFix binds no context slot of its own (matching `Shifting.termMap`);
+    // the `^`-binder closure/abs inside it carries the slot.
+    case TermFix(_, t)          => isVarUsed(idx, t)
     case TermMatch(_, t, cases) =>
       isVarUsed(idx, t) || cases.exists { case (_, body) =>
         isVarUsed(idx, body)

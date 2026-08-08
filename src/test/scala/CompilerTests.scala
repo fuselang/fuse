@@ -2139,6 +2139,21 @@ fun main() -> i32
     """)
   }
 
+  test("check partial application of generic function") {
+    // Also builds and executes — see "build/execute partial application of
+    // generic function" (instantiation tail-padding completes the type
+    // args when the partial is applied later in the same bind).
+    fuse("""
+fun first[A, B](x: A, y: B) -> A
+    x
+
+fun main() -> i32
+    let f = first(7)
+    _print(int_to_str(f(3)))
+    0
+    """)
+  }
+
 }
 
 class CompilerBuildTests extends CompilerTests {
@@ -4357,6 +4372,126 @@ grinMain _8 =
     )
   }
 
+  test("build partial application of generic function") {
+    fuse(
+      """
+fun first[A, B](x: A, y: B) -> A
+  x
+
+fun main() -> i32
+  let f = first(7)
+  _print(int_to_str(f(3)))
+  0
+      """,
+      BuildOutput("""first'i32'i32 x0 y1 =
+ pure x0
+
+grinMain _2 =
+ p16 <- f4 3
+ p17 <- _prim_int_str p16
+ _18 <-  _prim_string_print p17
+ pure 0
+
+f4 eta04 =
+ first'i32'i32 7 eta04
+""")
+    )
+  }
+
+  test("build partial application of named function") {
+    fuse(
+      """
+fun sum(x: i32, y: i32) -> i32
+  x + y
+
+fun main() -> i32
+  let inc = sum(5)
+  _print(int_to_str(inc(3)))
+  0
+      """,
+      BuildOutput("""sum x0 y1 =
+ _prim_int_add x0 y1
+
+grinMain _2 =
+ p16 <- inc4 3
+ p17 <- _prim_int_str p16
+ _18 <-  _prim_string_print p17
+ pure 0
+
+inc4 eta04 =
+ sum 5 eta04
+""")
+    )
+  }
+
+  test("build partial application passed to function") {
+    fuse(
+      """
+fun sum(x: i32, y: i32) -> i32
+  x + y
+
+fun apply_fn(f: i32 -> i32, v: i32) -> i32
+  f(v)
+
+fun main() -> i32
+  _print(int_to_str(apply_fn(sum(5), 3)))
+  0
+      """,
+      BuildOutput("""sum x0 y1 =
+ _prim_int_add x0 y1
+
+apply_fn f''2 v3 =
+ apply1_i32_to_i32 f''2 v3
+
+grinMain _4 =
+ p11 <- pure (P1c6 )
+ p12 <- apply_fn p11 3
+ p13 <- _prim_int_str p12
+ _16 <-  _prim_string_print p13
+ pure 0
+
+c6 eta06 =
+ sum 5 eta06
+
+apply1_i32_to_i32 p18 p19 =
+ case p18 of
+  (P1c6) ->
+   c6 p19
+""")
+    )
+  }
+
+  test("build chained partial application of three param function") {
+    fuse(
+      """
+fun add3(x: i32, y: i32, z: i32) -> i32
+  x + y + z
+
+fun main() -> i32
+  let f = add3(1)
+  let g = f(2)
+  _print(int_to_str(g(3)))
+  0
+      """,
+      BuildOutput("""add3 x0 y1 z2 =
+ p4 <- _prim_int_add x0 y1
+ _prim_int_add p4 z2
+
+grinMain _4 =
+ p35 <- g23 3
+ p36 <- _prim_int_str p35
+ _37 <-  _prim_string_print p36
+ pure 0
+
+f6 eta06 eta17 =
+ add3 1 eta06 eta17
+
+g23 eta023 =
+ f6 2 eta023
+""")
+    )
+  }
+
   test("build io do notation with heterogeneous continuation param types") {
     // Regression: the sequenced effect expression produces two
     // continuations with the same return type but different parameter
@@ -6052,6 +6187,223 @@ fun main() -> i32
     0
         """,
       ExecutableOutput("6")
+    )
+  }
+
+  test("execute partial application of named function") {
+    fuse(
+      """
+fun sum(x: i32, y: i32) -> i32
+    x + y
+
+fun main() -> i32
+    let inc = sum(5)
+    _print(int_to_str(inc(3)))
+    0
+        """,
+      ExecutableOutput("8")
+    )
+  }
+
+  test("execute partial application with captured variable") {
+    fuse(
+      """
+fun sum(x: i32, y: i32) -> i32
+    x + y
+
+fun main() -> i32
+    let a = 5
+    let inc = sum(a)
+    _print(int_to_str(inc(3)))
+    0
+        """,
+      ExecutableOutput("8")
+    )
+  }
+
+  test("execute partial application passed to function") {
+    fuse(
+      """
+fun sum(x: i32, y: i32) -> i32
+    x + y
+
+fun apply_fn(f: i32 -> i32, v: i32) -> i32
+    f(v)
+
+fun main() -> i32
+    _print(int_to_str(apply_fn(sum(5), 3)))
+    0
+        """,
+      ExecutableOutput("8")
+    )
+  }
+
+  test("execute chained partial application") {
+    fuse(
+      """
+fun add3(x: i32, y: i32, z: i32) -> i32
+    x + y + z
+
+fun main() -> i32
+    let f = add3(1)
+    let g = f(2)
+    _print(int_to_str(g(3)))
+    0
+        """,
+      ExecutableOutput("6")
+    )
+  }
+
+  test("execute partial application saturating in one call") {
+    fuse(
+      """
+fun add3(x: i32, y: i32, z: i32) -> i32
+    x + y + z
+
+fun main() -> i32
+    let f = add3(1)
+    _print(int_to_str(f(2, 3)))
+    0
+        """,
+      ExecutableOutput("6")
+    )
+  }
+
+  test("execute partial application of local lambda") {
+    fuse(
+      """
+fun main() -> i32
+    let f = (x: i32, y: i32) => x + y
+    let inc = f(5)
+    _print(int_to_str(inc(3)))
+    0
+        """,
+      ExecutableOutput("8")
+    )
+  }
+
+  test("execute partial application of generic function") {
+    fuse(
+      """
+fun first[A, B](x: A, y: B) -> A
+    x
+
+fun main() -> i32
+    let f = first(7)
+    _print(int_to_str(f(3)))
+    0
+        """,
+      ExecutableOutput("7")
+    )
+  }
+
+  test("execute chained partial application of generic function") {
+    fuse(
+      """
+fun pick3[A, B, C](x: A, y: B, z: C) -> A
+    x
+
+fun main() -> i32
+    let f = pick3(1)
+    let g = f(2)
+    _print(int_to_str(g(3)))
+    0
+        """,
+      ExecutableOutput("1")
+    )
+  }
+
+  test("execute generic partial application passed to function") {
+    fuse(
+      """
+fun first[A, B](x: A, y: B) -> A
+    x
+
+fun apply_fn(f: i32 -> i32, v: i32) -> i32
+    f(v)
+
+fun main() -> i32
+    _print(int_to_str(apply_fn(first(5), 3)))
+    0
+        """,
+      ExecutableOutput("5")
+    )
+  }
+
+  test("execute generic partial application saturating in one spine") {
+    fuse(
+      """
+fun first[A, B](x: A, y: B) -> A
+    x
+
+fun main() -> i32
+    _print(int_to_str(first(7)(3)))
+    0
+        """,
+      ExecutableOutput("7")
+    )
+  }
+
+  test("execute partial application of trait bounded generic function") {
+    // Both a partial and a saturated call in one program: the two
+    // collection paths must converge on the same specialized bind
+    // (cls-flow / name-parity check).
+    fuse(
+      """
+fun addup[T: Add](x: T, y: T) -> T
+    x + y
+
+fun main() -> i32
+    let f = addup(5)
+    _print(int_to_str(f(3) + addup(1, 2)))
+    0
+        """,
+      ExecutableOutput("11")
+    )
+  }
+
+  test("execute generic partial application completed with adt argument") {
+    fuse(
+      """
+type List[A]:
+    Cons(h: A, t: List[A])
+    Nil
+
+fun second[A, B](x: A, y: B) -> B
+    y
+
+fun main() -> i32
+    let f = second(1)
+    let l = f(Cons(2, Nil[i32]))
+    match l:
+        Cons(h, t) => {
+            _print(int_to_str(h))
+            0
+        }
+        Nil => 1
+        """,
+      ExecutableOutput("2")
+    )
+  }
+
+  test("execute partial application with effectful argument once") {
+    fuse(
+      """
+fun effect(v: i32) -> i32
+    _print("effect")
+    v
+
+fun sum(x: i32, y: i32) -> i32
+    x + y
+
+fun main() -> i32
+    let inc = sum(effect(5))
+    let r1 = inc(3)
+    let r2 = inc(4)
+    _print(int_to_str(r1 + r2))
+    0
+        """,
+      ExecutableOutput("effect17")
     )
   }
 
