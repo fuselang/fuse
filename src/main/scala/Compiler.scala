@@ -2,6 +2,7 @@ package fuse
 
 import cats.effect.IO
 import cats.implicits.*
+import code.EtaExpansion
 import code.Grin
 import core.Bindings.*
 import core.Context.*
@@ -216,7 +217,9 @@ object Compiler {
     bindings <- TypeChecker.run(b2)
     out <- command match {
       case BuildFile(_, _) =>
-        Right(Grin.generate(Monomorphization.replace(bindings)))
+        Right(
+          Grin.generate(EtaExpansion.run(Monomorphization.replace(bindings)))
+        )
       case CheckFile(_, _) =>
         Representation.typeRepresentation(bindings).map(_.mkString("\n"))
     }

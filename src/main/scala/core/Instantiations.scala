@@ -145,7 +145,8 @@ object Instantiations {
   def build(
       t: Term,
       solutions: List[TypeESolutionBind],
-      acc: List[Instantiation]
+      acc: List[Instantiation],
+      peeled: List[TypeEVar] = List()
   ): StateEither[List[Instantiation]] = {
     val tys = solutions.map(_.t)
     val cls = solutions.map(_.cls).flatten
@@ -353,7 +354,16 @@ object Instantiations {
           // inst from `discoverItems` because the stale TypeVar fails
           // `isTypeFullyResolved`.
           resolvedTys <- tys.traverse(resolveTypeConstructorsInType(_))
-          fInsts <- acc.filterA(_.isTypeResolved().map(_ == false))
+          // A padded inst (under-applied generic head) is full-length but
+          // carries EVar placeholders in its tail; the outer application
+          // layer must still complete it eagerly with concrete solutions —
+          // an EVar solved inside a checked closure does not survive the
+          // closure's `peel`, so boundary `applyInst` cannot be relied on
+          // there.
+          fInsts <- acc.filterA(i =>
+            i.isTypeResolved()
+              .map(resolved => !resolved || hasEVarPlaceholder(i.tys))
+          )
           r = fInsts.find(_.term == rootTerm) match {
             case Some(existing) =>
               // Don't accumulate types onto TermAssocProj instantiations -
@@ -363,7 +373,14 @@ object Instantiations {
                 case _                =>
                   acc.map {
                     case i if i.term == rootTerm && isFormedSolution =>
-                      Instantiation(i.i, i.term, i.tys ::: resolvedTys, i.cls)
+                      val (filledTys, harvestedCls) =
+                        fillEVarSlots(i.tys, resolvedTys)
+                      Instantiation(
+                        i.i,
+                        i.term,
+                        filledTys,
+                        i.cls ::: harvestedCls
+                      )
                     case e => e
                   }
               }
@@ -412,6 +429,31 @@ object Instantiations {
             solutions,
             arity
           )
+          // Under-applied generic head: fewer solutions than quantifiers.
+          // Pad the tail with the EVars `inferApp` peeled for the missing
+          // quantifiers (outermost first) — later applications of the
+          // partial result solve those same EVars in place, and the
+          // `applyInst` boundary substitution completes the inst. The
+          // `peeled.length == arity` latch falls back to today's behavior
+          // when the peel list doesn't correspond to this head; data
+          // constructors keep the DeferredDataConstr flow untouched.
+          // Padding is a definitional no-op for saturated calls.
+          // Placeholders are cls-stripped copies (EVar identity is by name,
+          // so in-place solutions still resolve): only solution-derived
+          // EVar slots harvest their `cls` (the `!name#tys#Cls` mangling),
+          // matching what the saturated path produces for the same call.
+          paddedTys = (
+            arityLimitedTys.length < arity &&
+              peeled.length == arity &&
+              !isDataConstructor &&
+              !name.startsWith(Desugar.RecordConstrPrefix)
+          ) match {
+            case true =>
+              arityLimitedTys ::: peeled
+                .drop(arityLimitedTys.length)
+                .map(ev => TypeEVar(ev.info, ev.name, List()))
+            case false => arityLimitedTys
+          }
           result <- (
             isClosureParam,
             isAllPureTypeVars(arityLimitedTys) && isDataConstructor
@@ -428,12 +470,42 @@ object Instantiations {
                 Resolution.DeferredDataConstr
               )).pure[StateEither]
             case _ =>
-              (acc :+ Instantiation(name, termVar, arityLimitedTys, cls))
+              (acc :+ Instantiation(name, termVar, paddedTys, cls))
                 .pure[StateEither]
           }
         } yield result
       case _ => acc.pure[StateEither]
     }
+  }
+
+  /** True when the collected type list still contains a padded, unsolved
+    * EVar placeholder (top-level — padding only ever adds bare EVars). */
+  def hasEVarPlaceholder(tys: List[Type]): Boolean =
+    tys.exists {
+      case _: TypeEVar => true
+      case _           => false
+    }
+
+  /** Fill EVar placeholders with the outer application layer's solutions,
+    * left to right, appending any leftover solutions — which reduces to the
+    * pre-padding accumulation behavior (`existing ::: incoming`) when no
+    * placeholders are present. Also harvests the replaced EVars' type
+    * classes: on the non-fill path `applyInst`/`applyC` collects an EVar's
+    * `cls` when substituting its solution (e.g. `Add` for `!+#i32#Add`);
+    * filling the slot with a concrete type here would silently lose it. */
+  def fillEVarSlots(
+      existing: List[Type],
+      incoming: List[Type]
+  ): (List[Type], List[TypeClass]) = {
+    val (filled, rest, harvested) = existing.foldLeft(
+      (List.empty[Type], incoming, List.empty[TypeClass])
+    ) { case ((done, inc, cls), t) =>
+      (t, inc) match {
+        case (ev: TypeEVar, next :: more) => (done :+ next, more, cls ::: ev.cls)
+        case _                            => (done :+ t, inc, cls)
+      }
+    }
+    (filled ::: rest, harvested)
   }
 
   /** Drop closure-prepended solutions from `resolvedTys` so the collected type

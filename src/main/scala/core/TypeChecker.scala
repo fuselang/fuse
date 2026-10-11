@@ -270,8 +270,13 @@ object TypeChecker {
         for {
           (funType, insts) <- infer(fun)
           simplifiedFun <- EitherT.liftF(simplifyType(funType))
-          (ty, (appInsts, solutions)) <- inferApp(simplifiedFun, arg)
-          buildInsts <- Instantiations.build(fun, solutions, insts ::: appInsts)
+          (ty, (appInsts, solutions, peeled)) <- inferApp(simplifiedFun, arg)
+          buildInsts <- Instantiations.build(
+            fun,
+            solutions,
+            insts ::: appInsts,
+            peeled
+          )
         } yield (ty, buildInsts)
       case TermProj(info, ty, label) =>
         for {
@@ -537,30 +542,42 @@ object TypeChecker {
     *   the inferred type with solutions for existential types on the fun type
     *   and the output context
     */
+  /** Infers the application of one argument `exp` to a function of type
+    * `funType`. Besides the collected instantiations and solutions, returns
+    * the existential vars minted for every peeled `TypeAll` quantifier
+    * (outermost first). An under-applied generic call produces fewer
+    * solutions than quantifiers; `Instantiations.build` pads the collected
+    * type list with these peeled EVars so the instantiation stays
+    * completable in place by later applications of the partial result.
+    */
   def inferApp(
       funType: Type,
       exp: Term
-  ): StateEither[(Type, (List[Instantiation], List[TypeESolutionBind]))] =
+  ): StateEither[
+    (Type, (List[Instantiation], List[TypeESolutionBind], List[TypeEVar]))
+  ] =
     def iter(
         funType: Type,
         exp: Term,
         acc: (List[Instantiation], List[TypeESolutionBind])
-    ): StateEither[(Type, (List[Instantiation], List[TypeESolutionBind]))] =
+    ): StateEither[
+      (Type, (List[Instantiation], List[TypeESolutionBind], List[TypeEVar]))
+    ] =
       funType match {
         case TypeAll(info, _, _, cls, tpe) =>
           for {
             eV <- EitherT.liftF(addEVar("a", exp.info, TypeEFreeBind, cls))
             reduced = typeSubstituteTop(eV, tpe)
-            (ty, (insts, solutions)) <- iter(reduced, exp, acc)
-          } yield (ty, (acc._1 ::: insts, acc._2 ::: solutions))
+            (ty, (insts, solutions, peeled)) <- iter(reduced, exp, acc)
+          } yield (ty, (acc._1 ::: insts, acc._2 ::: solutions, eV :: peeled))
         case eA: TypeEVar =>
           for {
             (a1, a2, s1) <- insertEArrow(eA)
             (insts, solutions) <- check(exp, a1)
-          } yield (a2, (acc._1 ::: insts, acc._2 ::: (s1 :: solutions)))
+          } yield (a2, (acc._1 ::: insts, acc._2 ::: (s1 :: solutions), List()))
         case TypeArrow(_, argT, restT) =>
           check(exp, argT).map { case (insts, solutions) =>
-            (restT, (acc._1 ::: insts, acc._2 ::: solutions))
+            (restT, (acc._1 ::: insts, acc._2 ::: solutions, List()))
           }
         case _ =>
           TypeError.format(VariableNotFunctionTypeError(exp.info, funType))
